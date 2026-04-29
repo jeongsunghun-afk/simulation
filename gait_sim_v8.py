@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
+from scipy.optimize import minimize as _sp_minimize
 
 for key in mpl.rcParams:
     if key.startswith("keymap."):
@@ -250,6 +251,34 @@ def analytical_ik_hind(Px, Py, Pz, phi, dh, theta5_target=None):
     def wrap(a):
         return (a + math.pi) % (2 * math.pi) - math.pi
     return [wrap(theta1), wrap(theta2), wrap(theta3), wrap(theta4)]
+
+
+def opt_ik_front(p_target_dh, q_init):
+    """SLSQP 최적화 IK — 앞다리 swing 전용.
+
+    등식 제약: FK_tip(q) = p_target  (위치 정확도 보장)
+    비용:      LAMBDA_Q_OPT · ||q - q_home||²  (home 근접 정규화)
+    warm-start: q_init (이전 프레임 q)
+    반환: (q_list, nit) 또는 수렴 실패 시 (None, nit)
+    """
+    p_t = np.asarray(p_target_dh, dtype=float)
+    q0  = np.asarray(q_init,      dtype=float)
+    q_h = np.asarray(Q_HOME_FRONT, dtype=float)
+
+    constraints = {'type': 'eq',
+                   'fun': lambda q: np.array(forward_kinematics(q, DH_FRONT)[-1]) - p_t}
+
+    def cost(q):
+        return float(LAMBDA_Q_OPT * np.dot(q - q_h, q - q_h))
+
+    res = _sp_minimize(cost, q0, method='SLSQP', bounds=FRONT_Q_LIM,
+                       constraints=constraints,
+                       options={'ftol': 1e-8, 'maxiter': OPT_IK_MAXITER})
+    tip_final = np.array(forward_kinematics(res.x, DH_FRONT)[-1])
+    pos_err_sq = float(np.dot(tip_final - p_t, tip_final - p_t))
+    if pos_err_sq < 1e-6:   # 위치 오차 < 1mm
+        return list(res.x), res.nit
+    return None, res.nit
 
 
 def compute_jacobian_sim(thetas, dh, front_leg):
@@ -695,8 +724,30 @@ phase_hist = np.zeros((N_FRAMES, 4))
 swing_flag = np.zeros((N_FRAMES, 4), dtype=bool)
 frame_calc_time = np.zeros(N_FRAMES, dtype=float)
 
-JOINT_VEL_LIMIT_RAD_S = np.array([14.66, 15.91, 15.91, 14.66, 14.66], dtype=float)
+JOINT_VEL_LIMIT_RAD_S   = np.array([14.66, 15.91, 15.91, 14.66, 14.66], dtype=float)
+JOINT_TORQUE_LIMIT      = np.array([60.0, 120.0, 120.0, 60.0, 60.0])   # [N·m]
 VEL_LIMIT_MARGIN  = 999
+
+# ── Phase 4: Optimization-based IK 파라미터 ──────────────────
+LAMBDA_Q_OPT   = 0.01   # 관절 home 위치 정규화 가중치
+OPT_IK_MAXITER = 100
+
+# 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
+FRONT_Q_LIM = [
+    (-math.radians(45),  math.radians(45)),   # th1: 어깨 벌림
+    ( math.radians(45),  math.radians(210)),  # th2: 어깨 굴곡 (swing 고각 여유)
+    (-math.radians(45),  math.radians(135)),  # th3: 팔꿈치
+    (-math.radians(120), math.radians(120)),  # th4: 손목
+    (-math.radians(90),  math.radians(120)),  # th5: 발끝
+]
+# 뒷다리 관절 위치 한계 [rad]  — home: [0, -150, -90, 90, 60] deg
+HIND_Q_LIM = [
+    (-math.radians(45),  math.radians(45)),   # th1: 고관절 벌림
+    (-math.radians(180), -math.radians(60)),  # th2: 고관절 굴곡
+    (-math.radians(120),  math.radians(30)),  # th3: 무릎
+    (-math.radians(30),   math.radians(150)), # th4: 발목
+    (-math.radians(90),   math.radians(120)), # th5: 발끝
+]
 MAX_TRAJ_OPT_ITERS = 6
 
 print("─" * 55)
@@ -707,12 +758,15 @@ print(f"  STRIDE_D={STRIDE_D*1e3:.1f}mm  STEP_LENGTH={STEP_LENGTH*1e3:.1f}mm")
 traj_scale   = 1.0
 height_scale = 1.0
 opt_iter_used = 0
+opt_ik_nit_hist      = np.zeros((N_FRAMES, 2), dtype=int)   # [FR, FL] 수렴 반복 횟수
+opt_ik_fallback_hist = np.zeros((N_FRAMES, 2), dtype=bool)  # True = analytical fallback 사용
 
 for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     opt_iter_used = opt_iter
     joint_hist.fill(0.0); foot_hist.fill(0.0)
     phase_hist.fill(0.0); swing_flag.fill(False)
     frame_calc_time.fill(0.0)
+    opt_ik_nit_hist.fill(0); opt_ik_fallback_hist.fill(False)
 
     _step_vec = np.array([STEP_LENGTH * traj_scale, 0.0, 0.0])
     foot_contact    = [
@@ -760,10 +814,27 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
             if leg < 2:
                 foot_ik_sim = foot_loc + _FRONT_J4_TO_J5_SIM
                 foot_dh = _sim_to_dh(foot_ik_sim, front_leg=True)
-                q = analytical_ik_front(foot_dh[0], foot_dh[1], foot_dh[2],
-                                        PHI_FRONT, THETA5_FRONT)
-                if q is None:
-                    q = list(Q_HOME_FRONT)
+                col = leg  # 0=FR, 1=FL
+
+                if is_sw:
+                    # Phase 4: swing → optimization IK (warm-start = 이전 프레임 q)
+                    q_opt, nit = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5])
+                    opt_ik_nit_hist[fi, col] = nit
+                    if q_opt is not None:
+                        q = q_opt
+                    else:
+                        # bounds 내 해 없음 → analytical fallback
+                        opt_ik_fallback_hist[fi, col] = True
+                        q_ana = analytical_ik_front(foot_dh[0], foot_dh[1], foot_dh[2],
+                                                    PHI_FRONT, THETA5_FRONT)
+                        q = q_ana if q_ana is not None else list(Q_HOME_FRONT)
+                else:
+                    # stance → analytical IK 유지
+                    q = analytical_ik_front(foot_dh[0], foot_dh[1], foot_dh[2],
+                                            PHI_FRONT, THETA5_FRONT)
+                    if q is None:
+                        q = list(Q_HOME_FRONT)
+
                 pq = prev_q_per_leg[leg]
                 for j in range(len(q)):
                     best = q[j]
@@ -812,6 +883,12 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     height_scale *= scale_decay
 
 print(f"궤적 완료. iter={opt_iter_used}  scale={traj_scale:.4f}")
+_fb_fr = int(np.sum(opt_ik_fallback_hist[:, 0]))
+_fb_fl = int(np.sum(opt_ik_fallback_hist[:, 1]))
+_sw_fr = int(np.sum(swing_flag[:, 0]))
+_sw_fl = int(np.sum(swing_flag[:, 1]))
+print(f"  Opt-IK  FR: nit_avg={opt_ik_nit_hist[swing_flag[:,0], 0].mean():.1f}  fallback={_fb_fr}/{_sw_fr}프레임")
+print(f"  Opt-IK  FL: nit_avg={opt_ik_nit_hist[swing_flag[:,1], 1].mean():.1f}  fallback={_fb_fl}/{_sw_fl}프레임")
 
 joint_vel_FR = joint_vel_hist[:, 0, :]
 joint_acc_FR = np.zeros_like(joint_vel_FR)
