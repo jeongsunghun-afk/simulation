@@ -1080,6 +1080,7 @@ for fi in range(N_FRAMES):
         tau_pd_leg  = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
         tau_grf_leg = J.T @ lam_des_leg  # [MOD] GRF로부터 유도되는 토크
         tau_cmd_leg = tau_pd_leg + tau_ff_leg + tau_imp_leg
+        tau_cmd_leg = np.clip(tau_cmd_leg, -JOINT_TORQUE_LIMIT[:nj], JOINT_TORQUE_LIMIT[:nj])  # 토크 클리핑
 
         JJT          = J @ J.T + MU_DAMP * np.eye(3)
         lam_calc_leg = np.linalg.solve(JJT, J @ (tau_g - tau_cmd_leg))
