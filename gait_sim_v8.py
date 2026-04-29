@@ -919,6 +919,22 @@ for _col, _leg, _sw_mask, _fb in [
           f"pos_err(max={_perr_mm_max:.3f}mm mean={_perr_mm_mean:.3f}mm)  "
           f"bound_viol={_viol}프레임  home_dev_avg={_home_dev:.4f}rad")
 
+    # ── 경고 ──────────────────────────────────────────────────
+    if _fb > 0:
+        _fb_rate = _fb / _sw_n * 100
+        print(f"  [WARNING] {_leg_name} Opt-IK fallback {_fb_rate:.1f}% — "
+              f"V({V}m/s)·STEP_HEIGHT({STEP_HEIGHT}m) 조합이 FRONT_Q_LIM 초과 가능성. "
+              f"속도↓ or STEP_HEIGHT↓ or FRONT_Q_LIM 완화 권장.")
+    if _perr_mm_max > 0.1:
+        print(f"  [WARNING] {_leg_name} 최대 위치 오차 {_perr_mm_max:.3f}mm > 0.1mm — "
+              f"SLSQP 수렴 불충분. OPT_IK_MAXITER({OPT_IK_MAXITER}) 증가 권장.")
+    if _viol > 0:
+        print(f"  [WARNING] {_leg_name} 관절 한계 위반 {_viol}프레임 — "
+              f"SLSQP 수치 오차로 bounds 미세 초과. FRONT_Q_LIM 여유 ±0.01rad 추가 권장.")
+    if _home_dev > 1.0:
+        print(f"  [INFO]    {_leg_name} home 이탈 평균 {_home_dev:.4f}rad > 1.0rad — "
+              f"swing 궤적이 home 자세와 크게 다름. T({T}s)↑ or V({V}m/s)↓ 시 완화됨.")
+
 joint_vel_FR = joint_vel_hist[:, 0, :]
 joint_acc_FR = np.zeros_like(joint_vel_FR)
 joint_acc_FR[1:] = (joint_vel_FR[1:] - joint_vel_FR[:-1]) / DT
