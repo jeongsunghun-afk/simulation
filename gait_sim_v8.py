@@ -1,3 +1,12 @@
+# ┌─────────────────────────────────────────────────────────────────────┐
+# │  Opt_IK 클리핑 위치 및 주석 처리 대상                                │
+# │                                                                     │
+# │  종류      위치                    주석 처리 대상 (비활성화 시)       │
+# │  ──────    ──────────────────────  ──────────────────────────────── │
+# │  각속도    궤적 루프 (line 891~896) _vel_dt ~ q[:nj]=list(_q_arr) 4줄 │
+# │  토크      WBC 루프  (line 1083)  tau_cmd_leg = np.clip(...) 1줄     │
+# └─────────────────────────────────────────────────────────────────────┘
+
 """
 gait_sim_v8.py  —  4족 보행 Gait 시뮬레이터 + WBC + MPC QP GRF
 v8: v7 대비 변경사항
@@ -889,11 +898,11 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
 
             nj = N_JOINTS_PER_LEG[leg]
             # 각속도 클리핑: |q - q_prev| / DT ≤ JOINT_VEL_LIMIT (모든 다리 공통)
-            _vel_dt  = JOINT_VEL_LIMIT_RAD_S[:nj] * DT
-            _q_arr   = np.array(q[:nj])
-            _q_prev  = np.array(prev_q_per_leg[leg][:nj])
-            _q_arr   = _q_prev + np.clip(_q_arr - _q_prev, -_vel_dt, _vel_dt)
-            q[:nj]   = list(_q_arr)
+            # _vel_dt  = JOINT_VEL_LIMIT_RAD_S[:nj] * DT
+            # _q_arr   = np.array(q[:nj])
+            # _q_prev  = np.array(prev_q_per_leg[leg][:nj])
+            # _q_arr   = _q_prev + np.clip(_q_arr - _q_prev, -_vel_dt, _vel_dt)
+            # q[:nj]   = list(_q_arr)
             joint_hist[fi, leg, :nj] = q[:nj]
             prev_q_per_leg[leg][:nj] = q[:nj]
         frame_calc_time[fi] = time.perf_counter() - frame_start
