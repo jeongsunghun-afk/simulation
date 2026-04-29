@@ -43,7 +43,7 @@ GAIT_TYPE   = 'trot'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
-V           = 1 # m/s (전진 속도)
+V           = 0.5 # m/s (전진 속도)
 T           = 0.5 # s (사이클 주기)
 D           = 0.5 # (swing 비율, duty factor) 0.5 이상이어야 함 (최소 2발 접지)
 STEP_HEIGHT = 0.06 # m (발 들리는 높이, 지면과의 간격)
@@ -277,8 +277,8 @@ def opt_ik_front(p_target_dh, q_init):
     tip_final = np.array(forward_kinematics(res.x, DH_FRONT)[-1])
     pos_err_sq = float(np.dot(tip_final - p_t, tip_final - p_t))
     if pos_err_sq < 1e-6:   # 위치 오차 < 1mm
-        return list(res.x), res.nit
-    return None, res.nit
+        return list(res.x), res.nit, pos_err_sq
+    return None, res.nit, pos_err_sq
 
 
 def compute_jacobian_sim(thetas, dh, front_leg):
@@ -737,7 +737,7 @@ FRONT_Q_LIM = [
     (-math.radians(45),  math.radians(45)),   # th1: 어깨 벌림
     ( math.radians(45),  math.radians(210)),  # th2: 어깨 굴곡 (swing 고각 여유)
     (-math.radians(45),  math.radians(135)),  # th3: 팔꿈치
-    (-math.radians(120), math.radians(120)),  # th4: 손목
+    (-math.radians(120), math.radians(31)),  # th4: 손목
     (-math.radians(90),  math.radians(120)),  # th5: 발끝
 ]
 # 뒷다리 관절 위치 한계 [rad]  — home: [0, -150, -90, 90, 60] deg
@@ -745,7 +745,8 @@ HIND_Q_LIM = [
     (-math.radians(45),  math.radians(45)),   # th1: 고관절 벌림
     (-math.radians(180), -math.radians(60)),  # th2: 고관절 굴곡
     (-math.radians(120),  math.radians(30)),  # th3: 무릎
-    (-math.radians(30),   math.radians(150)), # th4: 발목
+    (-math.radians(30),   math.radians(150)), # th4: 발목fallback=0/500, nit_avg≈3.7 (매우 빠른 수렴)
+
     (-math.radians(90),   math.radians(120)), # th5: 발끝
 ]
 MAX_TRAJ_OPT_ITERS = 6
@@ -758,15 +759,16 @@ print(f"  STRIDE_D={STRIDE_D*1e3:.1f}mm  STEP_LENGTH={STEP_LENGTH*1e3:.1f}mm")
 traj_scale   = 1.0
 height_scale = 1.0
 opt_iter_used = 0
-opt_ik_nit_hist      = np.zeros((N_FRAMES, 2), dtype=int)   # [FR, FL] 수렴 반복 횟수
-opt_ik_fallback_hist = np.zeros((N_FRAMES, 2), dtype=bool)  # True = analytical fallback 사용
+opt_ik_nit_hist      = np.zeros((N_FRAMES, 2), dtype=int)    # [FR, FL] 수렴 반복 횟수
+opt_ik_fallback_hist = np.zeros((N_FRAMES, 2), dtype=bool)   # True = analytical fallback 사용
+opt_ik_pos_err_hist  = np.full((N_FRAMES, 2), np.nan)        # opt IK 위치 오차² [m²]
 
 for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     opt_iter_used = opt_iter
     joint_hist.fill(0.0); foot_hist.fill(0.0)
     phase_hist.fill(0.0); swing_flag.fill(False)
     frame_calc_time.fill(0.0)
-    opt_ik_nit_hist.fill(0); opt_ik_fallback_hist.fill(False)
+    opt_ik_nit_hist.fill(0); opt_ik_fallback_hist.fill(False); opt_ik_pos_err_hist.fill(np.nan)
 
     _step_vec = np.array([STEP_LENGTH * traj_scale, 0.0, 0.0])
     foot_contact    = [
@@ -818,8 +820,9 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
 
                 if is_sw:
                     # Phase 4: swing → optimization IK (warm-start = 이전 프레임 q)
-                    q_opt, nit = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5])
-                    opt_ik_nit_hist[fi, col] = nit
+                    q_opt, nit, pos_err_sq = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5])
+                    opt_ik_nit_hist[fi, col]     = nit
+                    opt_ik_pos_err_hist[fi, col] = pos_err_sq
                     if q_opt is not None:
                         q = q_opt
                     else:
@@ -887,8 +890,34 @@ _fb_fr = int(np.sum(opt_ik_fallback_hist[:, 0]))
 _fb_fl = int(np.sum(opt_ik_fallback_hist[:, 1]))
 _sw_fr = int(np.sum(swing_flag[:, 0]))
 _sw_fl = int(np.sum(swing_flag[:, 1]))
-print(f"  Opt-IK  FR: nit_avg={opt_ik_nit_hist[swing_flag[:,0], 0].mean():.1f}  fallback={_fb_fr}/{_sw_fr}프레임")
-print(f"  Opt-IK  FL: nit_avg={opt_ik_nit_hist[swing_flag[:,1], 1].mean():.1f}  fallback={_fb_fl}/{_sw_fl}프레임")
+_q_home_f = np.array(Q_HOME_FRONT)
+_front_lim_lo = np.array([b[0] for b in FRONT_Q_LIM])
+_front_lim_hi = np.array([b[1] for b in FRONT_Q_LIM])
+
+for _col, _leg, _sw_mask, _fb in [
+    (0, 0, swing_flag[:, 0], _fb_fr),
+    (1, 1, swing_flag[:, 1], _fb_fl),
+]:
+    _sw_n   = int(np.sum(_sw_mask))
+    _nit    = opt_ik_nit_hist[_sw_mask, _col]
+    _perr   = opt_ik_pos_err_hist[_sw_mask, _col]           # [m²], nan if fallback
+    _ok     = ~np.isnan(_perr)
+    _perr_mm_max  = float(np.sqrt(np.nanmax(_perr))) * 1e3 if _ok.any() else 0.0
+    _perr_mm_mean = float(np.sqrt(np.nanmean(_perr))) * 1e3 if _ok.any() else 0.0
+
+    # 관절 한계 위반: opt IK 성공 프레임 중 bounds 벗어난 것
+    _q_sw   = joint_hist[_sw_mask, _leg, :5]               # (sw_n, 5)
+    _ok_idx = np.where(_ok)[0]
+    _q_ok   = _q_sw[_ok_idx]
+    _viol   = int(np.sum(np.any((_q_ok < _front_lim_lo) | (_q_ok > _front_lim_hi), axis=1)))
+
+    # home 이탈: opt IK 성공 프레임 평균 ||q - q_home||
+    _home_dev = float(np.mean(np.linalg.norm(_q_ok - _q_home_f, axis=1))) if len(_q_ok) else 0.0
+
+    _leg_name = ['FR', 'FL'][_col]
+    print(f"  Opt-IK {_leg_name}: nit_avg={_nit.mean():.1f}  fallback={_fb}/{_sw_n}  "
+          f"pos_err(max={_perr_mm_max:.3f}mm mean={_perr_mm_mean:.3f}mm)  "
+          f"bound_viol={_viol}프레임  home_dev_avg={_home_dev:.4f}rad")
 
 joint_vel_FR = joint_vel_hist[:, 0, :]
 joint_acc_FR = np.zeros_like(joint_vel_FR)
@@ -1266,7 +1295,7 @@ def animate(fi):
         lines.append(f"{LEG_NAMES[leg]} "
                      f"th1={d[0]:+5.1f}d th2={d[1]:+6.1f}d th3={d[2]:+6.1f}d "
                      f"th4={d[3]:+5.1f}d th5={d[4]:+5.1f}d  "
-                     f"tau=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f}]Nm  "
+                     f"tau_cmd=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm  "
                      f"lam=[{lm[0]:+5.1f} {lm[1]:+5.1f} {lm[2]:+5.1f}]N")
     info_text.set_text(f"t={t:.3f}s\n{sw_str}\n\n" + "\n".join(lines))
     return []
