@@ -8,6 +8,12 @@ v8: v7 대비 변경사항
         - 비용: ||x-x_ref||²_Q + ||u||²_R
         - 구속: 마찰 추 |λ_x|,|λ_y| ≤ μ·λ_z, λ_z≥0
     · Figure 3: 4×2로 확장 — GRF Fx/Fy 마찰 추 시각화 추가
+
+[MOD] v8.1 수정사항:
+    · LINK_MASS 값 수정: [3.34, 0.8, 0.2, 0.2, 0.05] (기존: [0.5, 0.8, 0.2, 0.2, 0.05])
+    · GRF 계산에 TOTAL_MASS 적용: body_mass + 4×link_mass 기반 힘 평형
+    · tau_GRF 추가: GRF로부터 유도되는 조인트 토크 계산 및 로깅
+    · Figure 3 제목 수정: Body_MASS → total_mass 표기
 """
 
 import math
@@ -31,14 +37,14 @@ mpl.rcParams['axes.unicode_minus'] = False
 # 0. 파라미터
 # ══════════════════════════════════════════════════════════════
 GAIT_TYPE   = 'trot'
-DT          = 0.002
-N_CYCLES    = 4
+DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
+N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
-V           = 0.5
-T           = 0.5
-D           = 0.5
-STEP_HEIGHT = 0.06
-TAU_LAND    = 1.0
+V           = 1 # m/s (전진 속도)
+T           = 0.5 # s (사이클 주기)
+D           = 0.5 # (swing 비율, duty factor) 0.5 이상이어야 함 (최소 2발 접지)
+STEP_HEIGHT = 0.06 # m (발 들리는 높이, 지면과의 간격)
+TAU_LAND    = 1.0 # (swing phase 내 착지까지의 비율, 0~1) 1.0이면 선형 보간, 0.5이면 50% 지점에서 착지 시작
 
 T_SW = T * D
 T_ST = T * (1.0 - D)
@@ -106,11 +112,12 @@ PHASE_OFFSETS = {
 }
 
 # ── WBC 파라미터 ─────────────────────────────────────────────
-BODY_MASS = 15.0
+BODY_MASS = 15.0 # kg (몸무게)
 G_ACC     = 9.81
 
-LINK_MASS         = np.array([0.5, 0.8, 0.2, 0.2, 0.05])
+LINK_MASS         = np.array([3.34, 0.8, 0.2, 0.2, 0.05])  # link1, link2, link3, link4, link5 질량
 LINK_MASS_PER_LEG = [LINK_MASS] * 4
+TOTAL_MASS        = BODY_MASS + float(np.sum(LINK_MASS)) * 4.0
 
 KP_PD = np.array([30.0, 80.0, 80.0, 60.0, 20.0])
 KD_PD = np.array([ 3.0,  8.0,  8.0,  6.0,  2.0])
@@ -316,7 +323,7 @@ def qp_grf_distribute(contact_mask, foot_pos_world):
     if n_s >= 2:
         A_eq = np.zeros((5, n_var), dtype=float)
         b_eq = np.zeros(5, dtype=float)
-        b_eq[2] = BODY_MASS * G_ACC
+        b_eq[2] = TOTAL_MASS * G_ACC
         for idx, leg in enumerate(stance):
             col = idx * 3
             r   = foot_pos_world[leg]
@@ -326,7 +333,7 @@ def qp_grf_distribute(contact_mask, foot_pos_world):
             A_eq[4, col:col+3]   = [ rz,  0.0, -rx]   # My: rz·Fx − rx·Fz
     else:
         A_eq = np.zeros((3, n_var), dtype=float)
-        b_eq = np.array([0.0, 0.0, BODY_MASS * G_ACC])
+        b_eq = np.array([0.0, 0.0, TOTAL_MASS * G_ACC])
         A_eq[0:3, 0:3] = np.eye(3)
 
     # 부등식: 마찰 추 (5행/발)
@@ -351,7 +358,7 @@ def qp_grf_distribute(contact_mask, foot_pos_world):
         for idx, leg in enumerate(stance):
             lam_des[leg] = x_opt[idx*3:(idx+1)*3]
     else:
-        fz = BODY_MASS * G_ACC / n_s
+        fz = TOTAL_MASS * G_ACC / n_s
         for leg in stance:
             lam_des[leg] = [0.0, 0.0, fz]
     return lam_des
@@ -383,7 +390,7 @@ def _build_Bc(contact_mask_k, foot_pos_k):
         if contact_mask_k[i]:
             r = foot_pos_k[i]
             Bc[6:9,  i*3:(i+1)*3] = _I_inv @ _skew(r)   # angular
-            Bc[9:12, i*3:(i+1)*3] = np.eye(3) / BODY_MASS  # linear
+            Bc[9:12, i*3:(i+1)*3] = np.eye(3) / TOTAL_MASS  # linear
     return DT_MPC * Bc
 
 
@@ -509,21 +516,61 @@ class GaitScheduler:
 
 
 def swing_foot_pos(sw_t, p_start, p_end, step_height=STEP_HEIGHT, tau_land=TAU_LAND):
+    """Swing 궤적: 원래 설계대로 (p_end에서 착지)"""
     if sw_t >= tau_land:
         return p_end.copy()
     tau = sw_t / tau_land
     s   = 10*tau**3 - 15*tau**4 + 6*tau**5
     pos = (1.0 - s) * p_start + s * p_end
     pos = pos.copy()
+    # Z: p_start에서 p_end로 상승-하강
     pos[2] = p_start[2] + step_height * (4 * tau * (1 - tau))**3
     return pos
 
 
 def stance_foot_pos(st_t, p_contact, body_vel, stance_dur):
+    """Stance 궤적: 사인 함수 (착지 연속성)"""
     s = st_t**3 * (10.0 - 15.0*st_t + 6.0*st_t**2)
     pos = p_contact - body_vel * stance_dur * s
     pos = pos.copy()
-    pos[2] -= STANCE_DELTA * math.sin(math.pi * st_t)
+    # Z: 사인 함수 (C2 연속)
+    # st_t=0: sin(0)=0      → p_contact[2] (swing과 연속)
+    # st_t=0.5: sin(π/2)=1  → p_contact[2] - STANCE_DELTA (최대 침투)
+    # st_t=1: sin(π)=0      → p_contact[2] (다음 swing과 연속)
+    pos[2] = p_contact[2] - STANCE_DELTA * math.sin(math.pi * st_t)
+    return pos
+
+
+def foot_pos_at_phase(phase, p_start, p_contact, p_end, body_vel,
+                      swing_ratio=D, step_height=STEP_HEIGHT, tau_land=TAU_LAND, stance_dur=T_ST):
+    """
+    단일 함수로 Swing/Stance 통합 (C2 연속성 보장)
+    phase: [0, 1] - 전체 사이클 정규화 시간
+    """
+    pos = np.zeros(3)
+
+    if phase < swing_ratio:
+        # ━━━━━━━━━━━━ SWING PHASE ━━━━━━━━━━━━
+        sw_t = phase / swing_ratio  # [0, 1]
+
+        if sw_t >= tau_land:
+            pos = p_end.copy()
+        else:
+            tau = sw_t / tau_land
+            s = 10*tau**3 - 15*tau**4 + 6*tau**5
+
+            pos[:2] = (1.0 - s) * p_start[:2] + s * p_end[:2]
+            pos[2] = p_start[2] + step_height * (4 * tau * (1 - tau))**3
+    else:
+        # ━━━━━━━━━━━━ STANCE PHASE ━━━━━━━━━━━━
+        st_t = (phase - swing_ratio) / (1.0 - swing_ratio)  # [0, 1]
+
+        s = st_t**3 * (10.0 - 15.0*st_t + 6.0*st_t**2)
+        pos[:2] = p_contact[:2] - body_vel[:2] * stance_dur * s
+
+        # Z: 사인 함수 (착지 연속성)
+        pos[2] = p_contact[2] - STANCE_DELTA * math.sin(math.pi * st_t)
+
     return pos
 
 # ══════════════════════════════════════════════════════════════
@@ -593,14 +640,19 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
             if not is_sw and prev_swing[leg]:
                 foot_contact[leg] = foot_local_prev[leg].copy()
 
-            if is_sw:
-                sw_t  = sched.swing_t(leg, t)
-                p_end = home_foot_per_leg[leg] + np.array([STEP_LENGTH * traj_scale, 0, 0])
-                foot_loc = swing_foot_pos(sw_t, foot_sw_start[leg], p_end,
-                                         step_height=STEP_HEIGHT * height_scale)
-            else:
-                st_t = sched.stance_t(leg, t)
-                foot_loc = stance_foot_pos(st_t, foot_contact[leg], body_vel * traj_scale, stance_dur)
+            # 통합 함수 사용: Swing/Stance를 하나의 연속 함수로 계산
+            phase = sched.phase(leg, t)
+            p_end = home_foot_per_leg[leg] + np.array([STEP_LENGTH * traj_scale, 0, 0])
+            foot_loc = foot_pos_at_phase(
+                phase,
+                foot_sw_start[leg],
+                foot_contact[leg],
+                p_end,
+                body_vel * traj_scale,
+                swing_ratio=sched.swing_ratio,
+                step_height=STEP_HEIGHT * height_scale,
+                stance_dur=stance_dur
+            )
 
             foot_local_prev[leg] = foot_loc.copy()
             prev_swing[leg]      = is_sw
@@ -707,6 +759,7 @@ wbc_tau_ff   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_pd   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_imp  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_cmd  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
+wbc_tau_grf  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))  # GRF로부터 유도되는 토크
 wbc_lam_des  = np.zeros((N_FRAMES, 4, 3))   # [Fx, Fy, Fz]
 wbc_lam_calc = np.zeros((N_FRAMES, 4, 3))
 
@@ -775,6 +828,7 @@ for fi in range(N_FRAMES):
         f_imp       = KP_IMP * (foot_t_j5 - foot_a_j5) + KD_IMP * (vel_t - vel_a)
         tau_imp_leg = J.T @ f_imp
         tau_pd_leg  = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
+        tau_grf_leg = J.T @ lam_des_leg  # [MOD] GRF로부터 유도되는 토크
         tau_cmd_leg = tau_pd_leg + tau_ff_leg + tau_imp_leg
 
         JJT          = J @ J.T + MU_DAMP * np.eye(3)
@@ -784,6 +838,7 @@ for fi in range(N_FRAMES):
         wbc_tau_ff  [fi, leg, :nj] = tau_ff_leg
         wbc_tau_pd  [fi, leg, :nj] = tau_pd_leg
         wbc_tau_imp [fi, leg, :nj] = tau_imp_leg
+        wbc_tau_grf [fi, leg, :nj] = tau_grf_leg  # [MOD] 저장
         wbc_tau_cmd [fi, leg, :nj] = tau_cmd_leg
         wbc_lam_calc[fi, leg]      = lam_calc_leg
 
@@ -793,14 +848,17 @@ print(f"WBC 완료 [{mode_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e
 
 # GRF 합산 검증
 fz_sum = np.sum(wbc_lam_des[:, :, 2], axis=1)   # (N_FRAMES,)
-print(f"  Σλz 평균={fz_sum.mean():.2f}N  (Mg={BODY_MASS*G_ACC:.2f}N)  "
-      f"오차={abs(fz_sum.mean()-BODY_MASS*G_ACC):.2f}N")
+print(f"  Σλz 평균={fz_sum.mean():.2f}N  (Mg={TOTAL_MASS*G_ACC:.2f}N)  "
+      f"오차={abs(fz_sum.mean()-TOTAL_MASS*G_ACC):.2f}N")
 
 for leg in [0, 2]:
     nj = N_JOINTS_PER_LEG[leg]
-    peaks = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
+    peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
                       for j in range(nj))
-    print(f"  {LEG_NAMES[leg]} τ_cmd peak [N·m]: {peaks}")
+    peaks_grf = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_grf[:, leg, j])):6.2f}"
+                      for j in range(nj))
+    print(f"  {LEG_NAMES[leg]} τ_cmd peak [N·m]: {peaks_cmd}")
+    print(f"  {LEG_NAMES[leg]} τ_GRF peak [N·m]: {peaks_grf}")
 print("─" * 55)
 
 # ══════════════════════════════════════════════════════════════
@@ -1136,7 +1194,7 @@ for col, leg in enumerate([0, 3]):   # FR=0, HL=3
 fig3.suptitle(
     f'WBC Analysis  FR/HL  |  {GAIT_TYPE.upper()}  |  v={V}m/s  T={T}s  D={D}  '
     f'{"MPC QP (N=" + str(N_MPC) + ")" if USE_MPC else "QP GRF"}  '
-    f'mu={MU_FRICTION}  BODY_MASS={BODY_MASS}kg',
+    f'mu={MU_FRICTION}  total_mass={TOTAL_MASS:.2f}kg',
     color='white', fontsize=10)
 
 # ══════════════════════════════════════════════════════════════
