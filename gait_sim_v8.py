@@ -8,6 +8,8 @@ v8: v7 대비 변경사항
         - 비용: ||x-x_ref||²_Q + ||u||²_R
         - 구속: 마찰 추 |λ_x|,|λ_y| ≤ μ·λ_z, λ_z≥0
     · Figure 3: 4×2로 확장 — GRF Fx/Fy 마찰 추 시각화 추가
+    · Phase 3 — RNEA: M(q)·q̈ + C(q,q̇)·q̇ + g(q) 완전 강체 동역학
+        - tau_ff = RNEA(q,q̇,q̈) − Jᵀ·λ_des  (기존 quasi-static g(q) → 완전 동역학)
 
 [MOD] v8.1 수정사항:
     · LINK_MASS 값 수정: [3.34, 0.8, 0.2, 0.2, 0.05] (기존: [0.5, 0.8, 0.2, 0.2, 0.05])
@@ -115,9 +117,10 @@ PHASE_OFFSETS = {
 BODY_MASS = 15.0 # kg (몸무게)
 G_ACC     = 9.81
 
-LINK_MASS         = np.array([3.34, 0.8, 0.2, 0.2, 0.05])  # link1, link2, link3, link4, link5 질량
+LINK_MASS         = np.array([3.34, 0.8, 0.2, 0.2, 0.05])  # link1~5 질량 [kg]
 LINK_MASS_PER_LEG = [LINK_MASS] * 4
 TOTAL_MASS        = BODY_MASS + float(np.sum(LINK_MASS)) * 4.0
+LINK_RADIUS       = 0.015   # [m] 링크 단면 반경 근사 (RNEA 원통 관성 텐서용)
 
 KP_PD = np.array([30.0, 80.0, 80.0, 60.0, 20.0])
 KD_PD = np.array([ 3.0,  8.0,  8.0,  6.0,  2.0])
@@ -298,6 +301,102 @@ def _skew(v):
     return np.array([[ 0.0,  -v[2],  v[1]],
                      [ v[2],  0.0,  -v[0]],
                      [-v[1],  v[0],  0.0 ]], dtype=float)
+
+
+# ── Phase 3: RNEA ────────────────────────────────────────────
+
+def _rod_inertia_local(mass, length, radius=LINK_RADIUS):
+    """원통 막대 관성 텐서 (로컬 프레임, x축 = 막대 축) [kg·m²]
+    Ixx(축 방향): m·r²/2   Iyy=Izz(수직): m(3r²+L²)/12
+    """
+    Ixx = 0.5 * mass * radius ** 2
+    Iyy = mass * (3.0 * radius**2 + length**2) / 12.0
+    return np.diag([Ixx, Iyy, Iyy])
+
+
+def rnea(q, dq, ddq, dh, link_mass):
+    """Phase 3 — RNEA:  tau = M(q)·q̈ + C(q,q̇)·q̇ + g(q)
+
+    DH 세계 프레임에서 순·역방향 재귀 계산.
+    중력 처리: sim [0,0,-g] → DH [-g,0,0]  →  기저 등가 가속도 a0=[g,0,0]
+
+    q, dq, ddq : (n,) 관절 각도·속도·가속도
+    Returns    : tau (n,) — 완전 강체 동역학 관절 토크 [N·m]
+    """
+    n  = len(q)
+    a0 = np.array([G_ACC, 0.0, 0.0])   # 기저 등가 가속도 (중력 포함)
+
+    # FK: 관절 원점·z축·회전행렬 (DH 세계 프레임)
+    T       = np.eye(4)
+    R_list  = [np.eye(3)]               # R_list[i] = frame{i} 회전 in world
+    origins = [np.zeros(3)]
+    z_axes  = [np.array([0., 0., 1.])]
+    for i in range(n):
+        alpha, a, d = dh[i]
+        T = T @ _dh_matrix(alpha, a, d, q[i])
+        R_list.append(T[:3, :3].copy())
+        origins.append(T[:3, 3].copy())
+        z_axes.append(T[:3, 2].copy())
+
+    # COM 위치, 링크 관성 텐서 (세계 프레임)
+    p_com   = [(origins[i] + origins[i+1]) * 0.5 for i in range(n)]
+    I_world = []
+    for i in range(n):
+        a_len = dh[i][1]; d_off = dh[i][2]
+        L     = math.sqrt(a_len**2 + d_off**2)
+        Iloc  = _rod_inertia_local(link_mass[i], L)
+        R     = R_list[i]
+        I_world.append(R @ Iloc @ R.T)
+
+    # ── Forward Pass ──────────────────────────────────────────
+    omega  = np.zeros(3)
+    alpha_ = np.zeros(3)
+    a_orig = a0.copy()
+    omega_list = []; alpha_list = []; a_c_list = []
+
+    for i in range(n):
+        zi    = z_axes[i]
+        w_new = omega  + dq[i]  * zi
+        a_new = alpha_ + ddq[i] * zi + np.cross(omega, dq[i] * zi)
+
+        r_jnt   = origins[i+1] - origins[i]
+        a_o_new = (a_orig
+                   + np.cross(a_new, r_jnt)
+                   + np.cross(w_new, np.cross(w_new, r_jnt)))
+
+        r_com = p_com[i] - origins[i]
+        a_c   = (a_orig
+                 + np.cross(a_new, r_com)
+                 + np.cross(w_new, np.cross(w_new, r_com)))
+
+        omega_list.append(w_new.copy())
+        alpha_list.append(a_new.copy())
+        a_c_list.append(a_c.copy())
+        omega = w_new; alpha_ = a_new; a_orig = a_o_new
+
+    # ── Backward Pass ─────────────────────────────────────────
+    f_out = np.zeros(3)
+    n_out = np.zeros(3)
+    tau   = np.zeros(n)
+
+    for i in range(n - 1, -1, -1):
+        mi     = link_mass[i]
+        Ii     = I_world[i]
+        r_com  = p_com[i]     - origins[i]
+        r_next = origins[i+1] - origins[i]
+
+        f_i = mi * a_c_list[i] + f_out
+        n_i = (Ii @ alpha_list[i]
+               + np.cross(omega_list[i], Ii @ omega_list[i])
+               + np.cross(r_com,  mi * a_c_list[i])
+               + np.cross(r_next, f_out)
+               + n_out)
+
+        tau[i] = np.dot(z_axes[i], n_i)
+        f_out  = f_i
+        n_out  = n_i
+
+    return tau
 
 
 def qp_grf_distribute(contact_mask, foot_pos_world):
@@ -732,6 +831,10 @@ joint_acc_HL[1:] = (joint_vel_HL[1:] - joint_vel_HL[:-1]) / DT
 joint_jrk_HL = np.zeros_like(joint_acc_HL)
 joint_jrk_HL[1:] = (joint_acc_HL[1:] - joint_acc_HL[:-1]) / DT
 
+# 전 관절 가속도 (RNEA용, 4 legs × N_JOINTS_MAX)
+joint_acc_hist = np.zeros_like(joint_vel_hist)
+joint_acc_hist[1:] = (joint_vel_hist[1:] - joint_vel_hist[:-1]) / DT
+
 foot_local = foot_hist - LEG_HIP_OFFSETS[np.newaxis, :, :]
 foot_vel_t = np.gradient(foot_local, DT, axis=0)
 foot_acc_t = np.gradient(foot_vel_t,  DT, axis=0)
@@ -806,18 +909,20 @@ for fi in range(N_FRAMES):
         dh    = LEG_DH[leg]
         lm    = LINK_MASS_PER_LEG[leg]
 
-        q_t  = joint_hist[fi, leg, :nj]
-        q_a  = theta_a_hist[fi, leg, :nj]
-        dq_t = joint_vel_hist[fi, leg, :nj]
-        dq_a = dtheta_a_hist[fi, leg, :nj]
+        q_t   = joint_hist[fi, leg, :nj]
+        q_a   = theta_a_hist[fi, leg, :nj]
+        dq_t  = joint_vel_hist[fi, leg, :nj]
+        dq_a  = dtheta_a_hist[fi, leg, :nj]
+        ddq_t = joint_acc_hist[fi, leg, :nj]
 
         J   = compute_jacobian_sim(q_t, dh, front)
         J_a = compute_jacobian_sim(q_a, dh, front)
-        tau_g = compute_gravity_torque_sim(q_t, dh, lm, front)
+        tau_g = compute_gravity_torque_sim(q_t, dh, lm, front)   # 플롯용 g(q) 보존
 
         lam_des_leg = lam_des_all[leg]   # [Fx, Fy, Fz]
 
-        tau_ff_leg  = tau_g - J.T @ lam_des_leg
+        # Phase 3: RNEA — M(q)q̈ + C(q,q̇)q̇ + g(q) 완전 동역학
+        tau_ff_leg = rnea(q_t, dq_t, ddq_t, dh, lm) - J.T @ lam_des_leg
 
         foot_t_j5 = foot_local[fi, leg] + J4_TO_J5_SIM_PER_LEG[leg]
         pts_a     = forward_kinematics(q_a, dh=dh)
