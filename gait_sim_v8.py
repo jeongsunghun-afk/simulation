@@ -855,10 +855,11 @@ for leg in [0, 2]:
     nj = N_JOINTS_PER_LEG[leg]
     peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
                       for j in range(nj))
-    peaks_grf = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_grf[:, leg, j])):6.2f}"
-                      for j in range(nj))
+    fx_peak = np.max(np.abs(wbc_lam_des[:, leg, 0]))
+    fy_peak = np.max(np.abs(wbc_lam_des[:, leg, 1]))
+    fz_peak = np.max(np.abs(wbc_lam_des[:, leg, 2]))
     print(f"  {LEG_NAMES[leg]} τ_cmd peak [N·m]: {peaks_cmd}")
-    print(f"  {LEG_NAMES[leg]} τ_GRF peak [N·m]: {peaks_grf}")
+    print(f"  {LEG_NAMES[leg]} λ (GRF) peak [N]: Fx={fx_peak:6.2f}, Fy={fy_peak:6.2f}, Fz={fz_peak:6.2f}")
 print("─" * 55)
 
 # ══════════════════════════════════════════════════════════════
