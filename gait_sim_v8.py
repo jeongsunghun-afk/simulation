@@ -43,7 +43,7 @@ GAIT_TYPE   = 'trot'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
-V           = 0.5 # m/s (전진 속도)
+V           = 1 # m/s (전진 속도)
 T           = 0.5 # s (사이클 주기)
 D           = 0.5 # (swing 비율, duty factor) 0.5 이상이어야 함 (최소 2발 접지)
 STEP_HEIGHT = 0.06 # m (발 들리는 높이, 지면과의 간격)
@@ -888,6 +888,12 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                     q[j] = best
 
             nj = N_JOINTS_PER_LEG[leg]
+            # 각속도 클리핑: |q - q_prev| / DT ≤ JOINT_VEL_LIMIT (모든 다리 공통)
+            _vel_dt  = JOINT_VEL_LIMIT_RAD_S[:nj] * DT
+            _q_arr   = np.array(q[:nj])
+            _q_prev  = np.array(prev_q_per_leg[leg][:nj])
+            _q_arr   = _q_prev + np.clip(_q_arr - _q_prev, -_vel_dt, _vel_dt)
+            q[:nj]   = list(_q_arr)
             joint_hist[fi, leg, :nj] = q[:nj]
             prev_q_per_leg[leg][:nj] = q[:nj]
         frame_calc_time[fi] = time.perf_counter() - frame_start
@@ -1080,7 +1086,7 @@ for fi in range(N_FRAMES):
         tau_pd_leg  = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
         tau_grf_leg = J.T @ lam_des_leg  # [MOD] GRF로부터 유도되는 토크
         tau_cmd_leg = tau_pd_leg + tau_ff_leg + tau_imp_leg
-        tau_cmd_leg = np.clip(tau_cmd_leg, -JOINT_TORQUE_LIMIT[:nj], JOINT_TORQUE_LIMIT[:nj])  # 토크 클리핑
+#        tau_cmd_leg = np.clip(tau_cmd_leg, -JOINT_TORQUE_LIMIT[:nj], JOINT_TORQUE_LIMIT[:nj])  # 토크 클리핑
 
         JJT          = J @ J.T + MU_DAMP * np.eye(3)
         lam_calc_leg = np.linalg.solve(JJT, J @ (tau_g - tau_cmd_leg))
