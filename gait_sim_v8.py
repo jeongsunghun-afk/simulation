@@ -256,27 +256,46 @@ def analytical_ik_hind(Px, Py, Pz, phi, dh, theta5_target=None):
 def opt_ik_front(p_target_dh, q_init):
     """SLSQP 최적화 IK — 앞다리 swing 전용.
 
-    등식 제약: FK_tip(q) = p_target  (위치 정확도 보장)
-    비용:      LAMBDA_Q_OPT · ||q - q_home||²  (home 근접 정규화)
-    warm-start: q_init (이전 프레임 q)
-    반환: (q_list, nit) 또는 수렴 실패 시 (None, nit)
+    등식 제약 : FK_tip(q) = p_target          (위치 정확도 보장)
+    부등식 제약: |τ_grav(q)| ≤ τ_limit        (OPT_IK_USE_TAU_LIMIT, 중력 토크 근사)
+    bounds     : FRONT_Q_LIM ∩ 각속도 한계    (OPT_IK_USE_VEL_LIMIT, 정확)
+    비용       : LAMBDA_Q_OPT·||q - q_home||²
     """
     p_t = np.asarray(p_target_dh, dtype=float)
     q0  = np.asarray(q_init,      dtype=float)
     q_h = np.asarray(Q_HOME_FRONT, dtype=float)
 
-    constraints = {'type': 'eq',
-                   'fun': lambda q: np.array(forward_kinematics(q, DH_FRONT)[-1]) - p_t}
+    # ── 각속도 제약: FRONT_Q_LIM을 |Δq| ≤ vel_limit*DT 범위로 동적 수축 ──
+    if OPT_IK_USE_VEL_LIMIT:
+        vel_dt = JOINT_VEL_LIMIT_RAD_S * DT
+        lo = np.maximum([b[0] for b in FRONT_Q_LIM], q0 - vel_dt)
+        hi = np.minimum([b[1] for b in FRONT_Q_LIM], q0 + vel_dt)
+        hi = np.maximum(lo, hi)          # lo > hi 방지 (위치 한계 경계부)
+        active_bounds = list(zip(lo, hi))
+    else:
+        active_bounds = FRONT_Q_LIM
+
+    # ── 등식 제약: 발끝 위치 ──────────────────────────────────────────────
+    constraints = [{'type': 'eq',
+                    'fun': lambda q: np.array(forward_kinematics(q, DH_FRONT)[-1]) - p_t}]
+
+    # ── 부등식 제약: 중력 토크 한계 (τ_full 근사, 속도·GRF 항 미포함) ─────
+    if OPT_IK_USE_TAU_LIMIT:
+        _lm_front = LINK_MASS_PER_LEG[0]
+        def _torque_ineq(q):
+            tau_g = compute_gravity_torque_sim(q, DH_FRONT, _lm_front, front_leg=True)
+            return JOINT_TORQUE_LIMIT[:len(tau_g)] - np.abs(tau_g)  # ≥ 0 이어야 통과
+        constraints.append({'type': 'ineq', 'fun': _torque_ineq})
 
     def cost(q):
         return float(LAMBDA_Q_OPT * np.dot(q - q_h, q - q_h))
 
-    res = _sp_minimize(cost, q0, method='SLSQP', bounds=FRONT_Q_LIM,
+    res = _sp_minimize(cost, q0, method='SLSQP', bounds=active_bounds,
                        constraints=constraints,
                        options={'ftol': 1e-8, 'maxiter': OPT_IK_MAXITER})
     tip_final = np.array(forward_kinematics(res.x, DH_FRONT)[-1])
     pos_err_sq = float(np.dot(tip_final - p_t, tip_final - p_t))
-    if pos_err_sq < 1e-6:   # 위치 오차 < 1mm
+    if pos_err_sq < 1e-6:
         return list(res.x), res.nit, pos_err_sq
     return None, res.nit, pos_err_sq
 
@@ -731,6 +750,10 @@ VEL_LIMIT_MARGIN  = 999
 # ── Phase 4: Optimization-based IK 파라미터 ──────────────────
 LAMBDA_Q_OPT   = 0.01   # 관절 home 위치 정규화 가중치
 OPT_IK_MAXITER = 100
+
+# 제약 ON/OFF — True/False 한 줄로 켜고 끔
+OPT_IK_USE_VEL_LIMIT = True   # 각속도 제약: |Δq/DT| ≤ JOINT_VEL_LIMIT_RAD_S (bounds 동적 수축)
+OPT_IK_USE_TAU_LIMIT = True   # 토크 제약: |τ_grav(q)| ≤ JOINT_TORQUE_LIMIT  (근사, 속도 영향)
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
