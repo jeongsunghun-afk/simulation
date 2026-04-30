@@ -52,7 +52,7 @@ GAIT_TYPE   = 'trot'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
-V           = 1 # m/s (전진 속도)
+V           = 0.5 # m/s (전진 속도)
 T           = 0.5 # s (사이클 주기)
 D           = 0.5 # (swing 비율, duty factor) 0.5 이상이어야 함 (최소 2발 접지)
 STEP_HEIGHT = 0.06 # m (발 들리는 높이, 지면과의 간격)
@@ -132,7 +132,7 @@ BODY_MASS = 15.0 # kg (몸무게)
 G_ACC     = 9.81
 
 #LINK_MASS         = np.array([3.34, 0.8, 0.2, 0.2, 0.05])  # link1~5 질량 [kg]
-LINK_MASS         = np.array([4.125, 1.215, 0.2, 0.2, 0.05])  # link1~5 질량 [kg] 
+LINK_MASS         = np.array([4.125, 1.795, 0.78, 0.78, 0.05])  # link1~5 질량 [kg] 
 # 80형번 0.915kg, 90형번 1.605kg
 LINK_MASS_PER_LEG = [LINK_MASS] * 4
 TOTAL_MASS        = BODY_MASS + float(np.sum(LINK_MASS)) * 4.0
@@ -703,11 +703,19 @@ def stance_foot_pos(st_t, p_contact, body_vel, stance_dur):
     return pos
 
 
+def _quintic_s(tau):
+    """5차 다항식: s(0)=0,s(1)=1, s'=s''=0 at endpoints → C2 보장"""
+    return 10*tau**3 - 15*tau**4 + 6*tau**5
+
+
 def foot_pos_at_phase(phase, p_start, p_contact, p_end, body_vel,
                       swing_ratio=D, step_height=STEP_HEIGHT, tau_land=TAU_LAND, stance_dur=T_ST):
     """
-    단일 함수로 Swing/Stance 통합 (C2 연속성 보장)
-    phase: [0, 1] - 전체 사이클 정규화 시간
+    Swing/Stance 통합 궤적 (3-phase Z: C2 연속)
+
+    X,Y : 5차 다항식 (C2)
+    Z   : swing1(이지) quintic 상승 + swing2(착지) quintic 하강  → C2
+          stance: sin²(π·t) 침투 곡선 → C1 (dZ/dt=0 at boundaries)
     """
     pos = np.zeros(3)
 
@@ -719,19 +727,31 @@ def foot_pos_at_phase(phase, p_start, p_contact, p_end, body_vel,
             pos = p_end.copy()
         else:
             tau = sw_t / tau_land
-            s = 10*tau**3 - 15*tau**4 + 6*tau**5
+            s = _quintic_s(tau)
 
+            # X,Y: 5차 다항식 (전 구간)
             pos[:2] = (1.0 - s) * p_start[:2] + s * p_end[:2]
-            pos[2] = p_start[2] + step_height * (4 * tau * (1 - tau))**3
+
+            # Z: 3-phase quintic — 활성 swing 중간(tau_land/2)에서 분리
+            sw_mid = tau_land * 0.5
+            if sw_t <= sw_mid:
+                # swing1 이지: ground → peak (C2)
+                tau_z = sw_t / sw_mid
+                pos[2] = p_start[2] + step_height * _quintic_s(tau_z)
+            else:
+                # swing2 착지: peak → ground (C2)
+                tau_z = (sw_t - sw_mid) / (tau_land - sw_mid)
+                pos[2] = ((p_start[2] + step_height) * (1.0 - _quintic_s(tau_z))
+                          + p_end[2] * _quintic_s(tau_z))
     else:
         # ━━━━━━━━━━━━ STANCE PHASE ━━━━━━━━━━━━
         st_t = (phase - swing_ratio) / (1.0 - swing_ratio)  # [0, 1]
 
-        s = st_t**3 * (10.0 - 15.0*st_t + 6.0*st_t**2)
+        s = _quintic_s(st_t)
         pos[:2] = p_contact[:2] - body_vel[:2] * stance_dur * s
 
-        # Z: 사인 함수 (착지 연속성)
-        pos[2] = p_contact[2] - STANCE_DELTA * math.sin(math.pi * st_t)
+        # Z: sin²(π·t) — dZ/dt=0 at t=0,1 → C1 (기존 sin 대비 경계 속도 연속)
+        pos[2] = p_contact[2] - STANCE_DELTA * math.sin(math.pi * st_t) ** 2
 
     return pos
 
@@ -828,14 +848,21 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
             phase_hist[fi, leg] = sched.phase(leg, t)
             swing_flag[fi, leg] = is_sw
 
-            if is_sw and not prev_swing[leg]:
-                foot_sw_start[leg] = foot_local_prev[leg].copy()
-            if not is_sw and prev_swing[leg]:
-                foot_contact[leg] = foot_local_prev[leg].copy()
-
-            # 통합 함수 사용: Swing/Stance를 하나의 연속 함수로 계산
             phase = sched.phase(leg, t)
             p_end = home_foot_per_leg[leg] + np.array([STEP_LENGTH * traj_scale, 0, 0])
+            _bv   = body_vel * traj_scale
+
+            if is_sw and not prev_swing[leg]:
+                # stance→swing 전환: 해석적 끝점 계산 (이산화 오차 제거)
+                # stance st_t=1.0 정확한 위치: XY = p_contact - bv*stance_dur, Z = p_contact[2]
+                foot_sw_start[leg] = np.array([
+                    foot_contact[leg][0] - _bv[0] * stance_dur,
+                    foot_contact[leg][1] - _bv[1] * stance_dur,
+                    foot_contact[leg][2],
+                ])
+            if not is_sw and prev_swing[leg]:
+                # swing→stance 전환: swing2 해석적 끝점 = p_end (이산화 오차 제거)
+                foot_contact[leg] = p_end.copy()
             foot_loc = foot_pos_at_phase(
                 phase,
                 foot_sw_start[leg],
@@ -858,11 +885,14 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
 
                 if is_sw:
                     # Phase 4: swing → optimization IK (warm-start = 이전 프레임 q)
-                    # q_ref: swing 중간에서만 Q_SWING_FRONT 쪽으로 유도 (sine 벨커브)
-                    _sw_t  = sched.swing_t(leg, t)
-                    _alpha = math.sin(math.pi * _sw_t)   # 0→1→0
-                    _q_ref = [h + _alpha * (s - h)
-                              for h, s in zip(Q_HOME_FRONT, Q_SWING_FRONT)]
+                    # q_ref: 3-phase quintic — swing1(이지) 0→1, swing2(착지) 1→0
+                    _sw_t = sched.swing_t(leg, t)
+                    if _sw_t <= 0.5:
+                        _alpha = _quintic_s(_sw_t / 0.5)        # 0→1
+                    else:
+                        _alpha = 1.0 - _quintic_s((_sw_t - 0.5) / 0.5)  # 1→0
+                    _q_ref = [h + _alpha * (sw - h)
+                              for h, sw in zip(Q_HOME_FRONT, Q_SWING_FRONT)]
                     q_opt, nit, pos_err_sq = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5],
                                                           q_ref=_q_ref)
                     opt_ik_nit_hist[fi, col]     = nit
@@ -910,11 +940,11 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
 
             nj = N_JOINTS_PER_LEG[leg]
             # 각속도 클리핑: |q - q_prev| / DT ≤ JOINT_VEL_LIMIT (모든 다리 공통)
-            _vel_dt  = JOINT_VEL_LIMIT_RAD_S[:nj] * DT
-            _q_arr   = np.array(q[:nj])
-            _q_prev  = np.array(prev_q_per_leg[leg][:nj])
-            _q_arr   = _q_prev + np.clip(_q_arr - _q_prev, -_vel_dt, _vel_dt)
-            q[:nj]   = list(_q_arr)
+            # _vel_dt  = JOINT_VEL_LIMIT_RAD_S[:nj] * DT
+            # _q_arr   = np.array(q[:nj])
+            # _q_prev  = np.array(prev_q_per_leg[leg][:nj])
+            # _q_arr   = _q_prev + np.clip(_q_arr - _q_prev, -_vel_dt, _vel_dt)
+            # q[:nj]   = list(_q_arr)
             joint_hist[fi, leg, :nj] = q[:nj]
             prev_q_per_leg[leg][:nj] = q[:nj]
         frame_calc_time[fi] = time.perf_counter() - frame_start
@@ -1170,7 +1200,7 @@ ax3d.set_zlabel('Z (m)', color='white', labelpad=4)
 ax3d.tick_params(colors=_gray)
 ax3d.set_title(
     f'Gait Sim v8  [{GAIT_TYPE.upper()}]  v={V}m/s  T={T}s  D={D}  '
-    f'step_h={STEP_HEIGHT}m  step_l={STEP_LENGTH:.3f}m',
+    f'step_h={STEP_HEIGHT}m  step_l={STEP_LENGTH:.3f}m  total_mass={TOTAL_MASS:.2f}kg',
     color='white', fontsize=9)
 ax3d.view_init(elev=20, azim=-55)
 ax3d.xaxis.pane.fill = ax3d.yaxis.pane.fill = ax3d.zaxis.pane.fill = False

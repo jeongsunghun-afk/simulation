@@ -1,19 +1,17 @@
 """
-gait_sim_v7.py  —  4족 보행 Gait 시뮬레이터 + WBC
-v7: v6 대비 변경사항
-    · WBC (Whole Body Control) 추가 (leg_sim_v4 참조):
-        - Jacobian 기반 중력 보상 토크 (τ_grav)
-        - GRF 피드포워드   τ_ff  = τ_grav − Jᵀ·λ_des
-        - Cartesian 임피던스  τ_imp = Jᵀ·(Kp·Δx + Kd·Δẋ)
-        - PD 피드백          τ_pd  = Kp·Δθ + Kd·Δθ̇
-        - GRF 역산   λ_calc = (JJᵀ+μI)⁻¹·J·(τ_grav−τ_cmd)
-    · 1차 지연 추종 오차 모델 (θ_a 시뮬레이션)
-    · Figure 3: WBC 분석 (τ_cmd, 토크 분해, GRF)
+gait_sim_v7.py  —  4족 보행 Gait 시뮬레이터 + WBC + MPC QP GRF + RNEA
+v7 용도: tau_cmd / lambda_GRF 결과 검증 (Opt-IK 제외)
+    · WBC: Jacobian 기반 중력 보상, GRF 피드포워드, Impedance, PD
+    · Phase 2 — QP GRF: 단일 스텝 힘 평형 + 마찰 추 QP (fallback)
+    · Phase 1 — MPC QP: N스텝 horizon 선형화 부유 베이스 MPC
+    · Phase 3 — RNEA: M(q)·q̈ + C(q,q̇)·q̇ + g(q) 완전 강체 동역학
+        - tau_ff = RNEA(q,q̇,q̈) − Jᵀ·λ_des
 """
 
 import math
 import time
 import numpy as np
+import qpsolvers
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
@@ -33,7 +31,7 @@ GAIT_TYPE   = 'trot'
 DT          = 0.002
 N_CYCLES    = 4
 
-V           = 0.5
+V           = 1
 T           = 0.5
 D           = 0.5  # Swing ratio (0.5:trot, ~0.4:walk, ~0.6:gallop)
 STEP_HEIGHT = 0.06
@@ -106,11 +104,12 @@ PHASE_OFFSETS = {
 }
 
 # ── WBC 파라미터 ─────────────────────────────────────────────
-BODY_MASS = 15.0                              # 본체 질량 [kg]
+BODY_MASS = 10.0                              # 본체 질량 [kg]
 G_ACC     = 9.81                              # 중력 가속도 [m/s²]
 
-LINK_MASS          = np.array([0.5, 0.8, 0.2, 0.2, 0.05])  # 링크 질량 [kg]
+LINK_MASS         = np.array([4.125, 1.795, 0.78, 0.78, 0.05])  # link1~5 질량 [kg] 
 LINK_MASS_PER_LEG  = [LINK_MASS] * 4
+TOTAL_MASS         = BODY_MASS + float(np.sum(LINK_MASS)) * 4.0
 
 KP_PD = np.array([30.0, 80.0, 80.0, 60.0, 20.0])  # PD Kp [N·m/rad]
 KD_PD = np.array([ 3.0,  8.0,  8.0,  6.0,  2.0])  # PD Kd [N·m·s/rad]
@@ -121,6 +120,26 @@ KD_IMP = np.array([ 20.0,  20.0,  20.0])    # Impedance Kd [N·s/m]
 MU_DAMP   = 1e-3   # 자코비안 댐핑 계수 (특이점 방지)
 TAU_LAG   = 0.03   # 1차 지연 상수 [s]
 INIT_ERR_RAD = math.radians(1.0)             # 초기 추종 오차 [rad]
+LINK_RADIUS  = 0.015                         # 링크 단면 반경 근사 (RNEA 원통 관성 텐서용)
+
+# ── MPC / QP GRF 파라미터 ─────────────────────────────────────
+MU_FRICTION  = 0.6
+BODY_INERTIA = np.diag([0.07, 0.26, 0.26])  # Ixx, Iyy, Izz [kg·m²]
+
+N_MPC  = 10
+DT_MPC = DT * 10
+
+_Q_DIAG = np.array([
+    200, 200, 100,
+      0,   0, 200,
+      0,   0,   0,
+     10,   0,   0,
+      0,
+], dtype=float)
+MPC_Q = np.diag(_Q_DIAG)
+MPC_R = 1e-6 * np.eye(3)
+
+USE_MPC = True   # False → QP GRF 사용
 
 # ══════════════════════════════════════════════════════════════
 # 1. 기구학
@@ -264,6 +283,235 @@ def compute_gravity_torque_sim(thetas, dh, link_mass, front_leg):
     return tau_g
 
 # ══════════════════════════════════════════════════════════════
+# 1.5  QP GRF / MPC QP / RNEA
+# ══════════════════════════════════════════════════════════════
+
+def _skew(v):
+    return np.array([[ 0.0,  -v[2],  v[1]],
+                     [ v[2],  0.0,  -v[0]],
+                     [-v[1],  v[0],  0.0 ]], dtype=float)
+
+
+def _rod_inertia_local(mass, length, radius=LINK_RADIUS):
+    Ixx = 0.5 * mass * radius ** 2
+    Iyy = mass * (3.0 * radius**2 + length**2) / 12.0
+    return np.diag([Ixx, Iyy, Iyy])
+
+
+def rnea(q, dq, ddq, dh, link_mass):
+    """Phase 3 — RNEA: tau = M(q)·q̈ + C(q,q̇)·q̇ + g(q)"""
+    n  = len(q)
+    a0 = np.array([G_ACC, 0.0, 0.0])
+
+    T       = np.eye(4)
+    R_list  = [np.eye(3)]
+    origins = [np.zeros(3)]
+    z_axes  = [np.array([0., 0., 1.])]
+    for i in range(n):
+        alpha, a, d = dh[i]
+        T = T @ _dh_matrix(alpha, a, d, q[i])
+        R_list.append(T[:3, :3].copy())
+        origins.append(T[:3, 3].copy())
+        z_axes.append(T[:3, 2].copy())
+
+    p_com   = [(origins[i] + origins[i+1]) * 0.5 for i in range(n)]
+    I_world = []
+    for i in range(n):
+        a_len = dh[i][1]; d_off = dh[i][2]
+        L     = math.sqrt(a_len**2 + d_off**2)
+        Iloc  = _rod_inertia_local(link_mass[i], L)
+        I_world.append(R_list[i] @ Iloc @ R_list[i].T)
+
+    omega  = np.zeros(3)
+    alpha_ = np.zeros(3)
+    a_orig = a0.copy()
+    omega_list = []; alpha_list = []; a_c_list = []
+
+    for i in range(n):
+        zi    = z_axes[i]
+        w_new = omega  + dq[i]  * zi
+        a_new = alpha_ + ddq[i] * zi + np.cross(omega, dq[i] * zi)
+        r_jnt   = origins[i+1] - origins[i]
+        a_o_new = (a_orig
+                   + np.cross(a_new, r_jnt)
+                   + np.cross(w_new, np.cross(w_new, r_jnt)))
+        r_com = p_com[i] - origins[i]
+        a_c   = (a_orig
+                 + np.cross(a_new, r_com)
+                 + np.cross(w_new, np.cross(w_new, r_com)))
+        omega_list.append(w_new.copy())
+        alpha_list.append(a_new.copy())
+        a_c_list.append(a_c.copy())
+        omega = w_new; alpha_ = a_new; a_orig = a_o_new
+
+    f_out = np.zeros(3)
+    n_out = np.zeros(3)
+    tau   = np.zeros(n)
+    for i in range(n - 1, -1, -1):
+        mi     = link_mass[i]
+        Ii     = I_world[i]
+        r_com  = p_com[i]     - origins[i]
+        r_next = origins[i+1] - origins[i]
+        f_i = mi * a_c_list[i] + f_out
+        n_i = (Ii @ alpha_list[i]
+               + np.cross(omega_list[i], Ii @ omega_list[i])
+               + np.cross(r_com,  mi * a_c_list[i])
+               + np.cross(r_next, f_out)
+               + n_out)
+        tau[i] = np.dot(z_axes[i], n_i)
+        f_out  = f_i
+        n_out  = n_i
+    return tau
+
+
+def qp_grf_distribute(contact_mask, foot_pos_world):
+    """Phase 2 — 단일 스텝 QP GRF 배분"""
+    stance = np.where(contact_mask)[0]
+    n_s = len(stance)
+    if n_s == 0:
+        return np.zeros((4, 3))
+
+    n_var = 3 * n_s
+    P = np.eye(n_var, dtype=float)
+    q = np.zeros(n_var, dtype=float)
+
+    if n_s >= 2:
+        A_eq = np.zeros((5, n_var), dtype=float)
+        b_eq = np.zeros(5, dtype=float)
+        b_eq[2] = TOTAL_MASS * G_ACC
+        for idx, leg in enumerate(stance):
+            col = idx * 3
+            r   = foot_pos_world[leg]
+            rx, ry, rz = r[0], r[1], r[2]
+            A_eq[0:3, col:col+3] = np.eye(3)
+            A_eq[3, col:col+3]   = [0.0,  -rz,  ry]
+            A_eq[4, col:col+3]   = [ rz,  0.0, -rx]
+    else:
+        A_eq = np.zeros((3, n_var), dtype=float)
+        b_eq = np.array([0.0, 0.0, TOTAL_MASS * G_ACC])
+        A_eq[0:3, 0:3] = np.eye(3)
+
+    mu = MU_FRICTION
+    G  = np.zeros((5 * n_s, n_var), dtype=float)
+    h  = np.zeros(5 * n_s, dtype=float)
+    for idx in range(n_s):
+        col = idx * 3; row = idx * 5
+        G[row,   col+2] = -1.0
+        G[row+1, col]   =  1.0;  G[row+1, col+2] = -mu
+        G[row+2, col]   = -1.0;  G[row+2, col+2] = -mu
+        G[row+3, col+1] =  1.0;  G[row+3, col+2] = -mu
+        G[row+4, col+1] = -1.0;  G[row+4, col+2] = -mu
+
+    try:
+        x_opt = qpsolvers.solve_qp(P, q, G, h, A_eq, b_eq, solver='quadprog')
+    except Exception:
+        x_opt = None
+
+    lam_des = np.zeros((4, 3))
+    if x_opt is not None:
+        for idx, leg in enumerate(stance):
+            lam_des[leg] = x_opt[idx*3:(idx+1)*3]
+    else:
+        fz = TOTAL_MASS * G_ACC / n_s
+        for leg in stance:
+            lam_des[leg] = [0.0, 0.0, fz]
+    return lam_des
+
+
+_I_inv = np.linalg.inv(BODY_INERTIA)
+
+def _build_Ac_d():
+    Ac = np.zeros((13, 13), dtype=float)
+    Ac[0:3, 6:9]  = np.eye(3)
+    Ac[3:6, 9:12] = np.eye(3)
+    Ac[9:12, 12]  = [0.0, 0.0, 1.0]
+    return np.eye(13) + DT_MPC * Ac
+
+_Ac_d = _build_Ac_d()
+_Ad_powers = [np.eye(13, dtype=float)]
+for _k in range(N_MPC):
+    _Ad_powers.append(_Ac_d @ _Ad_powers[-1])
+
+
+def _build_Bc(contact_mask_k, foot_pos_k):
+    Bc = np.zeros((13, 12), dtype=float)
+    for i in range(4):
+        if contact_mask_k[i]:
+            r = foot_pos_k[i]
+            Bc[6:9,  i*3:(i+1)*3] = _I_inv @ _skew(r)
+            Bc[9:12, i*3:(i+1)*3] = np.eye(3) / TOTAL_MASS
+    return DT_MPC * Bc
+
+
+def mpc_qp_plan(x0, contact_schedule, foot_positions):
+    """Phase 1 — Convex MPC QP"""
+    nx = 13; nu = 12
+    Bc_list = [_build_Bc(contact_schedule[k], foot_positions[k]) for k in range(N_MPC)]
+    N   = N_MPC
+    Aq  = np.zeros((N*nx, nx),   dtype=float)
+    Bq  = np.zeros((N*nx, N*nu), dtype=float)
+    for i in range(N):
+        Aq[i*nx:(i+1)*nx, :] = _Ad_powers[i+1]
+        for j in range(i+1):
+            Bq[i*nx:(i+1)*nx, j*nu:(j+1)*nu] = _Ad_powers[i-j] @ Bc_list[j]
+
+    X_ref = np.tile(x0, N)
+    err0  = Aq @ x0 - X_ref
+    QBq   = np.zeros_like(Bq)
+    Qerr  = np.zeros(N*nx, dtype=float)
+    for i in range(N):
+        sl = slice(i*nx, (i+1)*nx)
+        QBq[sl, :]  = MPC_Q @ Bq[sl, :]
+        Qerr[sl]    = MPC_Q @ err0[sl]
+
+    R_bar_diag = np.tile(np.diag(np.kron(np.eye(4), MPC_R)), N)
+    H = 2.0 * (Bq.T @ QBq + np.diag(R_bar_diag))
+    f = 2.0 * (Bq.T @ Qerr)
+    H = (H + H.T) * 0.5
+
+    mu = MU_FRICTION
+    G_list = []; h_list = []
+    for k in range(N):
+        for i in range(4):
+            if contact_schedule[k, i]:
+                col = k*nu + i*3
+                g_blk = np.zeros((5, N*nu), dtype=float)
+                g_blk[0, col+2] = -1.0
+                g_blk[1, col]   =  1.0;  g_blk[1, col+2] = -mu
+                g_blk[2, col]   = -1.0;  g_blk[2, col+2] = -mu
+                g_blk[3, col+1] =  1.0;  g_blk[3, col+2] = -mu
+                g_blk[4, col+1] = -1.0;  g_blk[4, col+2] = -mu
+                G_list.append(g_blk); h_list.append(np.zeros(5))
+
+    G_mpc = np.vstack(G_list) if G_list else np.zeros((1, N*nu))
+    h_mpc = np.concatenate(h_list) if h_list else np.zeros(1)
+
+    A_list = []; b_list = []
+    for k in range(N):
+        for i in range(4):
+            if not contact_schedule[k, i]:
+                col = k*nu + i*3
+                for d in range(3):
+                    row = np.zeros(N*nu); row[col + d] = 1.0
+                    A_list.append(row); b_list.append(0.0)
+    A_mpc = np.array(A_list, dtype=float) if A_list else None
+    b_mpc = np.array(b_list, dtype=float) if b_list else None
+
+    try:
+        u_opt = qpsolvers.solve_qp(P=H, q=f, G=G_mpc, h=h_mpc, A=A_mpc, b=b_mpc, solver='quadprog')
+    except Exception:
+        u_opt = None
+
+    lam_des = np.zeros((4, 3))
+    if u_opt is not None:
+        for i in range(4):
+            lam_des[i] = u_opt[i*3:(i+1)*3]
+    else:
+        lam_des = qp_grf_distribute(contact_schedule[0], foot_positions[0])
+    return lam_des
+
+
+# ══════════════════════════════════════════════════════════════
 # 2. Gait Scheduler & Foot Trajectory
 # ══════════════════════════════════════════════════════════════
 
@@ -302,10 +550,15 @@ def swing_foot_pos(sw_t, p_start, p_end, step_height=STEP_HEIGHT, tau_land=TAU_L
 
 
 def stance_foot_pos(st_t, p_contact, body_vel, stance_dur):
+    """Stance 궤적: 사인 함수 (착지 연속성)"""
     s = st_t**3 * (10.0 - 15.0*st_t + 6.0*st_t**2)
     pos = p_contact - body_vel * stance_dur * s
     pos = pos.copy()
-    pos[2] -= STANCE_DELTA * math.sin(math.pi * st_t)
+    # Z: 사인 함수 (C2 연속)
+    # st_t=0: sin(0)=0      → p_contact[2] (swing과 연속)
+    # st_t=0.5: sin(π/2)=1  → p_contact[2] - STANCE_DELTA (최대 침투)
+    # st_t=1: sin(π)=0      → p_contact[2] (다음 swing과 연속)
+    pos[2] = p_contact[2] - STANCE_DELTA * math.sin(math.pi * st_t)
     return pos
 
 # ══════════════════════════════════════════════════════════════
@@ -456,17 +709,27 @@ joint_acc_HR[1:] = (joint_vel_HR[1:] - joint_vel_HR[:-1]) / DT
 joint_jrk_HR = np.zeros_like(joint_acc_HR)
 joint_jrk_HR[1:] = (joint_acc_HR[1:] - joint_acc_HR[:-1]) / DT
 
+joint_vel_HL = joint_vel_hist[:, 3, :]
+joint_acc_HL = np.zeros_like(joint_vel_HL)
+joint_acc_HL[1:] = (joint_vel_HL[1:] - joint_vel_HL[:-1]) / DT
+joint_jrk_HL = np.zeros_like(joint_acc_HL)
+joint_jrk_HL[1:] = (joint_acc_HL[1:] - joint_acc_HL[:-1]) / DT
+
 foot_local  = foot_hist - LEG_HIP_OFFSETS[np.newaxis, :, :]
 foot_vel_t  = np.gradient(foot_local, DT, axis=0)
 foot_acc_t  = np.gradient(foot_vel_t,  DT, axis=0)
 
 # ══════════════════════════════════════════════════════════════
-# 3.5. WBC: 전신 토크 계산
+# 3.5  WBC + MPC QP GRF + RNEA
 # ══════════════════════════════════════════════════════════════
-print("WBC 계산 중...")
+print(f"WBC + {'MPC QP' if USE_MPC else 'QP GRF'} 계산 중...")
 wbc_t0 = time.perf_counter()
 
-# 1차 지연 추종 오차 시뮬레이션
+# 관절 가속도 (RNEA용)
+joint_acc_hist = np.zeros_like(joint_vel_hist)
+joint_acc_hist[1:] = (joint_vel_hist[1:] - joint_vel_hist[:-1]) / DT
+
+# 1차 지연 추종 오차
 theta_a_hist  = np.zeros_like(joint_hist)
 dtheta_a_hist = np.zeros_like(joint_hist)
 for leg in range(4):
@@ -482,12 +745,40 @@ wbc_tau_grav = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_ff   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_pd   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_imp  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
+wbc_tau_grf  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_cmd  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_lam_des  = np.zeros((N_FRAMES, 4, 3))
 wbc_lam_calc = np.zeros((N_FRAMES, 4, 3))
 
+mpc_fail_count = 0
+
 for fi in range(N_FRAMES):
-    n_stance = max(int(np.sum(~swing_flag[fi])), 1)
+    t_cur = fi * DT
+    contact_mask = ~swing_flag[fi]
+
+    if USE_MPC:
+        cs = np.zeros((N_MPC, 4), dtype=bool)
+        fp = np.zeros((N_MPC, 4, 3))
+        for k in range(N_MPC):
+            t_k = t_cur + k * DT_MPC
+            for leg in range(4):
+                cs[k, leg] = not sched.is_swing(leg, t_k)
+                fp[k, leg] = foot_hist[fi, leg]
+        x0_mpc = np.array([
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+            0.0, 0.0, 0.0,
+            V,   0.0, 0.0,
+            -G_ACC
+        ])
+        lam_des_all = mpc_qp_plan(x0_mpc, cs, fp)
+        for leg in range(4):
+            if swing_flag[fi, leg]:
+                lam_des_all[leg] = 0.0
+    else:
+        lam_des_all = qp_grf_distribute(contact_mask, foot_hist[fi])
+
+    wbc_lam_des[fi] = lam_des_all
 
     for leg in range(4):
         nj    = N_JOINTS_PER_LEG[leg]
@@ -495,62 +786,61 @@ for fi in range(N_FRAMES):
         dh    = LEG_DH[leg]
         lm    = LINK_MASS_PER_LEG[leg]
 
-        q_t  = joint_hist[fi, leg, :nj]
-        q_a  = theta_a_hist[fi, leg, :nj]
-        dq_t = joint_vel_hist[fi, leg, :nj]
-        dq_a = dtheta_a_hist[fi, leg, :nj]
+        q_t   = joint_hist[fi, leg, :nj]
+        q_a   = theta_a_hist[fi, leg, :nj]
+        dq_t  = joint_vel_hist[fi, leg, :nj]
+        dq_a  = dtheta_a_hist[fi, leg, :nj]
+        ddq_t = joint_acc_hist[fi, leg, :nj]
 
-        J   = compute_jacobian_sim(q_t, dh, front)    # (3, nj)
+        J   = compute_jacobian_sim(q_t, dh, front)
         J_a = compute_jacobian_sim(q_a, dh, front)
-
-        # 중력 보상 토크
         tau_g = compute_gravity_torque_sim(q_t, dh, lm, front)
 
-        # GRF 목표 (sim 좌표, +Z = 지면 반력)
-        if swing_flag[fi, leg]:
-            lam_des_leg = np.zeros(3)
-        else:
-            lam_des_leg = np.array([0.0, 0.0, BODY_MASS * G_ACC / n_stance])
-        wbc_lam_des[fi, leg] = lam_des_leg
+        lam_des_leg = lam_des_all[leg]
 
-        # 피드포워드
-        tau_ff_leg = tau_g - J.T @ lam_des_leg
+        # Phase 3: RNEA
+        tau_ff_leg  = rnea(q_t, dq_t, ddq_t, dh, lm) - J.T @ lam_des_leg
 
-        # Impedance: 발끝 J5 기준 위치/속도 오차
         foot_t_j5 = foot_local[fi, leg] + J4_TO_J5_SIM_PER_LEG[leg]
         pts_a     = forward_kinematics(q_a, dh=dh)
         foot_a_j5 = _dh_to_sim(pts_a[-1], front_leg=front)
-
-        vel_t = foot_vel_t[fi, leg]
-        vel_a = J_a @ dq_a
+        vel_t     = foot_vel_t[fi, leg]
+        vel_a     = J_a @ dq_a
 
         f_imp       = KP_IMP * (foot_t_j5 - foot_a_j5) + KD_IMP * (vel_t - vel_a)
         tau_imp_leg = J.T @ f_imp
-
-        # PD
-        tau_pd_leg = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
-
-        # 합산
+        tau_pd_leg  = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
+        tau_grf_leg = J.T @ lam_des_leg
         tau_cmd_leg = tau_pd_leg + tau_ff_leg + tau_imp_leg
 
-        # GRF 역산: λ_calc = (JJᵀ+μI)⁻¹ J (τ_grav − τ_cmd)
-        JJT = J @ J.T + MU_DAMP * np.eye(3)
+        JJT          = J @ J.T + MU_DAMP * np.eye(3)
         lam_calc_leg = np.linalg.solve(JJT, J @ (tau_g - tau_cmd_leg))
 
         wbc_tau_grav[fi, leg, :nj] = tau_g
-        wbc_tau_ff[fi, leg, :nj]   = tau_ff_leg
-        wbc_tau_pd[fi, leg, :nj]   = tau_pd_leg
-        wbc_tau_imp[fi, leg, :nj]  = tau_imp_leg
-        wbc_tau_cmd[fi, leg, :nj]  = tau_cmd_leg
+        wbc_tau_ff  [fi, leg, :nj] = tau_ff_leg
+        wbc_tau_pd  [fi, leg, :nj] = tau_pd_leg
+        wbc_tau_imp [fi, leg, :nj] = tau_imp_leg
+        wbc_tau_grf [fi, leg, :nj] = tau_grf_leg
+        wbc_tau_cmd [fi, leg, :nj] = tau_cmd_leg
         wbc_lam_calc[fi, leg]      = lam_calc_leg
 
 wbc_dur = time.perf_counter() - wbc_t0
-print(f"WBC 완료.  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
-for leg in [0, 2]:
+mode_str = f"MPC(N={N_MPC},dt={DT_MPC*1e3:.0f}ms)" if USE_MPC else "QP GRF"
+print(f"WBC 완료 [{mode_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
+
+fz_sum = np.sum(wbc_lam_des[:, :, 2], axis=1)
+print(f"  Σλz 평균={fz_sum.mean():.2f}N  (Mg={TOTAL_MASS*G_ACC:.2f}N)  "
+      f"오차={abs(fz_sum.mean()-TOTAL_MASS*G_ACC):.2f}N")
+
+for leg in [0, 3]:
     nj = N_JOINTS_PER_LEG[leg]
-    peaks = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
-                      for j in range(nj))
-    print(f"  {LEG_NAMES[leg]} τ_cmd peak [N·m]: {peaks}")
+    peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
+                          for j in range(nj))
+    fx_peak = np.max(np.abs(wbc_lam_des[:, leg, 0]))
+    fy_peak = np.max(np.abs(wbc_lam_des[:, leg, 1]))
+    fz_peak = np.max(np.abs(wbc_lam_des[:, leg, 2]))
+    print(f"  {LEG_NAMES[leg]} tau_cmd peak [N·m]: {peaks_cmd}")
+    print(f"  {LEG_NAMES[leg]} λ (GRF) peak  [N]: Fx={fx_peak:6.2f}  Fy={fy_peak:6.2f}  Fz={fz_peak:6.2f}")
 print("─" * 55)
 
 # ══════════════════════════════════════════════════════════════
@@ -583,7 +873,7 @@ ax3d.set_zlabel('Z (m)', color='white', labelpad=4)
 ax3d.tick_params(colors=_gray)
 ax3d.set_title(
     f'Gait Sim v7  [{GAIT_TYPE.upper()}]  v={V}m/s  T={T}s  D={D}  '
-    f'step_h={STEP_HEIGHT}m  step_l={STEP_LENGTH:.3f}m',
+    f'step_h={STEP_HEIGHT}m  step_l={STEP_LENGTH:.3f}m  total_mass={TOTAL_MASS:.2f}kg',
     color='white', fontsize=9)
 ax3d.view_init(elev=20, azim=-55)
 ax3d.xaxis.pane.fill = ax3d.yaxis.pane.fill = ax3d.zaxis.pane.fill = False
@@ -768,15 +1058,28 @@ def animate(fi):
     sw_str = "  ".join(
         f"{LEG_NAMES[l]}:{'SW' if swing_flag[fi, l] else 'ST'}" for l in range(4))
     deg   = np.degrees(joint_hist[fi])
-    lines = []
+    jnt_lines = []
+    tau_lines = []
+    grf_lines = []
     for leg in range(4):
-        d = deg[leg]
+        d  = deg[leg]
         tc = wbc_tau_cmd[fi, leg]
-        lines.append(f"{LEG_NAMES[leg]} "
-                     f"th1={d[0]:+5.1f}° th2={d[1]:+6.1f}° th3={d[2]:+6.1f}° "
-                     f"th4={d[3]:+5.1f}° th5={d[4]:+5.1f}°  "
-                     f"τ=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]N·m")
-    info_text.set_text(f"t={t:.3f}s\n{sw_str}\n\n" + "\n".join(lines))
+        lm = wbc_lam_des[fi, leg]
+        jnt_lines.append(f"{LEG_NAMES[leg]} "
+                         f"th1={d[0]:+5.1f}d th2={d[1]:+6.1f}d th3={d[2]:+6.1f}d "
+                         f"th4={d[3]:+5.1f}d th5={d[4]:+5.1f}d")
+        tau_lines.append(f"{LEG_NAMES[leg]} "
+                         f"tau_cmd=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm")
+        grf_lines.append(f"{LEG_NAMES[leg]} "
+                         f"lam=[{lm[0]:+5.1f} {lm[1]:+5.1f} {lm[2]:+5.1f}]N")
+    info_text.set_text(
+        f"t={t:.3f}s\n{sw_str}\n\n"
+        + "\n".join(jnt_lines)
+        + "\n\n"
+        + "\n".join(tau_lines)
+        + "\n\n"
+        + "\n".join(grf_lines)
+    )
     return []
 
 
@@ -784,9 +1087,9 @@ ani = FuncAnimation(fig, animate, frames=N_FRAMES,
                     init_func=init_anim, interval=DT*1000, blit=False, repeat=True)
 
 # ══════════════════════════════════════════════════════════════
-# 6. Figure 2: FR / HR 조인트 분석 (5×2)
+# 6. Figure 2: FR / HL 조인트 분석 (4×2)
 # ══════════════════════════════════════════════════════════════
-fig2 = plt.figure(figsize=(12, 12))
+fig2 = plt.figure(figsize=(12, 13))
 fig2.patch.set_facecolor('#1a1a2e')
 gs2 = gridspec.GridSpec(4, 2, figure=fig2, wspace=0.35, hspace=0.55,
                         left=0.07, right=0.97, top=0.93, bottom=0.05)
@@ -811,34 +1114,29 @@ def _leg_subplots(gs_pos, title, data, ylabel):
     ax.legend(fontsize=8, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=5)
     return ax.axvline(x=0, color='white', lw=1.5, ls='--')
 
-fr_ang_cur = _leg_subplots(gs2[0, 0], 'FR Joint Angles [deg]',
-                            np.degrees(joint_hist[:, 0, :5]), '[deg]')
-hr_ang_cur = _leg_subplots(gs2[0, 1], 'HR Joint Angles [deg]',
-                            np.degrees(joint_hist[:, 2, :5]), '[deg]')
-fr_vel_cur = _leg_subplots(gs2[1, 0], 'FR Joint Angular Velocity [rad/s]',
-                            joint_vel_FR[:, :5], '[rad/s]')
-hr_vel_cur = _leg_subplots(gs2[1, 1], 'HR Joint Angular Velocity [rad/s]',
-                            joint_vel_HR[:, :5], '[rad/s]')
-fr_acc_cur = _leg_subplots(gs2[2, 0], 'FR Joint Angular Acceleration [rad/s²]',
-                            joint_acc_FR[:, :5], '[rad/s²]')
-hr_acc_cur = _leg_subplots(gs2[2, 1], 'HR Joint Angular Acceleration [rad/s²]',
-                            joint_acc_HR[:, :5], '[rad/s²]')
-fr_jrk_cur = _leg_subplots(gs2[3, 0], 'FR Joint Jerk [rad/s³]',
-                            joint_jrk_FR[:, :5], '[rad/s³]')
-hr_jrk_cur = _leg_subplots(gs2[3, 1], 'HR Joint Jerk [rad/s³]',
-                            joint_jrk_HR[:, :5], '[rad/s³]')
+_leg_subplots(gs2[0, 0], 'FR Joint Pos [deg]',
+              np.degrees(joint_hist[:, 0, :5]), '[deg]')
+_leg_subplots(gs2[0, 1], 'HL Joint Pos [deg]',
+              np.degrees(joint_hist[:, 3, :5]), '[deg]')
+_leg_subplots(gs2[1, 0], 'FR Joint Angular Velocity [rad/s]', joint_vel_FR[:, :5], '[rad/s]')
+_leg_subplots(gs2[1, 1], 'HL Joint Angular Velocity [rad/s]', joint_vel_HL[:, :5], '[rad/s]')
+_leg_subplots(gs2[2, 0], 'FR Joint Angular Acceleration [rad/s²]', joint_acc_FR[:, :5], '[rad/s²]')
+_leg_subplots(gs2[2, 1], 'HL Joint Angular Acceleration [rad/s²]', joint_acc_HL[:, :5], '[rad/s²]')
+_leg_subplots(gs2[3, 0], 'FR Joint Jerk [rad/s³]', joint_jrk_FR[:, :5], '[rad/s³]')
+_leg_subplots(gs2[3, 1], 'HL Joint Jerk [rad/s³]', joint_jrk_HL[:, :5], '[rad/s³]')
 fig2.suptitle(
-    f'FR / HR Joint Analysis  |  {GAIT_TYPE.upper()}  |  '
+    f'FR / HL Joint Analysis  |  {GAIT_TYPE.upper()}  |  '
     f'v={V}m/s  T={T}s  D={D}  step_h={STEP_HEIGHT*1e3:.0f}mm  step_l={STEP_LENGTH*1e3:.0f}mm',
     color='white', fontsize=11)
 
 # ══════════════════════════════════════════════════════════════
-# 7. Figure 3: WBC 분석 (FR / HR × τ_cmd / 토크 분해 / GRF)
+# 7. Figure 3: WBC 분석 (3×2) — FR/HL
+#    row0: tau_cmd   row1: GRF lam_z   row2: GRF lam_x/lam_y + 마찰 추
 # ══════════════════════════════════════════════════════════════
 fig3 = plt.figure(figsize=(12, 10))
 fig3.patch.set_facecolor('#1a1a2e')
-gs3 = gridspec.GridSpec(3, 2, figure=fig3, wspace=0.38, hspace=0.58,
-                        left=0.07, right=0.97, top=0.92, bottom=0.06)
+gs3 = gridspec.GridSpec(3, 2, figure=fig3, wspace=0.38, hspace=0.60,
+                        left=0.07, right=0.97, top=0.93, bottom=0.06)
 
 def _style_ax3(ax, title, xlabel='Frame', ylabel=''):
     ax.set_facecolor('#16213e')
@@ -852,44 +1150,81 @@ def _style_ax3(ax, title, xlabel='Frame', ylabel=''):
 
 _ax5col = ['#ff6b6b', '#ffd166', '#06d6a0', '#4cc9f0', '#f72585']
 
-for col, leg in enumerate([0, 2]):   # FR=0, HR=2
+for col, leg in enumerate([0, 3]):   # FR=0, HL=3
     nj = N_JOINTS_PER_LEG[leg]
 
-    # row 0: τ_cmd 전체 관절
+    # row 0: tau_cmd
     ax_tc = fig3.add_subplot(gs3[0, col])
-    _style_ax3(ax_tc, f'{LEG_NAMES[leg]} τ_cmd [N·m]', ylabel='[N·m]')
+    _style_ax3(ax_tc, f'{LEG_NAMES[leg]} tau_cmd [N·m]', ylabel='[N·m]')
     ax_tc.set_xlim(0, N_FRAMES)
     for j in range(nj):
-        ax_tc.plot(_fr, wbc_tau_cmd[:, leg, j], lw=1.4,
-                   color=_ax5col[j], label=f'th{j+1}')
+        ax_tc.plot(_fr, wbc_tau_cmd[:, leg, j], lw=1.4, color=_ax5col[j], label=f'th{j+1}')
     ax_tc.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
-    ax_tc.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
-                 edgecolor='gray', ncol=5)
+    ax_tc.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=5)
 
-    # row 1: th2 기준 토크 분해 (τ_grav / τ_ff / τ_pd / τ_imp)
-    ax_td = fig3.add_subplot(gs3[1, col])
-    _style_ax3(ax_td, f'{LEG_NAMES[leg]} τ decompose th2 [N·m]', ylabel='[N·m]')
-    ax_td.set_xlim(0, N_FRAMES)
-    ax_td.plot(_fr, wbc_tau_grav[:, leg, 1], lw=1.4, color='#ffcc00', ls='--', label='τ_grav')
-    ax_td.plot(_fr, wbc_tau_ff[:, leg, 1],   lw=1.4, color='#00d4ff', label='τ_ff')
-    ax_td.plot(_fr, wbc_tau_pd[:, leg, 1],   lw=1.4, color='#ff6b35', label='τ_pd')
-    ax_td.plot(_fr, wbc_tau_imp[:, leg, 1],  lw=1.4, color='#00ff99', label='τ_imp')
-    ax_td.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
-    ax_td.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
-                 edgecolor='gray', ncol=2)
+    # row 1: GRF lam_z (lam_des vs lam_calc)
+    ax_fz = fig3.add_subplot(gs3[1, col])
+    _style_ax3(ax_fz, f'{LEG_NAMES[leg]} GRF lam_z [N]', ylabel='[N]')
+    ax_fz.set_xlim(0, N_FRAMES)
+    ax_fz.plot(_fr, wbc_lam_des [:, leg, 2], lw=1.8, color='#00d4ff', label='lam_z des')
+    ax_fz.plot(_fr, wbc_lam_calc[:, leg, 2], lw=1.4, color='magenta', ls='--', label='lam_z calc')
+    ax_fz.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
+    ax_fz.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
 
-    # row 2: GRF Fz — lam_des vs lam_calc
-    ax_grf = fig3.add_subplot(gs3[2, col])
-    _style_ax3(ax_grf, f'{LEG_NAMES[leg]} GRF Fz [N]', ylabel='[N]')
-    ax_grf.set_xlim(0, N_FRAMES)
-    ax_grf.plot(_fr, wbc_lam_des[:, leg, 2],  lw=1.8, color='#00d4ff', label='λ_des')
-    ax_grf.plot(_fr, wbc_lam_calc[:, leg, 2], lw=1.4, color='magenta', ls='--', label='λ_calc')
-    ax_grf.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
-    ax_grf.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
+    # row 2: GRF lam_x/lam_y + 마찰 추 한계
+    ax_fxy = fig3.add_subplot(gs3[2, col])
+    _style_ax3(ax_fxy, f'{LEG_NAMES[leg]} GRF lam_x/lam_y + 마찰 추 [N]', ylabel='[N]')
+    ax_fxy.set_xlim(0, N_FRAMES)
+    fric_limit = MU_FRICTION * np.abs(wbc_lam_des[:, leg, 2])
+    ax_fxy.plot(_fr, wbc_lam_des [:, leg, 0], lw=1.4, color='#ff6b6b', label='lam_x des')
+    ax_fxy.plot(_fr, wbc_lam_des [:, leg, 1], lw=1.4, color='#ffd166', label='lam_y des')
+    ax_fxy.plot(_fr, wbc_lam_calc[:, leg, 0], lw=1.2, color='#ff6b6b', ls='--', label='lam_x calc')
+    ax_fxy.plot(_fr, wbc_lam_calc[:, leg, 1], lw=1.2, color='#ffd166', ls='--', label='lam_y calc')
+    ax_fxy.fill_between(_fr,  fric_limit, -fric_limit,
+                        color='white', alpha=0.07, label=f'mu*lam_z (mu={MU_FRICTION})')
+    ax_fxy.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
+    ax_fxy.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=3)
 
 fig3.suptitle(
-    f'WBC Analysis  |  {GAIT_TYPE.upper()}  |  v={V}m/s  T={T}s  D={D}  '
-    f'BODY_MASS={BODY_MASS}kg  KP_PD={KP_PD[1]:.0f}  KP_IMP={KP_IMP[0]:.0f}',
+    f'WBC Analysis  FR/HL  |  {GAIT_TYPE.upper()}  |  v={V}m/s  T={T}s  D={D}  '
+    f'{"MPC QP (N=" + str(N_MPC) + ")" if USE_MPC else "QP GRF"}  '
+    f'mu={MU_FRICTION}  total_mass={TOTAL_MASS:.2f}kg',
+    color='white', fontsize=10)
+
+# ══════════════════════════════════════════════════════════════
+# 8. Figure 4: tau decompose th1~th4 (4×2) — FR/HL
+# ══════════════════════════════════════════════════════════════
+fig4 = plt.figure(figsize=(12, 13))
+fig4.patch.set_facecolor('#1a1a2e')
+gs4 = gridspec.GridSpec(4, 2, figure=fig4, wspace=0.38, hspace=0.58,
+                        left=0.07, right=0.97, top=0.93, bottom=0.05)
+
+def _style_ax4(ax, title, xlabel='Frame', ylabel=''):
+    ax.set_facecolor('#16213e')
+    ax.set_title(title, color='white', fontsize=9)
+    ax.set_xlabel(xlabel, color='white', fontsize=8)
+    ax.set_ylabel(ylabel, color='white', fontsize=8)
+    ax.tick_params(colors='gray')
+    ax.grid(True, alpha=0.25, color='gray')
+    for sp in ax.spines.values():
+        sp.set_edgecolor('gray')
+
+for col, leg in enumerate([0, 3]):   # FR=0, HL=3
+    for row, ji in enumerate([0, 1, 2, 3]):   # th1~th4
+        ax_td = fig4.add_subplot(gs4[row, col])
+        _style_ax4(ax_td, f'{LEG_NAMES[leg]} tau decompose th{ji+1} [N·m]', ylabel='[N·m]')
+        ax_td.set_xlim(0, N_FRAMES)
+        ax_td.plot(_fr, wbc_tau_grav[:, leg, ji], lw=1.4, color='#ffcc00', ls='--', label='tau_grav')
+        ax_td.plot(_fr, wbc_tau_ff  [:, leg, ji], lw=1.4, color='#00d4ff',           label='tau_ff')
+        ax_td.plot(_fr, wbc_tau_pd  [:, leg, ji], lw=1.4, color='#ff6b35',           label='tau_pd')
+        ax_td.plot(_fr, wbc_tau_imp [:, leg, ji], lw=1.4, color='#00ff99',           label='tau_imp')
+        ax_td.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
+        ax_td.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=2)
+
+fig4.suptitle(
+    f'FR / HL tau decompose th1~th4  |  {GAIT_TYPE.upper()}  |  '
+    f'v={V}m/s  T={T}s  D={D}  '
+    f'{"MPC QP (N=" + str(N_MPC) + ")" if USE_MPC else "QP GRF"}',
     color='white', fontsize=10)
 
 plt.figure(fig.number)
