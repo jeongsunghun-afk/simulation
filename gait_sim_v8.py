@@ -1,10 +1,10 @@
 # ┌─────────────────────────────────────────────────────────────────────┐
-# │  Opt_IK 클리핑 위치 및 주석 처리 대상                                │
+# │  Opt_IK 클리핑 위치 및 주석 처리 대상                                 │
 # │                                                                     │
 # │  종류      위치                    주석 처리 대상 (비활성화 시)       │
 # │  ──────    ──────────────────────  ──────────────────────────────── │
-# │  각속도    궤적 루프 (line 891~896) _vel_dt ~ q[:nj]=list(_q_arr) 4줄 │
-# │  토크      WBC 루프  (line 1083)  tau_cmd_leg = np.clip(...) 1줄     │
+# │  각속도    궤적 루프 (line ~910)    _vel_dt ~ q[:nj]=list(_q_arr) 4줄│
+# │  토크      WBC 루프  (line ~1103)  tau_cmd_leg = np.clip(...) 1줄    │
 # └─────────────────────────────────────────────────────────────────────┘
 
 """
@@ -96,6 +96,10 @@ Q_HOME_HIND_DEG  = [0.0, -150.0, -90.0, 90.0, 60.0]
 Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
 Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
 
+# swing 중 opt_ik 비용함수 참조 자세 (th4 음수 유도, 나머지는 home과 동일)
+Q_SWING_FRONT_DEG = [0.0, 157.5, 22.5, -100.0, 59.3417]   # th4: 30.66° → -30°
+Q_SWING_FRONT = [math.radians(a) for a in Q_SWING_FRONT_DEG]
+
 PHI_FRONT    = Q_HOME_FRONT[1] + Q_HOME_FRONT[2] + Q_HOME_FRONT[3]
 PHI_HIND     = Q_HOME_HIND[1]  + Q_HOME_HIND[2]  + Q_HOME_HIND[3]
 THETA5_FRONT = PHI_FRONT + Q_HOME_FRONT[4]
@@ -127,7 +131,9 @@ PHASE_OFFSETS = {
 BODY_MASS = 15.0 # kg (몸무게)
 G_ACC     = 9.81
 
-LINK_MASS         = np.array([3.34, 0.8, 0.2, 0.2, 0.05])  # link1~5 질량 [kg]
+#LINK_MASS         = np.array([3.34, 0.8, 0.2, 0.2, 0.05])  # link1~5 질량 [kg]
+LINK_MASS         = np.array([4.125, 1.215, 0.2, 0.2, 0.05])  # link1~5 질량 [kg] 
+# 80형번 0.915kg, 90형번 1.605kg
 LINK_MASS_PER_LEG = [LINK_MASS] * 4
 TOTAL_MASS        = BODY_MASS + float(np.sum(LINK_MASS)) * 4.0
 LINK_RADIUS       = 0.015   # [m] 링크 단면 반경 근사 (RNEA 원통 관성 텐서용)
@@ -262,17 +268,17 @@ def analytical_ik_hind(Px, Py, Pz, phi, dh, theta5_target=None):
     return [wrap(theta1), wrap(theta2), wrap(theta3), wrap(theta4)]
 
 
-def opt_ik_front(p_target_dh, q_init):
+def opt_ik_front(p_target_dh, q_init, q_ref=None):
     """SLSQP 최적화 IK — 앞다리 swing 전용.
 
     등식 제약 : FK_tip(q) = p_target          (위치 정확도 보장)
     부등식 제약: |τ_grav(q)| ≤ τ_limit        (OPT_IK_USE_TAU_LIMIT, 중력 토크 근사)
     bounds     : FRONT_Q_LIM ∩ 각속도 한계    (OPT_IK_USE_VEL_LIMIT, 정확)
-    비용       : LAMBDA_Q_OPT·||q - q_home||²
+    비용       : LAMBDA_Q_OPT·||q - q_ref||²  (q_ref=None 시 Q_HOME_FRONT 사용)
     """
     p_t = np.asarray(p_target_dh, dtype=float)
     q0  = np.asarray(q_init,      dtype=float)
-    q_h = np.asarray(Q_HOME_FRONT, dtype=float)
+    q_h = np.asarray(Q_HOME_FRONT if q_ref is None else q_ref, dtype=float)
 
     # ── 각속도 제약: FRONT_Q_LIM을 |Δq| ≤ vel_limit*DT 범위로 동적 수축 ──
     if OPT_IK_USE_VEL_LIMIT:
@@ -852,7 +858,13 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
 
                 if is_sw:
                     # Phase 4: swing → optimization IK (warm-start = 이전 프레임 q)
-                    q_opt, nit, pos_err_sq = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5])
+                    # q_ref: swing 중간에서만 Q_SWING_FRONT 쪽으로 유도 (sine 벨커브)
+                    _sw_t  = sched.swing_t(leg, t)
+                    _alpha = math.sin(math.pi * _sw_t)   # 0→1→0
+                    _q_ref = [h + _alpha * (s - h)
+                              for h, s in zip(Q_HOME_FRONT, Q_SWING_FRONT)]
+                    q_opt, nit, pos_err_sq = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5],
+                                                          q_ref=_q_ref)
                     opt_ik_nit_hist[fi, col]     = nit
                     opt_ik_pos_err_hist[fi, col] = pos_err_sq
                     if q_opt is not None:
@@ -898,11 +910,11 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
 
             nj = N_JOINTS_PER_LEG[leg]
             # 각속도 클리핑: |q - q_prev| / DT ≤ JOINT_VEL_LIMIT (모든 다리 공통)
-            # _vel_dt  = JOINT_VEL_LIMIT_RAD_S[:nj] * DT
-            # _q_arr   = np.array(q[:nj])
-            # _q_prev  = np.array(prev_q_per_leg[leg][:nj])
-            # _q_arr   = _q_prev + np.clip(_q_arr - _q_prev, -_vel_dt, _vel_dt)
-            # q[:nj]   = list(_q_arr)
+            _vel_dt  = JOINT_VEL_LIMIT_RAD_S[:nj] * DT
+            _q_arr   = np.array(q[:nj])
+            _q_prev  = np.array(prev_q_per_leg[leg][:nj])
+            _q_arr   = _q_prev + np.clip(_q_arr - _q_prev, -_vel_dt, _vel_dt)
+            q[:nj]   = list(_q_arr)
             joint_hist[fi, leg, :nj] = q[:nj]
             prev_q_per_leg[leg][:nj] = q[:nj]
         frame_calc_time[fi] = time.perf_counter() - frame_start
@@ -1342,17 +1354,28 @@ def animate(fi):
     sw_str = "  ".join(
         f"{LEG_NAMES[l]}:{'SW' if swing_flag[fi, l] else 'ST'}" for l in range(4))
     deg   = np.degrees(joint_hist[fi])
-    lines = []
+    jnt_lines = []
+    tau_lines = []
+    grf_lines = []
     for leg in range(4):
         d  = deg[leg]
         tc = wbc_tau_cmd[fi, leg]
         lm = wbc_lam_des[fi, leg]
-        lines.append(f"{LEG_NAMES[leg]} "
-                     f"th1={d[0]:+5.1f}d th2={d[1]:+6.1f}d th3={d[2]:+6.1f}d "
-                     f"th4={d[3]:+5.1f}d th5={d[4]:+5.1f}d  "
-                     f"tau_cmd=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm  "
-                     f"lam=[{lm[0]:+5.1f} {lm[1]:+5.1f} {lm[2]:+5.1f}]N")
-    info_text.set_text(f"t={t:.3f}s\n{sw_str}\n\n" + "\n".join(lines))
+        jnt_lines.append(f"{LEG_NAMES[leg]} "
+                         f"th1={d[0]:+5.1f}d th2={d[1]:+6.1f}d th3={d[2]:+6.1f}d "
+                         f"th4={d[3]:+5.1f}d th5={d[4]:+5.1f}d")
+        tau_lines.append(f"{LEG_NAMES[leg]} "
+                         f"tau_cmd=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm")
+        grf_lines.append(f"{LEG_NAMES[leg]} "
+                         f"lam=[{lm[0]:+5.1f} {lm[1]:+5.1f} {lm[2]:+5.1f}]N")
+    info_text.set_text(
+        f"t={t:.3f}s\n{sw_str}\n\n"
+        + "\n".join(jnt_lines)
+        + "\n\n"
+        + "\n".join(tau_lines)
+        + "\n\n"
+        + "\n".join(grf_lines)
+    )
     return []
 
 

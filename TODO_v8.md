@@ -93,11 +93,11 @@ MPC/QP GRF가 λ_des를 주면, 이를 joint torque로 변환할 때
 
 현재 Cycloid 해석 궤적 → 최적화 기반 관절 각도 궤적으로 교체.
 
-- [ ] 비용함수: ||FK(q) - p_des||² + λ_q·||q - q_home||² + λ_lim·(관절 한계 페널티)
-- [ ] scipy.optimize.minimize (SLSQP), warm-start = 이전 프레임 q
-- [ ] 구속: 관절 상하한, 발끝 Z ≥ 0
-- [ ] 앞다리 swing 구간에만 적용 (stance는 기존 IK 유지)
-- [ ] 수렴 실패 시 fallback: 이전 q 유지
+- [x] 비용함수: λ_q·||q - q_home||²  (위치는 등식 제약으로 분리)
+- [x] scipy.optimize.minimize (SLSQP), warm-start = 이전 프레임 q
+- [x] 구속: 관절 상하한(FRONT_Q_LIM) ∩ 각속도 한계(동적 bounds), 토크 부등식(toggle)
+- [x] 앞다리 swing 구간에만 적용 (stance는 기존 analytical IK 유지)
+- [x] 수렴 실패 시 fallback: analytical IK → Q_HOME 순으로 강등
 - [ ] (선택) Figure 2에 IK 수렴 반복 횟수 subplot 추가
 
 ---
