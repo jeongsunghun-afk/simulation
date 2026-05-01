@@ -34,7 +34,7 @@ N_CYCLES    = 4
 V           = 1
 T           = 0.5
 D           = 0.5  # Swing ratio (0.5:trot, ~0.4:walk, ~0.6:gallop)
-STEP_HEIGHT = 0.06
+STEP_HEIGHT = 0.12
 TAU_LAND    = 1.0
 
 T_SW = T * D
@@ -49,9 +49,9 @@ STEP_LENGTH = STRIDE_D / 2.0 - V * T_SW
 STANCE_DELTA = 0.005
 
 BODY_FWD_F =  0.250 # 앞다리보다 앞쪽으로 몸체 중심 (몸체 중심에서 앞다리까지의 x방향 거리)
-BODY_FWD_H = -0.300 # 앞다리보다 뒤쪽으로 몸체 중심 (몸체 중심에서 뒷다리까지의 x방향 거리)
+BODY_FWD_H = -0.250 # 앞다리보다 뒤쪽으로 몸체 중심 (몸체 중심에서 뒷다리까지의 x방향 거리)
 BODY_LAT   =  0.050 # 앞다리와 뒷다리의 좌우 간격 (몸체 중심에서 다리까지의 y방향 거리)
-BODY_X_H   = -0.050 # 앞다리보다 뒤쪽으로 힙 오프셋 (몸체 중심에서 힙까지의 x방향 거리)
+BODY_Z_H   = -0.050 # 앞다리보다 아래쪽으로 뒷다리 힙의 수직(Z) 오프셋 [m]
 
 # ── DH 파라미터 ──────────────────────────────────────────────
 DH_FRONT = [
@@ -71,8 +71,8 @@ DH_HIND = [
 
 _A2_F = 0.21; _A3_F = 0.235; _A4_F = 0.1; _A5_F = 0.045; _D2_F = 0.0075
 
-#Q_HOME_FRONT_DEG = [0.0, 157.5, 22.5, 30.6583, 59.3417] # Body_X_H=-0.1
-Q_HOME_FRONT_DEG = [0.0, 133.2973, 22.5, 30.6583, 59.3417] # Body_X_H=-0.05
+#Q_HOME_FRONT_DEG = [0.0, 157.5, 22.5, 30.6583, 59.3417] # BODY_Z_H=-0.1
+Q_HOME_FRONT_DEG = [0.0, 133.2973, 46.7027, 30.6583, 59.3417] # BODY_Z_H=-0.05
 Q_HOME_HIND_DEG  = [0.0, -150.0, -90.0, 90.0, 60.0]
 Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
 Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
@@ -95,8 +95,8 @@ N_JOINTS_MAX     = 5
 LEG_HIP_OFFSETS = np.array([
     [+BODY_FWD_F, -BODY_LAT, 0.0     ],
     [+BODY_FWD_F, +BODY_LAT, 0.0     ],
-    [+BODY_FWD_H, -BODY_LAT, BODY_X_H],
-    [+BODY_FWD_H, +BODY_LAT, BODY_X_H],
+    [+BODY_FWD_H, -BODY_LAT, BODY_Z_H],
+    [+BODY_FWD_H, +BODY_LAT, BODY_Z_H],
 ])
 
 PHASE_OFFSETS = {
@@ -141,6 +141,10 @@ MPC_Q = np.diag(_Q_DIAG)
 MPC_R = 1e-6 * np.eye(3)
 
 USE_MPC = True   # False → QP GRF 사용
+
+# Contact GRF ramp: stance 시작/끝 N% 구간에서 λ_des를 smoothstep으로 ramp.
+# swing↔stance 경계의 cmd torque step jump 완화 (논문 임피던스 흡수 효과).
+GRF_RAMP_RATIO = 0.10
 
 # ══════════════════════════════════════════════════════════════
 # 1. 기구학
@@ -821,6 +825,21 @@ for fi in range(N_FRAMES):
     else:
         lam_des_all = qp_grf_distribute(contact_mask, foot_hist[fi])
 
+    # Contact ramp (논문의 임피던스 흡수 효과 모사):
+    # stance 시작/끝 GRF_RAMP_RATIO 구간에서 λ_des를 0↔full로 smoothstep 보간
+    # → swing↔stance 전환 시 step jump 제거 (cmd torque 부드러운 전환)
+    for leg in range(4):
+        if not swing_flag[fi, leg]:
+            st_t = sched.stance_t(leg, t_cur)
+            if st_t < GRF_RAMP_RATIO:
+                tau_r = st_t / GRF_RAMP_RATIO
+                ramp  = 10*tau_r**3 - 15*tau_r**4 + 6*tau_r**5
+                lam_des_all[leg] = lam_des_all[leg] * ramp
+            elif st_t > 1.0 - GRF_RAMP_RATIO:
+                tau_r = (1.0 - st_t) / GRF_RAMP_RATIO
+                ramp  = 10*tau_r**3 - 15*tau_r**4 + 6*tau_r**5
+                lam_des_all[leg] = lam_des_all[leg] * ramp
+
     wbc_lam_des[fi] = lam_des_all
 
     for leg in range(4):
@@ -879,11 +898,14 @@ for leg in [0, 3]:
     nj = N_JOINTS_PER_LEG[leg]
     peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
                           for j in range(nj))
+    peaks_dq  = "  ".join(f"th{j+1}:{np.max(np.abs(joint_vel_hist[:, leg, j])):6.2f}"
+                          for j in range(nj))
     fx_peak = np.max(np.abs(wbc_lam_des[:, leg, 0]))
     fy_peak = np.max(np.abs(wbc_lam_des[:, leg, 1]))
     fz_peak = np.max(np.abs(wbc_lam_des[:, leg, 2]))
-    print(f"  {LEG_NAMES[leg]} tau_cmd peak [N·m]: {peaks_cmd}")
-    print(f"  {LEG_NAMES[leg]} λ (GRF) peak  [N]: Fx={fx_peak:6.2f}  Fy={fy_peak:6.2f}  Fz={fz_peak:6.2f}")
+    print(f"  {LEG_NAMES[leg]} tau_cmd peak [N·m]:  {peaks_cmd}")
+    print(f"  {LEG_NAMES[leg]} dq      peak [rad/s]:{peaks_dq}")
+    print(f"  {LEG_NAMES[leg]} λ (GRF) peak [N]:    Fx={fx_peak:6.2f}  Fy={fy_peak:6.2f}  Fz={fz_peak:6.2f}")
 print("─" * 55)
 
 # ══════════════════════════════════════════════════════════════
