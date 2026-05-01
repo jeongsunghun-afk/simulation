@@ -70,6 +70,8 @@ INIT_ERR = np.deg2rad([1.0, -2.0, 2.0, -1.5, 0.5])  # 초기 각도 오차
 # 링크 질량 [kg]  (J1:Hip Abduction, J2:Thigh, J3:Shin, J4:Foot, J5:Toe)
 LINK_MASS = np.array([3.34, 0.8, 0.2, 0.2, 0.05]) #link1, link2, link3, link4, link5 질량
 # 80형번 0.5kg, 90형번 1.42kg
+#LINK_MASS         = np.array([4.125, 1.215, 0.2, 0.2, 0.05])  # link1~5 질량 [kg] 
+# 80형번 0.915kg, 90형번 1.605kg
 G         = 9.81   # 중력 가속도 [m/s²]
 G_VEC     = np.array([-G, 0.0, 0.0])  # 중력 방향 (월드 기준, -X = 아래)
 

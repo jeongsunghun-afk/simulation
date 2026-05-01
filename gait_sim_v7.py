@@ -48,10 +48,10 @@ STEP_LENGTH = STRIDE_D / 2.0 - V * T_SW
 
 STANCE_DELTA = 0.005
 
-BODY_FWD_F =  0.250
-BODY_FWD_H = -0.250
-BODY_LAT   =  0.050
-BODY_X_H   = -0.100
+BODY_FWD_F =  0.250 # 앞다리보다 앞쪽으로 몸체 중심 (몸체 중심에서 앞다리까지의 x방향 거리)
+BODY_FWD_H = -0.300 # 앞다리보다 뒤쪽으로 몸체 중심 (몸체 중심에서 뒷다리까지의 x방향 거리)
+BODY_LAT   =  0.050 # 앞다리와 뒷다리의 좌우 간격 (몸체 중심에서 다리까지의 y방향 거리)
+BODY_X_H   = -0.050 # 앞다리보다 뒤쪽으로 힙 오프셋 (몸체 중심에서 힙까지의 x방향 거리)
 
 # ── DH 파라미터 ──────────────────────────────────────────────
 DH_FRONT = [
@@ -71,7 +71,8 @@ DH_HIND = [
 
 _A2_F = 0.21; _A3_F = 0.235; _A4_F = 0.1; _A5_F = 0.045; _D2_F = 0.0075
 
-Q_HOME_FRONT_DEG = [0.0, 157.5, 22.5, 30.6583, 59.3417]
+#Q_HOME_FRONT_DEG = [0.0, 157.5, 22.5, 30.6583, 59.3417] # Body_X_H=-0.1
+Q_HOME_FRONT_DEG = [0.0, 133.2973, 22.5, 30.6583, 59.3417] # Body_X_H=-0.05
 Q_HOME_HIND_DEG  = [0.0, -150.0, -90.0, 90.0, 60.0]
 Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
 Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
@@ -86,7 +87,7 @@ PHI_PER_LEG         = [PHI_FRONT, PHI_FRONT, PHI_HIND, PHI_HIND]
 TRAJ_PT_IDX_PER_LEG = [4, 4, 4, 4]
 
 LEG_NAMES        = ['FR', 'FL', 'HR', 'HL']
-LEG_COLORS       = ['#00d4ff', '#ff6b35', '#00ff99', '#ffcc00']
+LEG_COLORS       = ['#00d4ff', '#ff6b35', '#00ff99', '#c264ff']
 LEG_DH           = [DH_FRONT, DH_FRONT, DH_HIND, DH_HIND]
 N_JOINTS_PER_LEG = [5, 5, 5, 5]
 N_JOINTS_MAX     = 5
@@ -538,26 +539,69 @@ class GaitScheduler:
         return 0.0
 
 
-def swing_foot_pos(sw_t, p_start, p_end, step_height=STEP_HEIGHT, tau_land=TAU_LAND):
+_swing_z_cache = {}
+
+def _swing_z_coeffs(step_h, T_half, V_z_boundary):
+    """Swing Z 6차 짝수 다항식 계수 [c2, c4, c6] (Zeng 2019 Eq 23-25 + jerk 연속).
+    Z(u) = step_h + c2·u² + c4·u⁴ + c6·u⁶,  u ∈ [-T_half, +T_half]
+    조건:
+      Z(±T_half) = 0                       (양 끝 ground level)
+      Z'(-T_half) = +V_z_boundary          (stance 끝 vel과 C1 연속)
+      Z''(±T_half) = 0                     (stance acc=0 과 C2 연속)
+    홀수 미분(Z', Z''', Z⁽⁵⁾)은 u=0에서 자동 0 → peak에서 jerk=0 (논문 6차 spline 동치)
+    """
+    key = (round(step_h, 9), round(T_half, 9), round(V_z_boundary, 9))
+    c = _swing_z_cache.get(key)
+    if c is not None:
+        return c
+    T = T_half
+    A = np.array([
+        [T**2,   T**4,    T**6   ],
+        [2.0,    12.0*T**2, 30.0*T**4],
+        [2.0*T,  4.0*T**3,  6.0*T**5],
+    ])
+    b = np.array([-step_h, 0.0, -V_z_boundary])
+    c2, c4, c6 = np.linalg.solve(A, b)
+    _swing_z_cache[key] = (c2, c4, c6)
+    return (c2, c4, c6)
+
+
+def swing_foot_pos(sw_t, p_start, p_end, body_vel,
+                   step_height=STEP_HEIGHT, tau_land=TAU_LAND):
+    """Swing 궤적 (Zeng 2019 Scheme I, Spline 기반).
+      X: 5차 spline (양 끝 vel = -body_vel·x, acc = 0; stance 등속과 C2 연속)
+      Y: 5차 smoothstep (좌우 보간)
+      Z: 6차 대칭 다항식 (peak=step_height, stance Z의 vel/acc와 C2 연속, jerk 연속)
+    """
     if sw_t >= tau_land:
         return p_end.copy()
     tau = sw_t / tau_land
-    s   = 10*tau**3 - 15*tau**4 + 6*tau**5
-    pos = (1.0 - s) * p_start + s * p_end
-    pos = pos.copy()
-    pos[2] = p_start[2] + step_height * (4 * tau * (1 - tau))**3
+    s5  = 10*tau**3 - 15*tau**4 + 6*tau**5     # 5차 smoothstep (vel/acc 양끝 0)
+    T_local = tau_land * T_SW
+
+    # X: stance 등속(-body_vel·x)과 vel/acc 연속.  ΔX = (X_e - X_s) + V·T_local
+    DX_x = (p_end[0] - p_start[0]) + body_vel[0] * T_local
+    pos = np.empty(3)
+    pos[0] = p_start[0] - body_vel[0] * tau * T_local + DX_x * s5
+    pos[1] = (1.0 - s5) * p_start[1] + s5 * p_end[1]
+
+    # Z: 6차 짝수 다항식 (u = t - T_half)
+    T_half = T_local / 2.0
+    u = tau * T_local - T_half
+    V_z_boundary = STANCE_DELTA * math.pi / T_ST   # stance Z'(end) = +Δπ/T_ST
+    c2, c4, c6 = _swing_z_coeffs(step_height, T_half, V_z_boundary)
+    z_offset = step_height + c2*u*u + c4*u**4 + c6*u**6   # 0 at u=±T_half, peak at u=0
+    pos[2] = p_start[2] + z_offset
     return pos
 
 
 def stance_foot_pos(st_t, p_contact, body_vel, stance_dur):
-    """Stance 궤적: 사인 함수 (착지 연속성)"""
-    s = st_t**3 * (10.0 - 15.0*st_t + 6.0*st_t**2)
-    pos = p_contact - body_vel * stance_dur * s
+    """Stance 궤적 (Zeng 2019 Eq 11-13).
+      X: 등속도 V·t  (지면 미끄러짐 0)
+      Z: -Δ·sin(π·t/T_st)  (가상 침투, 임피던스 흡수용; swing 끝/시작과 C2 연속)
+    """
+    pos = p_contact - body_vel * stance_dur * st_t
     pos = pos.copy()
-    # Z: 사인 함수 (C2 연속)
-    # st_t=0: sin(0)=0      → p_contact[2] (swing과 연속)
-    # st_t=0.5: sin(π/2)=1  → p_contact[2] - STANCE_DELTA (최대 침투)
-    # st_t=1: sin(π)=0      → p_contact[2] (다음 swing과 연속)
     pos[2] = p_contact[2] - STANCE_DELTA * math.sin(math.pi * st_t)
     return pos
 
@@ -624,14 +668,20 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
             swing_flag[fi, leg] = is_sw
 
             if is_sw and not prev_swing[leg]:
-                foot_sw_start[leg] = foot_local_prev[leg].copy()
+                # stance 끝점(st_t=1)을 정확히 평가하여 swing 시작점으로 사용
+                # → boundary frame에서 한 step 변위가 일관되어 vel/acc 측정 정상화
+                foot_sw_start[leg] = stance_foot_pos(1.0, foot_contact[leg],
+                                                     body_vel * traj_scale, stance_dur)
             if not is_sw and prev_swing[leg]:
-                foot_contact[leg] = foot_local_prev[leg].copy()
+                # swing 끝점(sw_t=1)을 정확히 평가하여 stance contact으로 사용
+                foot_contact[leg] = (home_foot_per_leg[leg]
+                                     + np.array([STEP_LENGTH * traj_scale, 0.0, 0.0]))
 
             if is_sw:
                 sw_t  = sched.swing_t(leg, t)
                 p_end = home_foot_per_leg[leg] + np.array([STEP_LENGTH * traj_scale, 0, 0])
                 foot_loc = swing_foot_pos(sw_t, foot_sw_start[leg], p_end,
+                                         body_vel * traj_scale,
                                          step_height=STEP_HEIGHT * height_scale)
             else:
                 st_t = sched.stance_t(leg, t)
@@ -682,8 +732,8 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     calc_total = time.perf_counter() - calc_start
 
     joint_hist_unwrapped = np.unwrap(joint_hist, axis=0)
-    joint_vel_hist = np.zeros_like(joint_hist)
-    joint_vel_hist[1:] = (joint_hist_unwrapped[1:] - joint_hist_unwrapped[:-1]) / DT
+    # np.gradient: boundary는 forward/backward 차분 → 첫 frame spike 제거
+    joint_vel_hist = np.gradient(joint_hist_unwrapped, DT, axis=0)
 
     peak_per_joint = np.max(np.abs(joint_vel_hist), axis=(0, 1))
     ratio_per_joint = peak_per_joint / JOINT_VEL_LIMIT_RAD_S
@@ -698,22 +748,16 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
 print(f"궤적 완료. iter={opt_iter_used}  scale={traj_scale:.4f}")
 
 joint_vel_FR = joint_vel_hist[:, 0, :]
-joint_acc_FR = np.zeros_like(joint_vel_FR)
-joint_acc_FR[1:] = (joint_vel_FR[1:] - joint_vel_FR[:-1]) / DT
-joint_jrk_FR = np.zeros_like(joint_acc_FR)
-joint_jrk_FR[1:] = (joint_acc_FR[1:] - joint_acc_FR[:-1]) / DT
+joint_acc_FR = np.gradient(joint_vel_FR, DT, axis=0)
+joint_jrk_FR = np.gradient(joint_acc_FR, DT, axis=0)
 
 joint_vel_HR = joint_vel_hist[:, 2, :]
-joint_acc_HR = np.zeros_like(joint_vel_HR)
-joint_acc_HR[1:] = (joint_vel_HR[1:] - joint_vel_HR[:-1]) / DT
-joint_jrk_HR = np.zeros_like(joint_acc_HR)
-joint_jrk_HR[1:] = (joint_acc_HR[1:] - joint_acc_HR[:-1]) / DT
+joint_acc_HR = np.gradient(joint_vel_HR, DT, axis=0)
+joint_jrk_HR = np.gradient(joint_acc_HR, DT, axis=0)
 
 joint_vel_HL = joint_vel_hist[:, 3, :]
-joint_acc_HL = np.zeros_like(joint_vel_HL)
-joint_acc_HL[1:] = (joint_vel_HL[1:] - joint_vel_HL[:-1]) / DT
-joint_jrk_HL = np.zeros_like(joint_acc_HL)
-joint_jrk_HL[1:] = (joint_acc_HL[1:] - joint_acc_HL[:-1]) / DT
+joint_acc_HL = np.gradient(joint_vel_HL, DT, axis=0)
+joint_jrk_HL = np.gradient(joint_acc_HL, DT, axis=0)
 
 foot_local  = foot_hist - LEG_HIP_OFFSETS[np.newaxis, :, :]
 foot_vel_t  = np.gradient(foot_local, DT, axis=0)
@@ -726,8 +770,7 @@ print(f"WBC + {'MPC QP' if USE_MPC else 'QP GRF'} 계산 중...")
 wbc_t0 = time.perf_counter()
 
 # 관절 가속도 (RNEA용)
-joint_acc_hist = np.zeros_like(joint_vel_hist)
-joint_acc_hist[1:] = (joint_vel_hist[1:] - joint_vel_hist[:-1]) / DT
+joint_acc_hist = np.gradient(joint_vel_hist, DT, axis=0)
 
 # 1차 지연 추종 오차
 theta_a_hist  = np.zeros_like(joint_hist)
@@ -739,7 +782,7 @@ for leg in range(4):
         prev   = theta_a_hist[fi-1, leg, :nj]
         target = joint_hist[fi-1, leg, :nj]
         theta_a_hist[fi, leg, :nj] = prev + (DT / TAU_LAG) * (target - prev)
-    dtheta_a_hist[1:, leg, :nj] = np.diff(theta_a_hist[:, leg, :nj], axis=0) / DT
+    dtheta_a_hist[:, leg, :nj] = np.gradient(theta_a_hist[:, leg, :nj], DT, axis=0)
 
 wbc_tau_grav = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_ff   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
@@ -969,7 +1012,8 @@ ax_zv = fig.add_subplot(gs[2, 1])
 _style_ax(ax_zv, 'Step Height Velocity  dZ/dt [m/s]', ylabel='[m/s]')
 ax_zv.set_xlim(0, N_FRAMES)
 for leg in range(4):
-    ax_zv.plot(_fr, foot_vel_t[:, leg, 2], lw=1.6, color=LEG_COLORS[leg], label=LEG_NAMES[leg])
+    ax_zv.plot(_fr, foot_vel_t[:, leg, 2], lw=1.6, color=LEG_COLORS[leg],
+               ls='--' if leg >= 2 else '-', label=LEG_NAMES[leg])
 ax_zv.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor=_gray, ncol=4)
 zv_cursor = ax_zv.axvline(x=0, color='white', lw=1.5, ls='--')
 
@@ -977,7 +1021,8 @@ ax_xv = fig.add_subplot(gs[2, 2])
 _style_ax(ax_xv, 'Step Length Velocity  dX/dt [m/s]', ylabel='[m/s]')
 ax_xv.set_xlim(0, N_FRAMES)
 for leg in range(4):
-    ax_xv.plot(_fr, foot_vel_t[:, leg, 0], lw=1.6, color=LEG_COLORS[leg], label=LEG_NAMES[leg])
+    ax_xv.plot(_fr, foot_vel_t[:, leg, 0], lw=1.6, color=LEG_COLORS[leg],
+               ls='--' if leg >= 2 else '-', label=LEG_NAMES[leg])
 ax_xv.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor=_gray, ncol=4)
 xv_cursor = ax_xv.axvline(x=0, color='white', lw=1.5, ls='--')
 
@@ -985,7 +1030,8 @@ ax_za = fig.add_subplot(gs[3, 1])
 _style_ax(ax_za, 'Step Height Acceleration  d²Z/dt² [m/s²]', ylabel='[m/s²]')
 ax_za.set_xlim(0, N_FRAMES)
 for leg in range(4):
-    ax_za.plot(_fr, foot_acc_t[:, leg, 2], lw=1.6, color=LEG_COLORS[leg], label=LEG_NAMES[leg])
+    ax_za.plot(_fr, foot_acc_t[:, leg, 2], lw=1.6, color=LEG_COLORS[leg],
+               ls='--' if leg >= 2 else '-', label=LEG_NAMES[leg])
 ax_za.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor=_gray, ncol=4)
 za_cursor = ax_za.axvline(x=0, color='white', lw=1.5, ls='--')
 
@@ -993,7 +1039,8 @@ ax_xa = fig.add_subplot(gs[3, 2])
 _style_ax(ax_xa, 'Step Length Acceleration  d²X/dt² [m/s²]', ylabel='[m/s²]')
 ax_xa.set_xlim(0, N_FRAMES)
 for leg in range(4):
-    ax_xa.plot(_fr, foot_acc_t[:, leg, 0], lw=1.6, color=LEG_COLORS[leg], label=LEG_NAMES[leg])
+    ax_xa.plot(_fr, foot_acc_t[:, leg, 0], lw=1.6, color=LEG_COLORS[leg],
+               ls='--' if leg >= 2 else '-', label=LEG_NAMES[leg])
 ax_xa.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor=_gray, ncol=4)
 xa_cursor = ax_xa.axvline(x=0, color='white', lw=1.5, ls='--')
 
