@@ -60,7 +60,7 @@ STEP_LENGTH = STRIDE_D / 2.0 - V * T_SW
 STANCE_DELTA = 0.005
 
 BODY_FWD_F =  0.250
-BODY_FWD_H = -0.300
+BODY_FWD_H = -0.250
 BODY_LAT   =  0.050
 BODY_Z_H   = -0.050  # 앞다리보다 아래쪽으로 뒷다리 힙의 수직(Z) 오프셋 [m]
 
@@ -89,7 +89,7 @@ Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
 Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
 
 # swing 중 opt_ik 비용함수 참조 자세 (th4 음수 유도, 나머지는 home과 동일)
-Q_SWING_FRONT_DEG = [0.0, 157.5, 22.5, -100.0, 59.3417]   # th4: 30.66° → -30°
+Q_SWING_FRONT_DEG = [0.0, 118.2973, 96.7027, -69.3417, 59.3417]  # BODY_Z_H=-0.05 기준, th4 음수 유도 (발 들리는 효과)
 Q_SWING_FRONT = [math.radians(a) for a in Q_SWING_FRONT_DEG]
 
 PHI_FRONT    = Q_HOME_FRONT[1] + Q_HOME_FRONT[2] + Q_HOME_FRONT[3]
@@ -264,17 +264,20 @@ def analytical_ik_hind(Px, Py, Pz, phi, dh, theta5_target=None):
     return [wrap(theta1), wrap(theta2), wrap(theta3), wrap(theta4)]
 
 
-def opt_ik_front(p_target_dh, q_init):
-    """SLSQP 최적화 IK — 앞다리 swing 전용 (smoothness regularization).
+def opt_ik_front(p_target_dh, q_init, q_ref=None):
+    """SLSQP 최적화 IK — 앞다리.
 
     등식 제약 : FK_tip(q) = p_target          (위치 정확도 보장)
+                q[4] = Q_HOME_FRONT[4]        (toe 고정 — IK에서 제외)
     부등식 제약: |τ_grav(q)| ≤ τ_limit        (OPT_IK_USE_TAU_LIMIT, 중력 토크 근사)
     bounds     : FRONT_Q_LIM ∩ 각속도 한계    (OPT_IK_USE_VEL_LIMIT, 정확)
-    비용       : LAMBDA_Q_OPT·||q - q_init||² (warm-start로부터 변화 최소화)
-                 → 참조 자세 없음, frame간 smoothness만 강제 (2 DoF redundancy 보존)
+    비용       : LAMBDA_Q_OPT·||q - q_ref||² + LAMBDA_TAU_OPT·||τ_grav(q)||²
+                 - q_ref가 주어지면 그 자세 추종 (swing1/swing2 quintic blend)
+                 - q_ref=None이면 q_init 사용 (smoothness only)
     """
-    p_t = np.asarray(p_target_dh, dtype=float)
-    q0  = np.asarray(q_init,      dtype=float)
+    p_t   = np.asarray(p_target_dh, dtype=float)
+    q0    = np.asarray(q_init, dtype=float)
+    q_tgt = q0 if q_ref is None else np.asarray(q_ref, dtype=float)
 
     # ── 각속도 제약: FRONT_Q_LIM을 |Δq| ≤ vel_limit*DT 범위로 동적 수축 ──
     if OPT_IK_USE_VEL_LIMIT:
@@ -305,12 +308,12 @@ def opt_ik_front(p_target_dh, q_init):
         constraints.append({'type': 'ineq', 'fun': _torque_ineq})
 
     def cost(q):
-        # smoothness: warm-start 변화량 최소화
-        c_q = LAMBDA_Q_OPT * np.dot(q - q0, q - q0)
+        # 참조 자세 추종 (q_ref=None이면 q_init = warm-start smoothness)
+        c_qref = LAMBDA_Q_OPT * np.dot(q - q_tgt, q - q_tgt)
         # τ_grav minimize: redundancy를 토크 작은 자세로 자동 사용
-        tau_g = compute_gravity_torque_sim(q, DH_FRONT, _lm_front, front_leg=True)
-        c_tau = LAMBDA_TAU_OPT * np.dot(tau_g, tau_g)
-        return float(c_q + c_tau)
+        tau_g  = compute_gravity_torque_sim(q, DH_FRONT, _lm_front, front_leg=True)
+        c_tau  = LAMBDA_TAU_OPT * np.dot(tau_g, tau_g)
+        return float(c_qref + c_tau)
 
     res = _sp_minimize(cost, q0, method='SLSQP', bounds=active_bounds,
                        constraints=constraints,
@@ -903,9 +906,22 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                 col = leg  # 0=FR, 1=FL
 
                 # Phase 4: swing/stance 모두 optimization IK (warm-start = 이전 프레임 q)
-                # 참조 자세 없음 — 등식(FK 위치)·부등식(τ_grav)·bounds(q·dq) 만족 해
-                # → swing↔stance 경계에서 자세 점프 제거 (동일 IK라 자연스러운 redundancy 연속)
-                q_opt, nit, pos_err_sq = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5])
+                # 참조 자세 추종:
+                #   swing1(0~½T_sw): home → Q_SWING_FRONT (quintic blend)
+                #   swing2(½T_sw~T_sw): Q_SWING_FRONT → home (quintic blend)
+                #   stance: home (Q_HOME_FRONT)
+                if is_sw:
+                    _sw_t = sched.swing_t(leg, t)
+                    if _sw_t <= 0.5:
+                        _alpha = _quintic_s(_sw_t / 0.5)             # 0→1
+                    else:
+                        _alpha = 1.0 - _quintic_s((_sw_t - 0.5) / 0.5)  # 1→0
+                    _q_ref = [h + _alpha * (sw - h)
+                              for h, sw in zip(Q_HOME_FRONT, Q_SWING_FRONT)]
+                else:
+                    _q_ref = list(Q_HOME_FRONT)
+                q_opt, nit, pos_err_sq = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5],
+                                                      q_ref=_q_ref)
                 opt_ik_nit_hist[fi, col]     = nit
                 opt_ik_pos_err_hist[fi, col] = pos_err_sq
                 if q_opt is not None:
