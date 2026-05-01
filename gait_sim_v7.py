@@ -34,7 +34,7 @@ N_CYCLES    = 4
 V           = 1
 T           = 0.5
 D           = 0.5  # Swing ratio (0.5:trot, ~0.4:walk, ~0.6:gallop)
-STEP_HEIGHT = 0.12
+STEP_HEIGHT = 0.08
 TAU_LAND    = 1.0
 
 T_SW = T * D
@@ -638,8 +638,8 @@ MAX_TRAJ_OPT_ITERS = 6
 
 print("─" * 55)
 print(f"궤적 계산 중...  [{GAIT_TYPE}]  {N_CYCLES}사이클  {N_FRAMES}프레임")
-print(f"  V={V}m/s  T={T}s  D={D}  T_SW={T_SW:.3f}s  T_ST={T_ST:.3f}s")
-print(f"  STRIDE_D={STRIDE_D*1e3:.1f}mm  STEP_LENGTH={STEP_LENGTH*1e3:.1f}mm")
+print(f"  V={V}m/s  T={T}s  D={D}  T_SW={T_SW:.3f}s  T_ST={T_ST:.3f}s  "
+      f"STEP_HEIGHT={STEP_HEIGHT*1e3:.0f}mm  STEP_LENGTH={STEP_LENGTH*1e3:.0f}mm")
 
 traj_scale = 1.0
 height_scale = 1.0
