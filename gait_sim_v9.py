@@ -1,22 +1,25 @@
 """
-gait_sim_v8.py  —  4족 보행 Gait 시뮬레이터 + WBC + MPC QP GRF
-v8: v7 대비 변경사항
-    · Phase 2 — QP GRF: 단일 스텝 힘 평형 + 마찰 추 QP (fallback)
-    · Phase 1 — MPC QP: N스텝 horizon 선형화 부유 베이스 MPC
-        - 상태: x=[roll,pitch,yaw, px,py,pz, ω, v, g] (13dim)
-        - 제어: u=[λ_FR, λ_FL, λ_HR, λ_HL] (12dim, swing=0)
-        - 비용: ||x-x_ref||²_Q + ||u||²_R
-        - 구속: 마찰 추 |λ_x|,|λ_y| ≤ μ·λ_z, λ_z≥0
-    · Figure 3: 4×2로 확장 — GRF Fx/Fy 마찰 추 시각화 추가
-    · Phase 3 — RNEA: M(q)·q̈ + C(q,q̇)·q̇ + g(q) 완전 강체 동역학
-        - tau_ff = RNEA(q,q̇,q̈) − Jᵀ·λ_des  (기존 quasi-static g(q) → 완전 동역학)
+gait_sim_v9.py  —  4족 보행 Gait 시뮬레이터 + WBIC QP (Phase 5)
 
-[MOD] v8.1 수정사항:
-    · LINK_MASS 값 수정: [3.34, 0.8, 0.2, 0.2, 0.05] (기존: [0.5, 0.8, 0.2, 0.2, 0.05])
-    · GRF 계산에 TOTAL_MASS 적용: body_mass + 4×link_mass 기반 힘 평형
-    · tau_GRF 추가: GRF로부터 유도되는 조인트 토크 계산 및 로깅
-    · Figure 3 제목 수정: Body_MASS → total_mass 표기
-    · scipy SLSQP(0.2~0.5ms) vs NLopt LD_SLSQP(0.05~0.2ms) : 2~3배 속도차
+v8 대비 추가:
+    · Phase 5 — WBIC QP (per-leg baseline):
+        변수  x_leg = [Δq̈ (nj), Δτ (nj), Δλ (3)]
+        비용  α·||Δq̈||² + β·||Δτ||² + γ·||Δλ||²
+        등식  M(q)·(q̈+Δq̈) + h(q,q̇) = (τ_ff+Δτ) + Jᵀ·(λ_des+Δλ)
+              → M·Δq̈ - Δτ - Jᵀ·Δλ = r,  r = τ_ff + Jᵀ·λ_des − M·q̈ − h
+        부등  τ_min ≤ τ_ff+Δτ ≤ τ_max
+              stance: |λ_x|,|λ_y| ≤ μ·λ_z,  λ_z ≥ λ_z_min
+              swing : λ = 0 (Δλ = −λ_des)
+        결과: τ_cmd_leg = τ_pd + (τ_ff + Δτ_opt) + τ_imp
+              λ_used    = λ_des + Δλ_opt    (로깅용)
+
+    · WBIC 토글: USE_WBIC = True/False
+        False면 v8 동작 (RNEA τ_ff 직접 사용 + clip)
+
+    · 진단 배열: wbic_dtau_hist, wbic_dlam_hist, wbic_residual_hist
+
+v8 누적 (참고):
+    · Phase 1 MPC QP, Phase 2 QP GRF, Phase 3 RNEA, Phase 4 Opt-IK (앞/뒷다리)
 """
 
 import math
@@ -34,7 +37,7 @@ for key in mpl.rcParams:
     if key.startswith("keymap."):
         mpl.rcParams[key] = []
 mpl.rcParams['font.family'] = 'sans-serif'
-mpl.rcParams['font.sans-serif'] = ['DejaVu Sans', 'NanumGothic', 'Arial Unicode MS']
+mpl.rcParams['font.sans-serif'] = ['NanumGothic', 'DejaVu Sans', 'Arial Unicode MS']
 mpl.rcParams['axes.unicode_minus'] = False
 
 # ══════════════════════════════════════════════════════════════
@@ -527,6 +530,84 @@ def rnea(q, dq, ddq, dh, link_mass):
     return tau
 
 
+# ── Phase 5: WBIC QP (per-leg baseline) ──────────────────────
+
+def compute_mh_leg(q, dq, dh, lm):
+    """Mass matrix M(q) (n×n)과 h(q,q̇)=C·q̇+g(q) (n,)를 RNEA로 추출.
+    g(q) = RNEA(q, 0, 0)
+    h    = RNEA(q, q̇, 0)
+    M[:,j] = RNEA(q, 0, e_j) - g(q)   (composite rigid body 단위가속도 trick)
+    """
+    n = len(q)
+    zero = np.zeros(n)
+    g_vec = rnea(q, zero, zero, dh, lm)
+    h_vec = rnea(q, dq,   zero, dh, lm)
+    M = np.zeros((n, n))
+    for j in range(n):
+        ej = np.zeros(n); ej[j] = 1.0
+        M[:, j] = rnea(q, zero, ej, dh, lm) - g_vec
+    return M, h_vec
+
+
+def wbic_qp_leg(M, h, ddq_des, tau_ff, lam_des, J, contact, nj,
+                w_ddq, w_tau, w_lam, lamz_min, mu):
+    """Per-leg WBIC QP correction.
+
+    변수 : x = [Δq̈ (nj); Δτ (nj); Δλ (3)]
+    비용 : w_ddq‖Δq̈‖² + w_tau‖Δτ‖² + w_lam‖Δλ‖²
+    등식 : M·Δq̈ - Δτ - Jᵀ·Δλ = r,  r = tau_ff + Jᵀ·λ_des - M·ddq_des - h
+    부등 : τ_min ≤ tau_ff+Δτ ≤ τ_max
+           stance: λ_z+Δλ_z ≥ lamz_min,  |λ_x,y+Δλ_x,y| ≤ μ(λ_z+Δλ_z)
+           swing : Δλ = -λ_des  (λ=0 고정)
+
+    Returns (dq̈, dτ, dλ, success, residual_pre)
+    """
+    n_v = nj + nj + 3
+    P = np.diag([w_ddq]*nj + [w_tau]*nj + [w_lam]*3)
+    qv = np.zeros(n_v)
+
+    # 등식
+    A_eq = np.hstack([M, -np.eye(nj), -J.T])
+    r    = tau_ff + J.T @ lam_des - M @ ddq_des - h
+    b_eq = r.copy()
+    residual_pre = float(np.linalg.norm(r))
+
+    # bounds
+    lb = np.full(n_v, -1e8)
+    ub = np.full(n_v,  1e8)
+    lb[nj:2*nj] = -JOINT_TORQUE_LIMIT[:nj] - tau_ff
+    ub[nj:2*nj] =  JOINT_TORQUE_LIMIT[:nj] - tau_ff
+
+    G = None; h_ineq = None
+    if contact:
+        # λ_z + Δλ_z ≥ lamz_min  →  Δλ_z ≥ lamz_min - λ_z (bound 사용)
+        lb[2*nj + 2] = max(lb[2*nj + 2], lamz_min - lam_des[2])
+        # 마찰 추 4개 부등식
+        rows = []; rhs = []
+        # +Δλ_x - μ·Δλ_z ≤ μ·λ_z - λ_x
+        rows.append([(2*nj + 0,  1.0), (2*nj + 2, -mu)]); rhs.append(mu*lam_des[2] - lam_des[0])
+        rows.append([(2*nj + 0, -1.0), (2*nj + 2, -mu)]); rhs.append(mu*lam_des[2] + lam_des[0])
+        rows.append([(2*nj + 1,  1.0), (2*nj + 2, -mu)]); rhs.append(mu*lam_des[2] - lam_des[1])
+        rows.append([(2*nj + 1, -1.0), (2*nj + 2, -mu)]); rhs.append(mu*lam_des[2] + lam_des[1])
+        G = np.zeros((4, n_v))
+        for i, row in enumerate(rows):
+            for idx, val in row:
+                G[i, idx] = val
+        h_ineq = np.array(rhs, dtype=float)
+    else:
+        # swing: Δλ = -λ_des (Δλ를 정확한 값으로 고정)
+        lb[2*nj:2*nj+3] = -lam_des
+        ub[2*nj:2*nj+3] = -lam_des
+
+    try:
+        sol = qpsolvers.solve_qp(P, qv, G, h_ineq, A_eq, b_eq, lb, ub, solver='quadprog')
+    except Exception:
+        sol = None
+    if sol is None:
+        return None, None, None, False, residual_pre
+    return sol[:nj], sol[nj:2*nj], sol[2*nj:], True, residual_pre
+
+
 def qp_grf_distribute(contact_mask, foot_pos_world):
     """
     Phase 2 — 단일 스텝 QP GRF 배분 (MPC fallback)
@@ -866,7 +947,14 @@ OPT_IK_MAXITER = 100
 # 제약 ON/OFF — True/False 한 줄로 켜고 끔
 OPT_IK_USE_VEL_LIMIT = True   # 각속도 제약: |Δq/DT| ≤ JOINT_VEL_LIMIT_RAD_S (bounds 동적 수축)
 OPT_IK_USE_TAU_LIMIT = True   # 토크 제약: |τ_grav(q)| ≤ JOINT_TORQUE_LIMIT  (근사, 속도 영향)
-USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+
+# ── Phase 5: WBIC QP 파라미터 ────────────────────────────────
+USE_WBIC      = True     # False면 v8 동작 (RNEA τ_ff 직접 사용 + clip)
+WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
+WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
+WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
+WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
+USE_SWING_QREF_BLEND = False   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
@@ -1153,7 +1241,15 @@ wbc_tau_grf  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))  # GRF로부터 유도되�
 wbc_lam_des  = np.zeros((N_FRAMES, 4, 3))   # [Fx, Fy, Fz]
 wbc_lam_calc = np.zeros((N_FRAMES, 4, 3))
 
+# Phase 5: WBIC 진단 배열
+wbic_dtau_hist     = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
+wbic_dlam_hist     = np.zeros((N_FRAMES, 4, 3))
+wbic_residual_hist = np.zeros((N_FRAMES, 4))    # eq 잔차 norm (사실상 0이어야 함)
+wbic_status_hist   = np.zeros((N_FRAMES, 4), dtype=bool)  # solver 성공 여부
+wbic_lam_used      = np.zeros((N_FRAMES, 4, 3))   # 실제 사용된 λ = λ_des + Δλ
+
 mpc_fail_count = 0
+wbic_fail_count = 0
 
 for fi in range(N_FRAMES):
     t_cur = fi * DT
@@ -1223,7 +1319,28 @@ for fi in range(N_FRAMES):
         lam_des_leg = lam_des_all[leg]   # [Fx, Fy, Fz]
 
         # Phase 3: RNEA — M(q)q̈ + C(q,q̇)q̇ + g(q) 완전 동역학
-        tau_ff_leg = rnea(q_t, dq_t, ddq_t, dh, lm) - J.T @ lam_des_leg
+        tau_rnea_leg = rnea(q_t, dq_t, ddq_t, dh, lm)
+        tau_ff_leg   = tau_rnea_leg - J.T @ lam_des_leg
+
+        # Phase 5: WBIC QP — τ_ff/λ_des를 토크 한계·마찰 추 안으로 보정
+        lam_used_leg = lam_des_leg.copy()
+        if USE_WBIC:
+            M_leg, h_leg = compute_mh_leg(q_t, dq_t, dh, lm)
+            d_ddq, d_tau, d_lam, ok, res = wbic_qp_leg(
+                M_leg, h_leg, ddq_t, tau_ff_leg, lam_des_leg, J,
+                contact=(not swing_flag[fi, leg]), nj=nj,
+                w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM,
+                lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+            )
+            wbic_residual_hist[fi, leg] = res
+            wbic_status_hist[fi, leg]   = ok
+            if ok:
+                tau_ff_leg = tau_ff_leg + d_tau
+                lam_used_leg = lam_des_leg + d_lam
+                wbic_dtau_hist[fi, leg, :nj] = d_tau
+                wbic_dlam_hist[fi, leg]      = d_lam
+            else:
+                wbic_fail_count += 1
 
         foot_t_j5 = foot_local[fi, leg] + J4_TO_J5_SIM_PER_LEG[leg]
         pts_a     = forward_kinematics(q_a, dh=dh)
@@ -1234,9 +1351,10 @@ for fi in range(N_FRAMES):
         f_imp       = KP_IMP * (foot_t_j5 - foot_a_j5) + KD_IMP * (vel_t - vel_a)
         tau_imp_leg = J.T @ f_imp
         tau_pd_leg  = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
-        tau_grf_leg = J.T @ lam_des_leg  # [MOD] GRF로부터 유도되는 토크
+        tau_grf_leg = J.T @ lam_used_leg  # GRF로부터 유도되는 토크 (WBIC 보정 반영)
         tau_cmd_leg = tau_pd_leg + tau_ff_leg + tau_imp_leg
         tau_cmd_leg = np.clip(tau_cmd_leg, -JOINT_TORQUE_LIMIT[:nj], JOINT_TORQUE_LIMIT[:nj])  # 토크 클리핑
+        wbic_lam_used[fi, leg] = lam_used_leg
 
         JJT          = J @ J.T + MU_DAMP * np.eye(3)
         lam_calc_leg = np.linalg.solve(JJT, J @ (tau_g - tau_cmd_leg))
@@ -1251,12 +1369,33 @@ for fi in range(N_FRAMES):
 
 wbc_dur = time.perf_counter() - wbc_t0
 mode_str = f"MPC(N={N_MPC},dt={DT_MPC*1e3:.0f}ms)" if USE_MPC else "QP GRF"
-print(f"WBC 완료 [{mode_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
+wbic_str = "WBIC ON" if USE_WBIC else "WBIC OFF"
+print(f"WBC 완료 [{mode_str}, {wbic_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
 
-# GRF 합산 검증
-fz_sum = np.sum(wbc_lam_des[:, :, 2], axis=1)   # (N_FRAMES,)
-print(f"  Σλz 평균={fz_sum.mean():.2f}N  (Mg={TOTAL_MASS*G_ACC:.2f}N)  "
-      f"오차={abs(fz_sum.mean()-TOTAL_MASS*G_ACC):.2f}N")
+# GRF 합산 검증 (λ_des = MPC/QP 출력, λ_used = WBIC 보정 후)
+fz_sum_des  = np.sum(wbc_lam_des[:, :, 2], axis=1)
+fz_sum_used = np.sum(wbic_lam_used[:, :, 2], axis=1)
+print(f"  Σλz_des  평균={fz_sum_des.mean():.2f}N  (Mg={TOTAL_MASS*G_ACC:.2f}N)  "
+      f"오차={abs(fz_sum_des.mean()-TOTAL_MASS*G_ACC):.2f}N")
+if USE_WBIC:
+    print(f"  Σλz_used 평균={fz_sum_used.mean():.2f}N  "
+          f"오차={abs(fz_sum_used.mean()-TOTAL_MASS*G_ACC):.2f}N")
+    # WBIC 보정 통계
+    dtau_max  = float(np.max(np.abs(wbic_dtau_hist)))
+    dtau_mean = float(np.mean(np.abs(wbic_dtau_hist)))
+    dlam_max  = float(np.max(np.abs(wbic_dlam_hist)))
+    dlam_mean = float(np.mean(np.abs(wbic_dlam_hist)))
+    res_max   = float(np.max(wbic_residual_hist))
+    res_mean  = float(np.mean(wbic_residual_hist))
+    n_fail    = int(np.sum(~wbic_status_hist))
+    print(f"  WBIC: |Δτ|max={dtau_max:.3f}Nm mean={dtau_mean:.4f}Nm  "
+          f"|Δλ|max={dlam_max:.3f}N mean={dlam_mean:.4f}N")
+    print(f"  WBIC: residual max={res_max:.2e} mean={res_mean:.2e}  "
+          f"solver fail={n_fail}/{4*N_FRAMES}")
+    if dtau_max < 1e-3 and dlam_max < 1e-3:
+        print(f"  [INFO] WBIC 보정량 0 — 모든 제약이 비활성. WBIC OFF와 동일 결과.")
+    if n_fail > 0:
+        print(f"  [WARNING] WBIC solver {n_fail}회 실패. 제약 충돌 가능성.")
 
 for leg in [0, 2]:
     nj = N_JOINTS_PER_LEG[leg]

@@ -98,19 +98,21 @@ MPC/QP GRF가 λ_des를 주면, 이를 joint torque로 변환할 때
 - [x] 구속: 관절 상하한(FRONT_Q_LIM) ∩ 각속도 한계(동적 bounds), 토크 부등식(toggle)
 - [x] 앞다리 swing 구간에만 적용 (stance는 기존 analytical IK 유지)
 - [x] 수렴 실패 시 fallback: analytical IK → Q_HOME 순으로 강등
-- [ ] (선택) Figure 2에 IK 수렴 반복 횟수 subplot 추가
+- [x] (선택) Figure 2에 IK 수렴 반복 횟수 subplot 추가 (v8: nit + pos_err + fallback ★)
+- [x] 뒷다리 확장: opt_ik_hind 추가 (v8.7, 동일 cost/제약 구조)
 
 ---
 
-## Phase 5 — WBIC QP (토크 공간 최적화)
+## Phase 5 — WBIC QP (토크 공간 최적화)  → **v9 baseline 구현 완료**
 
 RNEA로 계산한 τ_ff를 초기값으로, joint limit/마찰 추 제약 하에서 τ 최적화.
 
-- [ ] 변수: [q̈; τ; λ]  (부유 베이스 포함 시 +6DOF)
-- [ ] 등식: M(q)·q̈ + h = Sᵀ·τ + Jᵀ·λ  (완전 동역학)
-- [ ] 부등식: τ_min ≤ τ ≤ τ_max, 마찰 추
-- [ ] solver: qpOASES (pip install qpoases) 또는 qpsolvers
-- [ ] task 우선순위: body pose > foot position > joint limit
+- [x] 변수: per-leg [Δq̈; Δτ; Δλ] (v9; 부유 베이스 통합은 추후)
+- [x] 등식: M(q)·Δq̈ - Δτ - Jᵀ·Δλ = r (잔차 형태, 동등)
+- [x] 부등식: τ_min ≤ τ_ff+Δτ ≤ τ_max, 마찰 추, swing λ=0
+- [x] solver: qpsolvers[quadprog]
+- [ ] task 우선순위 (body pose > foot position > joint limit) — **다음 단계**
+- [ ] 부유 베이스 통합 (현재는 per-leg 분해)
 
 ---
 
