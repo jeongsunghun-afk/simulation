@@ -1537,7 +1537,7 @@ ani = FuncAnimation(fig, animate, frames=N_FRAMES,
 # ══════════════════════════════════════════════════════════════
 # 6. Figure 2: FR / HR 조인트 분석 (4×2)
 # ══════════════════════════════════════════════════════════════
-fig2 = plt.figure(figsize=(12, 16))
+fig2 = plt.figure(figsize=(12, 13))
 fig2.patch.set_facecolor('#1a1a2e')
 gs2 = gridspec.GridSpec(5, 2, figure=fig2, wspace=0.35, hspace=0.55,
                         left=0.07, right=0.97, top=0.94, bottom=0.04)
@@ -1651,7 +1651,7 @@ for col, leg in enumerate([0, 3]):   # FR=0, HL=3
 
     # row 2: GRF lam_x/lam_y + 마찰 추 한계 (mu * lam_z_des)
     ax_fxy = fig3.add_subplot(gs3[2, col])
-    _style_ax3(ax_fxy, f'{LEG_NAMES[leg]} GRF lam_x/lam_y + 마찰 추 [N]', ylabel='[N]')
+    _style_ax3(ax_fxy, f'{LEG_NAMES[leg]} GRF lam_x/lam_y + Friction Cone [N]', ylabel='[N]')
     ax_fxy.set_xlim(0, N_FRAMES)
     fric_limit = MU_FRICTION * np.abs(wbc_lam_des[:, leg, 2])
     ax_fxy.plot(_fr, wbc_lam_des [:, leg, 0], lw=1.4, color='#ff6b6b', label='lam_x des')
