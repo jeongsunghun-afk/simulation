@@ -16,6 +16,7 @@ v8: v7 대비 변경사항
     · GRF 계산에 TOTAL_MASS 적용: body_mass + 4×link_mass 기반 힘 평형
     · tau_GRF 추가: GRF로부터 유도되는 조인트 토크 계산 및 로깅
     · Figure 3 제목 수정: Body_MASS → total_mass 표기
+    · scipy SLSQP(0.2~0.5ms) vs NLopt LD_SLSQP(0.05~0.2ms) : 2~3배 속도차
 """
 
 import math
@@ -91,6 +92,9 @@ Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
 # swing 중 opt_ik 비용함수 참조 자세 (th4 음수 유도, 나머지는 home과 동일)
 Q_SWING_FRONT_DEG = [0.0, 118.2973, 96.7027, -69.3417, 59.3417]  # BODY_Z_H=-0.05 기준, th4 음수 유도 (발 들리는 효과)
 Q_SWING_FRONT = [math.radians(a) for a in Q_SWING_FRONT_DEG]
+# 뒷다리 swing 참조 자세 (placeholder = home; 발 들기 효과 원하면 튜닝 필요)
+Q_SWING_HIND_DEG = list(Q_HOME_HIND_DEG)
+Q_SWING_HIND = [math.radians(a) for a in Q_SWING_HIND_DEG]
 
 PHI_FRONT    = Q_HOME_FRONT[1] + Q_HOME_FRONT[2] + Q_HOME_FRONT[3]
 PHI_HIND     = Q_HOME_HIND[1]  + Q_HOME_HIND[2]  + Q_HOME_HIND[3]
@@ -120,11 +124,12 @@ PHASE_OFFSETS = {
 }
 
 # ── WBC 파라미터 ─────────────────────────────────────────────
-BODY_MASS = 10.0 # kg (몸무게)
+BODY_MASS = 15.0 # kg (몸무게)
 G_ACC     = 9.81
 
 #LINK_MASS         = np.array([3.34, 0.8, 0.2, 0.2, 0.05])  # link1~5 질량 [kg]
-LINK_MASS         = np.array([4.125, 1.795, 0.78, 0.78, 0.05])  # link1~5 질량 [kg] 
+#LINK_MASS         = np.array([4.125, 1.795, 0.78, 0.78, 0.05])  # link1~5 질량 [kg] 
+LINK_MASS         = np.array([3, 2, 1, 0.2, 0.1])  # link1~5 질량 [kg] 
 # 80형번 0.915kg, 90형번 1.605kg
 LINK_MASS_PER_LEG = [LINK_MASS] * 4
 TOTAL_MASS        = BODY_MASS + float(np.sum(LINK_MASS)) * 4.0
@@ -319,6 +324,56 @@ def opt_ik_front(p_target_dh, q_init, q_ref=None):
                        constraints=constraints,
                        options={'ftol': 1e-8, 'maxiter': OPT_IK_MAXITER})
     tip_final = np.array(forward_kinematics(res.x, DH_FRONT)[-1])
+    pos_err_sq = float(np.dot(tip_final - p_t, tip_final - p_t))
+    if pos_err_sq < 1e-6:
+        return list(res.x), res.nit, pos_err_sq
+    return None, res.nit, pos_err_sq
+
+
+def opt_ik_hind(p_target_dh, q_init, q_ref=None):
+    """SLSQP 최적화 IK — 뒷다리. opt_ik_front와 구조 동일.
+
+    등식 제약 : FK_tip(q) = p_target          (위치 정확도 보장)
+                q[4] = Q_HOME_HIND[4]         (toe 고정)
+    부등식 제약: |τ_grav(q)| ≤ τ_limit        (OPT_IK_USE_TAU_LIMIT)
+    bounds     : HIND_Q_LIM ∩ 각속도 한계      (OPT_IK_USE_VEL_LIMIT)
+    비용       : LAMBDA_Q_OPT·||q - q_ref||² + LAMBDA_TAU_OPT·||τ_grav(q)||²
+    """
+    p_t   = np.asarray(p_target_dh, dtype=float)
+    q0    = np.asarray(q_init, dtype=float)
+    q_tgt = q0 if q_ref is None else np.asarray(q_ref, dtype=float)
+
+    if OPT_IK_USE_VEL_LIMIT:
+        vel_dt = JOINT_VEL_LIMIT_RAD_S * DT
+        lo = np.maximum([b[0] for b in HIND_Q_LIM], q0 - vel_dt)
+        hi = np.minimum([b[1] for b in HIND_Q_LIM], q0 + vel_dt)
+        hi = np.maximum(lo, hi)
+        active_bounds = list(zip(lo, hi))
+    else:
+        active_bounds = HIND_Q_LIM
+
+    constraints = [{'type': 'eq',
+                    'fun': lambda q: np.array(forward_kinematics(q, DH_HIND)[-1]) - p_t}]
+    constraints.append({'type': 'eq',
+                        'fun': lambda q: q[4] - Q_HOME_HIND[4]})
+
+    _lm_hind = LINK_MASS_PER_LEG[2]
+    if OPT_IK_USE_TAU_LIMIT:
+        def _torque_ineq(q):
+            tau_g = compute_gravity_torque_sim(q, DH_HIND, _lm_hind, front_leg=False)
+            return JOINT_TORQUE_LIMIT[:len(tau_g)] - np.abs(tau_g)
+        constraints.append({'type': 'ineq', 'fun': _torque_ineq})
+
+    def cost(q):
+        c_qref = LAMBDA_Q_OPT * np.dot(q - q_tgt, q - q_tgt)
+        tau_g  = compute_gravity_torque_sim(q, DH_HIND, _lm_hind, front_leg=False)
+        c_tau  = LAMBDA_TAU_OPT * np.dot(tau_g, tau_g)
+        return float(c_qref + c_tau)
+
+    res = _sp_minimize(cost, q0, method='SLSQP', bounds=active_bounds,
+                       constraints=constraints,
+                       options={'ftol': 1e-8, 'maxiter': OPT_IK_MAXITER})
+    tip_final = np.array(forward_kinematics(res.x, DH_HIND)[-1])
     pos_err_sq = float(np.dot(tip_final - p_t, tip_final - p_t))
     if pos_err_sq < 1e-6:
         return list(res.x), res.nit, pos_err_sq
@@ -811,6 +866,7 @@ OPT_IK_MAXITER = 100
 # 제약 ON/OFF — True/False 한 줄로 켜고 끔
 OPT_IK_USE_VEL_LIMIT = True   # 각속도 제약: |Δq/DT| ≤ JOINT_VEL_LIMIT_RAD_S (bounds 동적 수축)
 OPT_IK_USE_TAU_LIMIT = True   # 토크 제약: |τ_grav(q)| ≤ JOINT_TORQUE_LIMIT  (근사, 속도 영향)
+USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
@@ -839,9 +895,9 @@ print(f"  V={V}m/s  T={T}s  D={D}  T_SW={T_SW:.3f}s  T_ST={T_ST:.3f}s  "
 traj_scale   = 1.0
 height_scale = 1.0
 opt_iter_used = 0
-opt_ik_nit_hist      = np.zeros((N_FRAMES, 2), dtype=int)    # [FR, FL] 수렴 반복 횟수
-opt_ik_fallback_hist = np.zeros((N_FRAMES, 2), dtype=bool)   # True = analytical fallback 사용
-opt_ik_pos_err_hist  = np.full((N_FRAMES, 2), np.nan)        # opt IK 위치 오차² [m²]
+opt_ik_nit_hist      = np.zeros((N_FRAMES, 4), dtype=int)    # [FR, FL, HR, HL] 수렴 반복 횟수
+opt_ik_fallback_hist = np.zeros((N_FRAMES, 4), dtype=bool)   # True = analytical fallback 사용
+opt_ik_pos_err_hist  = np.full((N_FRAMES, 4), np.nan)        # opt IK 위치 오차² [m²]
 
 for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     opt_iter_used = opt_iter
@@ -910,7 +966,7 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                 #   swing1(0~½T_sw): home → Q_SWING_FRONT (quintic blend)
                 #   swing2(½T_sw~T_sw): Q_SWING_FRONT → home (quintic blend)
                 #   stance: home (Q_HOME_FRONT)
-                if is_sw:
+                if is_sw and USE_SWING_QREF_BLEND:
                     _sw_t = sched.swing_t(leg, t)
                     if _sw_t <= 0.5:
                         _alpha = _quintic_s(_sw_t / 0.5)             # 0→1
@@ -944,12 +1000,25 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
             else:
                 foot_ik_sim = foot_loc + _HIND_J4_TO_J5_SIM
                 foot_dh = _sim_to_dh(foot_ik_sim, front_leg=False)
-                q_h = analytical_ik_hind(foot_dh[0], foot_dh[1], foot_dh[2],
-                                         PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
-                if q_h is None:
-                    q = list(Q_HOME_HIND)
+                col = leg  # 2=HR, 3=HL
+
+                # 뒷다리는 USE_SWING_QREF_BLEND 무시하고 항상 home 추종
+                _q_ref_h = list(Q_HOME_HIND)
+
+                q_opt, nit, pos_err_sq = opt_ik_hind(foot_dh, prev_q_per_leg[leg][:5],
+                                                     q_ref=_q_ref_h)
+                opt_ik_nit_hist[fi, col]     = nit
+                opt_ik_pos_err_hist[fi, col] = pos_err_sq
+                if q_opt is not None:
+                    q = q_opt
                 else:
-                    q = list(q_h) + [Q_HOME_HIND[4]]
+                    opt_ik_fallback_hist[fi, col] = True
+                    q_h = analytical_ik_hind(foot_dh[0], foot_dh[1], foot_dh[2],
+                                             PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
+                    if q_h is None:
+                        q = list(Q_HOME_HIND)
+                    else:
+                        q = list(q_h) + [Q_HOME_HIND[4]]
                 pq = prev_q_per_leg[leg]
                 for j in range(len(q)):
                     best = q[j]
@@ -987,17 +1056,20 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     height_scale *= scale_decay
 
 print(f"궤적 완료. iter={opt_iter_used}  scale={traj_scale:.4f}")
-_fb_fr = int(np.sum(opt_ik_fallback_hist[:, 0]))
-_fb_fl = int(np.sum(opt_ik_fallback_hist[:, 1]))
-_sw_fr = int(np.sum(swing_flag[:, 0]))
-_sw_fl = int(np.sum(swing_flag[:, 1]))
+_fb_per_leg = [int(np.sum(opt_ik_fallback_hist[:, c])) for c in range(4)]
+_sw_per_leg = [int(np.sum(swing_flag[:, c])) for c in range(4)]
 _q_home_f = np.array(Q_HOME_FRONT)
+_q_home_h = np.array(Q_HOME_HIND)
 _front_lim_lo = np.array([b[0] for b in FRONT_Q_LIM])
 _front_lim_hi = np.array([b[1] for b in FRONT_Q_LIM])
+_hind_lim_lo  = np.array([b[0] for b in HIND_Q_LIM])
+_hind_lim_hi  = np.array([b[1] for b in HIND_Q_LIM])
 
-for _col, _leg, _sw_mask, _fb in [
-    (0, 0, swing_flag[:, 0], _fb_fr),
-    (1, 1, swing_flag[:, 1], _fb_fl),
+for _col, _leg, _sw_mask, _fb, _q_home, _lim_lo, _lim_hi, _leg_name, _lim_name in [
+    (0, 0, swing_flag[:, 0], _fb_per_leg[0], _q_home_f, _front_lim_lo, _front_lim_hi, 'FR', 'FRONT_Q_LIM'),
+    (1, 1, swing_flag[:, 1], _fb_per_leg[1], _q_home_f, _front_lim_lo, _front_lim_hi, 'FL', 'FRONT_Q_LIM'),
+    (2, 2, swing_flag[:, 2], _fb_per_leg[2], _q_home_h, _hind_lim_lo,  _hind_lim_hi,  'HR', 'HIND_Q_LIM'),
+    (3, 3, swing_flag[:, 3], _fb_per_leg[3], _q_home_h, _hind_lim_lo,  _hind_lim_hi,  'HL', 'HIND_Q_LIM'),
 ]:
     _sw_n   = int(np.sum(_sw_mask))
     _nit    = opt_ik_nit_hist[_sw_mask, _col]
@@ -1010,28 +1082,27 @@ for _col, _leg, _sw_mask, _fb in [
     _q_sw   = joint_hist[_sw_mask, _leg, :5]               # (sw_n, 5)
     _ok_idx = np.where(_ok)[0]
     _q_ok   = _q_sw[_ok_idx]
-    _viol   = int(np.sum(np.any((_q_ok < _front_lim_lo) | (_q_ok > _front_lim_hi), axis=1)))
+    _viol   = int(np.sum(np.any((_q_ok < _lim_lo) | (_q_ok > _lim_hi), axis=1)))
 
     # home 이탈: opt IK 성공 프레임 평균 ||q - q_home||
-    _home_dev = float(np.mean(np.linalg.norm(_q_ok - _q_home_f, axis=1))) if len(_q_ok) else 0.0
+    _home_dev = float(np.mean(np.linalg.norm(_q_ok - _q_home, axis=1))) if len(_q_ok) else 0.0
 
-    _leg_name = ['FR', 'FL'][_col]
     print(f"  Opt-IK {_leg_name}: nit_avg={_nit.mean():.1f}  fallback={_fb}/{_sw_n}  "
           f"pos_err(max={_perr_mm_max:.3f}mm mean={_perr_mm_mean:.3f}mm)  "
           f"bound_viol={_viol}프레임  home_dev_avg={_home_dev:.4f}rad")
 
     # ── 경고 ──────────────────────────────────────────────────
-    if _fb > 0:
+    if _fb > 0 and _sw_n > 0:
         _fb_rate = _fb / _sw_n * 100
         print(f"  [WARNING] {_leg_name} Opt-IK fallback {_fb_rate:.1f}% — "
-              f"V({V}m/s)·STEP_HEIGHT({STEP_HEIGHT}m) 조합이 FRONT_Q_LIM 초과 가능성. "
-              f"속도↓ or STEP_HEIGHT↓ or FRONT_Q_LIM 완화 권장.")
+              f"V({V}m/s)·STEP_HEIGHT({STEP_HEIGHT}m) 조합이 {_lim_name} 초과 가능성. "
+              f"속도↓ or STEP_HEIGHT↓ or {_lim_name} 완화 권장.")
     if _perr_mm_max > 0.1:
         print(f"  [WARNING] {_leg_name} 최대 위치 오차 {_perr_mm_max:.3f}mm > 0.1mm — "
               f"SLSQP 수렴 불충분. OPT_IK_MAXITER({OPT_IK_MAXITER}) 증가 권장.")
     if _viol > 0:
         print(f"  [WARNING] {_leg_name} 관절 한계 위반 {_viol}프레임 — "
-              f"SLSQP 수치 오차로 bounds 미세 초과. FRONT_Q_LIM 여유 ±0.01rad 추가 권장.")
+              f"SLSQP 수치 오차로 bounds 미세 초과. {_lim_name} 여유 ±0.01rad 추가 권장.")
     if _home_dev > 1.0:
         print(f"  [INFO]    {_leg_name} home 이탈 평균 {_home_dev:.4f}rad > 1.0rad — "
               f"swing 궤적이 home 자세와 크게 다름. T({T}s)↑ or V({V}m/s)↓ 시 완화됨.")
@@ -1276,6 +1347,17 @@ trace_buf  = [[[], [], []] for _ in range(4)]
 swing_dots = [ax3d.plot([], [], [], 'o', color=LEG_COLORS[leg],
                         markersize=9, alpha=0.9)[0] for leg in range(4)]
 
+# 링크별 질량중심 마커 (joint origin 중점, 마커 크기는 √m 비례)
+link_com_markers = []
+for leg in range(4):
+    nj = N_JOINTS_PER_LEG[leg]
+    lm = LINK_MASS_PER_LEG[leg]
+    mks = [ax3d.plot([], [], [], '*', color='#ffd700',
+                     markersize=4.0 + 3.5*math.sqrt(float(lm[k])),
+                     markeredgecolor='black', markeredgewidth=0.5,
+                     alpha=0.9, zorder=15)[0] for k in range(nj)]
+    link_com_markers.append(mks)
+
 FRAME_LEN   = 0.035
 _jf_quivers = [
     [[None, None, None] for _ in range(N_JOINTS_PER_LEG[leg] + 1)]
@@ -1371,6 +1453,8 @@ def init_anim():
             ln.set_data([], []); ln.set_3d_properties([])
         leg_traces[leg].set_data([], []); leg_traces[leg].set_3d_properties([])
         swing_dots[leg].set_data([], []); swing_dots[leg].set_3d_properties([])
+        for mk in link_com_markers[leg]:
+            mk.set_data([], []); mk.set_3d_properties([])
     info_text.set_text('')
     return []
 
@@ -1387,6 +1471,9 @@ def animate(fi):
             A = hip + pts[k]; B = hip + pts[k+1]
             leg_links[leg][k].set_data([A[0], B[0]], [A[1], B[1]])
             leg_links[leg][k].set_3d_properties([A[2], B[2]])
+            mid = 0.5 * (A + B)
+            link_com_markers[leg][k].set_data([mid[0]], [mid[1]])
+            link_com_markers[leg][k].set_3d_properties([mid[2]])
         pe = foot_hist[fi, leg]
         if swing_flag[fi, leg]:
             swing_dots[leg].set_data([pe[0]], [pe[1]])

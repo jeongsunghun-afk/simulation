@@ -105,10 +105,11 @@ PHASE_OFFSETS = {
 }
 
 # ── WBC 파라미터 ─────────────────────────────────────────────
-BODY_MASS = 10.0                              # 본체 질량 [kg]
+BODY_MASS = 15.0                              # 본체 질량 [kg]
 G_ACC     = 9.81                              # 중력 가속도 [m/s²]
 
-LINK_MASS         = np.array([4.125, 1.795, 0.78, 0.78, 0.05])  # link1~5 질량 [kg] 
+#LINK_MASS         = np.array([4.125, 1.795, 0.78, 0.78, 0.05])  # link1~5 질량 [kg] 
+LINK_MASS         = np.array([3, 2, 1, 0.2, 0.1])  # link1~5 질량 [kg] 
 LINK_MASS_PER_LEG  = [LINK_MASS] * 4
 TOTAL_MASS         = BODY_MASS + float(np.sum(LINK_MASS)) * 4.0
 
