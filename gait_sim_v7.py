@@ -789,11 +789,11 @@ for leg in range(4):
         theta_a_hist[fi, leg, :nj] = prev + (DT / TAU_LAG) * (target - prev)
     dtheta_a_hist[:, leg, :nj] = np.gradient(theta_a_hist[:, leg, :nj], DT, axis=0)
 
-wbc_tau_grav = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_ff   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
+wbc_tau_dyn  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))  # M·q̈+C·q̇+g(q) (RNEA, 중력 포함)
 wbc_tau_pd   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_imp  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
-wbc_tau_grf  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
+wbc_tau_grf  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))  # -Jᵀ·λ_des (tau_ff=tau_dyn+tau_grf 부호)
 wbc_tau_cmd  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_lam_des  = np.zeros((N_FRAMES, 4, 3))
 wbc_lam_calc = np.zeros((N_FRAMES, 4, 3))
@@ -861,8 +861,12 @@ for fi in range(N_FRAMES):
 
         lam_des_leg = lam_des_all[leg]
 
-        # Phase 3: RNEA
-        tau_ff_leg  = rnea(q_t, dq_t, ddq_t, dh, lm) - J.T @ lam_des_leg
+        # Phase 3: RNEA 완전 동역학 분해
+        #   tau_dyn = M·q̈ + C·q̇ + g(q)   (RNEA 결과, 중력 포함)
+        #   tau_grf = -Jᵀ·λ_des          (GRF reaction, 부호: tau_ff = tau_dyn + tau_grf)
+        tau_dyn_leg = rnea(q_t, dq_t, ddq_t, dh, lm)
+        tau_grf_leg = -J.T @ lam_des_leg
+        tau_ff_leg  = tau_dyn_leg + tau_grf_leg
 
         foot_t_j5 = foot_local[fi, leg] + J4_TO_J5_SIM_PER_LEG[leg]
         pts_a     = forward_kinematics(q_a, dh=dh)
@@ -873,14 +877,13 @@ for fi in range(N_FRAMES):
         f_imp       = KP_IMP * (foot_t_j5 - foot_a_j5) + KD_IMP * (vel_t - vel_a)
         tau_imp_leg = J.T @ f_imp
         tau_pd_leg  = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
-        tau_grf_leg = J.T @ lam_des_leg
         tau_cmd_leg = tau_pd_leg + tau_ff_leg + tau_imp_leg
 
         JJT          = J @ J.T + MU_DAMP * np.eye(3)
         lam_calc_leg = np.linalg.solve(JJT, J @ (tau_g - tau_cmd_leg))
 
-        wbc_tau_grav[fi, leg, :nj] = tau_g
         wbc_tau_ff  [fi, leg, :nj] = tau_ff_leg
+        wbc_tau_dyn [fi, leg, :nj] = tau_dyn_leg
         wbc_tau_pd  [fi, leg, :nj] = tau_pd_leg
         wbc_tau_imp [fi, leg, :nj] = tau_imp_leg
         wbc_tau_grf [fi, leg, :nj] = tau_grf_leg
@@ -1284,8 +1287,8 @@ for col, leg in enumerate([0, 3]):   # FR=0, HL=3
         ax_td = fig4.add_subplot(gs4[row, col])
         _style_ax4(ax_td, f'{LEG_NAMES[leg]} tau decompose th{ji+1} [N·m]', ylabel='[N·m]')
         ax_td.set_xlim(0, N_FRAMES)
-        ax_td.plot(_fr, wbc_tau_grav[:, leg, ji], lw=1.4, color='#ffcc00', ls='--', label='tau_grav')
-        ax_td.plot(_fr, wbc_tau_ff  [:, leg, ji], lw=1.4, color='#00d4ff',           label='tau_ff')
+        ax_td.plot(_fr, wbc_tau_dyn [:, leg, ji], lw=1.4, color='#00d4ff',           label='tau_dyn')
+        ax_td.plot(_fr, wbc_tau_grf [:, leg, ji], lw=1.4, color='#bd93f9',           label='tau_grf')
         ax_td.plot(_fr, wbc_tau_pd  [:, leg, ji], lw=1.4, color='#ff6b35',           label='tau_pd')
         ax_td.plot(_fr, wbc_tau_imp [:, leg, ji], lw=1.4, color='#00ff99',           label='tau_imp')
         ax_td.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
