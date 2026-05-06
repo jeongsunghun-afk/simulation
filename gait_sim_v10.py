@@ -115,7 +115,7 @@ Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
 Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
 
 # swing 중 opt_ik 비용함수 참조 자세 (th4 음수 유도, 나머지는 home과 동일)
-Q_SWING_FRONT_DEG = [0.0, 118.2973, 96.7027, -69.3417, 59.3417]  # BODY_Z_H=-0.05 기준, th4 음수 유도 (발 들리는 효과)
+Q_SWING_FRONT_DEG = [0.0, 118.2973, 96.7027, -45.0,    59.3417]  # th4 -45° (vel limit 내 추적, 부드러움 우선)
 Q_SWING_FRONT = [math.radians(a) for a in Q_SWING_FRONT_DEG]
 # 뒷다리 swing 참조 자세 (placeholder = home; 발 들기 효과 원하면 튜닝 필요)
 Q_SWING_HIND_DEG = list(Q_HOME_HIND_DEG)
@@ -914,6 +914,15 @@ def _quintic_s(tau):
     return 10*tau**3 - 15*tau**4 + 6*tau**5
 
 
+def _smootherstep(tau):
+    """7차 smootherstep: τ∈[0,1]에서 0→1
+    s7(τ) = -20τ⁷ + 70τ⁶ - 84τ⁵ + 35τ⁴
+    boundary(τ=0,1)에서 s7=0/1, s7'=s7''=s7'''=0 → C3 연속 (jerk까지 0).
+    swing1/swing2 split에 사용해 sw_t=0, 0.5, 1 모든 경계에서 jerk 매끄러움.
+    """
+    return -20*tau**7 + 70*tau**6 - 84*tau**5 + 35*tau**4
+
+
 def foot_pos_at_phase(phase, p_start, p_contact, p_end, body_vel,
                       swing_ratio=D, step_height=STEP_HEIGHT, tau_land=TAU_LAND, stance_dur=T_ST):
     """
@@ -973,7 +982,7 @@ WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
 WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
 WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
 WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
-USE_SWING_QREF_BLEND = False   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
@@ -1815,12 +1824,13 @@ _ax5col = ['#ff6b6b', '#ffd166', '#06d6a0', '#4cc9f0', '#f72585']
 for col, leg in enumerate([0, 3]):   # FR=0, HL=3
     nj = N_JOINTS_PER_LEG[leg]
 
-    # row 0: tau_cmd
+    # row 0: tau_cmd − tau_grf  (GRF feedforward 성분 제외 — 실제 액추에이터 부담만 표시)
     ax_tc = fig3.add_subplot(gs3[0, col])
-    _style_ax3(ax_tc, f'{LEG_NAMES[leg]} tau_cmd [N·m]', ylabel='[N·m]')
+    _style_ax3(ax_tc, f'{LEG_NAMES[leg]} tau_cmd − tau_grf [N·m]', ylabel='[N·m]')
     ax_tc.set_xlim(0, N_FRAMES)
+    _tau_disp = wbc_tau_cmd[:, leg, :] - wbc_tau_grf[:, leg, :]
     for j in range(nj):
-        ax_tc.plot(_fr, wbc_tau_cmd[:, leg, j], lw=1.4, color=_ax5col[j], label=f'th{j+1}')
+        ax_tc.plot(_fr, _tau_disp[:, j], lw=1.4, color=_ax5col[j], label=f'th{j+1}')
     ax_tc.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
     ax_tc.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=5)
 
