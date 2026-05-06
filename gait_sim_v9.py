@@ -1016,31 +1016,8 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     foot_sw_start   = [home_foot_per_leg[leg].copy() for leg in range(4)]
     foot_local_prev = [foot_contact[leg].copy() for leg in range(4)]
     prev_swing      = [sched.is_swing(leg, 0) for leg in range(4)]
-
-    # warm-start 초기화: analytical IK로 시작점 → opt_ik(vel_limit OFF)로 정제
-    # 이유: analytical과 opt_ik가 서로 다른 IK branch를 선호 (PHI 강제 vs home-near).
-    # vel_limit를 일시 해제해 opt_ik의 자연 해(home-near branch)를 prev_q로 셋업.
-    # 이렇게 안 하면 fi=0~수십 프레임 동안 한 branch에서 다른 branch로 천천히 drift.
-    _saved_vel_limit = OPT_IK_USE_VEL_LIMIT
-    OPT_IK_USE_VEL_LIMIT = False
-    prev_q_per_leg = []
-    for leg in range(4):
-        front_l = leg < 2
-        if front_l:
-            _foot_dh0 = _sim_to_dh(foot_contact[leg] + _FRONT_J4_TO_J5_SIM, front_leg=True)
-            _q_a = analytical_ik_front(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
-                                       PHI_FRONT, THETA5_FRONT)
-            _q_init0 = list(_q_a) if _q_a is not None else list(Q_HOME_FRONT)
-            _q_opt, _, _ = opt_ik_front(_foot_dh0, _q_init0, q_ref=list(Q_HOME_FRONT))
-            prev_q_per_leg.append(_q_opt if _q_opt is not None else _q_init0)
-        else:
-            _foot_dh0 = _sim_to_dh(foot_contact[leg] + _HIND_J4_TO_J5_SIM, front_leg=False)
-            _q_h = analytical_ik_hind(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
-                                      PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
-            _q_init0 = list(_q_h) + [Q_HOME_HIND[4]] if _q_h is not None else list(Q_HOME_HIND)
-            _q_opt, _, _ = opt_ik_hind(_foot_dh0, _q_init0, q_ref=list(Q_HOME_HIND))
-            prev_q_per_leg.append(_q_opt if _q_opt is not None else _q_init0)
-    OPT_IK_USE_VEL_LIMIT = _saved_vel_limit
+    prev_q_per_leg  = [list(Q_HOME_FRONT), list(Q_HOME_FRONT),
+                       list(Q_HOME_HIND),  list(Q_HOME_HIND)]
 
     calc_start = time.perf_counter()
     for fi in range(N_FRAMES):
