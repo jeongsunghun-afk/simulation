@@ -914,8 +914,23 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     foot_sw_start   = [home_foot_per_leg[leg].copy() for leg in range(4)]
     foot_local_prev = [foot_contact[leg].copy() for leg in range(4)]
     prev_swing      = [sched.is_swing(leg, 0) for leg in range(4)]
-    prev_q_per_leg  = [list(Q_HOME_FRONT), list(Q_HOME_FRONT),
-                       list(Q_HOME_HIND),  list(Q_HOME_HIND)]
+
+    # warm-start 초기화: t=0의 실제 foot 위치에 맞는 자세를 analytical IK로 풀어
+    # SLSQP의 첫 프레임 maxiter 폭주 방지 (stance 다리는 home과 자세가 다름)
+    prev_q_per_leg = []
+    for leg in range(4):
+        front_l = leg < 2
+        if front_l:
+            _foot_dh0 = _sim_to_dh(foot_contact[leg] + _FRONT_J4_TO_J5_SIM, front_leg=True)
+            _q_a = analytical_ik_front(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
+                                       PHI_FRONT, THETA5_FRONT)
+            prev_q_per_leg.append(list(_q_a) if _q_a is not None else list(Q_HOME_FRONT))
+        else:
+            _foot_dh0 = _sim_to_dh(foot_contact[leg] + _HIND_J4_TO_J5_SIM, front_leg=False)
+            _q_h = analytical_ik_hind(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
+                                      PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
+            prev_q_per_leg.append(list(_q_h) + [Q_HOME_HIND[4]] if _q_h is not None
+                                  else list(Q_HOME_HIND))
 
     calc_start = time.perf_counter()
     for fi in range(N_FRAMES):
