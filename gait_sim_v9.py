@@ -37,21 +37,38 @@ for key in mpl.rcParams:
     if key.startswith("keymap."):
         mpl.rcParams[key] = []
 mpl.rcParams['font.family'] = 'sans-serif'
-mpl.rcParams['font.sans-serif'] = ['NanumGothic', 'DejaVu Sans', 'Arial Unicode MS']
+mpl.rcParams['font.sans-serif'] = ['DejaVu Sans', 'NanumGothic', 'Arial Unicode MS']
 mpl.rcParams['axes.unicode_minus'] = False
 
 # ══════════════════════════════════════════════════════════════
 # 0. 파라미터
 # ══════════════════════════════════════════════════════════════
-GAIT_TYPE   = 'trot'
+GAIT_TYPE   = 'trot'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
-V           = 1 # m/s (전진 속도)
-T           = 0.5 # s (사이클 주기)
-D           = 0.5 # (swing 비율, duty factor) 0.5 이상이어야 함 (최소 2발 접지)
-STEP_HEIGHT = 0.08 # m (발 들리는 높이, 지면과의 간격)
-TAU_LAND    = 1.0 # (swing phase 내 착지까지의 비율, 0~1) 1.0이면 선형 보간, 0.5이면 50% 지점에서 착지 시작
+# ── Gait 프리셋 (V/T/D/STEP_HEIGHT/offsets 통합) ────────────────
+# offsets: phase=0이 swing 시작인 컨벤션, 순서 [FR, FL, HR, HL]
+GAIT_PRESETS = {
+    'walk':   dict(V=0.4, T=1.0, D=0.25, STEP_HEIGHT=0.05,
+                   offsets=[0.00, 0.50, 0.75, 0.25]),
+    'amble':  dict(V=0.7, T=0.7, D=0.40, STEP_HEIGHT=0.06,
+                   offsets=[0.00, 0.50, 0.75, 0.25]),
+    'pace':   dict(V=1.0, T=0.5, D=0.50, STEP_HEIGHT=0.07,
+                   offsets=[0.00, 0.50, 0.00, 0.50]),
+    'trot':   dict(V=1.0, T=0.5, D=0.50, STEP_HEIGHT=0.08,
+                   offsets=[0.00, 0.50, 0.50, 0.00]),
+    'canter': dict(V=1.3, T=0.45, D=0.50, STEP_HEIGHT=0.09,
+                   offsets=[0.00, 0.33, 0.33, 0.67]),
+    'gallop': dict(V=1.3, T=0.40, D=0.55, STEP_HEIGHT=0.10,
+                   offsets=[0.00, 0.05, 0.55, 0.50]),
+}
+_preset = GAIT_PRESETS[GAIT_TYPE]
+V           = _preset['V']            # m/s (전진 속도)
+T           = _preset['T']            # s (사이클 주기)
+D           = _preset['D']            # swing 비율 (T_SW/T)
+STEP_HEIGHT = _preset['STEP_HEIGHT']  # m (발 들리는 높이)
+TAU_LAND    = 1.0 # (swing phase 내 착지까지의 비율, 0~1) 1.0이면 선형 보간
 
 T_SW = T * D
 T_ST = T * (1.0 - D)
@@ -121,10 +138,7 @@ LEG_HIP_OFFSETS = np.array([
     [+BODY_FWD_H, +BODY_LAT, BODY_Z_H],
 ])
 
-PHASE_OFFSETS = {
-    'trot': [0.0, 0.5, 0.5, 0.0],
-    'walk': [0.0, 0.5, 0.75, 0.25],
-}
+PHASE_OFFSETS = {name: cfg['offsets'] for name, cfg in GAIT_PRESETS.items()}
 
 # ── WBC 파라미터 ─────────────────────────────────────────────
 BODY_MASS = 15.0 # kg (몸무게)
@@ -954,7 +968,7 @@ WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
 WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
 WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
 WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
-USE_SWING_QREF_BLEND = False   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
@@ -1679,7 +1693,7 @@ ani = FuncAnimation(fig, animate, frames=N_FRAMES,
 # ══════════════════════════════════════════════════════════════
 # 6. Figure 2: FR / HR 조인트 분석 (4×2)
 # ══════════════════════════════════════════════════════════════
-fig2 = plt.figure(figsize=(12, 16))
+fig2 = plt.figure(figsize=(12, 13))
 fig2.patch.set_facecolor('#1a1a2e')
 gs2 = gridspec.GridSpec(5, 2, figure=fig2, wspace=0.35, hspace=0.55,
                         left=0.07, right=0.97, top=0.94, bottom=0.04)
