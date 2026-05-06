@@ -915,8 +915,11 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     foot_local_prev = [foot_contact[leg].copy() for leg in range(4)]
     prev_swing      = [sched.is_swing(leg, 0) for leg in range(4)]
 
-    # warm-start 초기화: t=0의 실제 foot 위치에 맞는 자세를 analytical IK로 풀어
-    # SLSQP의 첫 프레임 maxiter 폭주 방지 (stance 다리는 home과 자세가 다름)
+    # warm-start 초기화: analytical IK로 시작점 → opt_ik(vel_limit OFF)로 정제
+    # 이유: analytical과 opt_ik가 서로 다른 IK branch를 선호 (PHI 강제 vs home-near).
+    # vel_limit를 일시 해제해 opt_ik의 자연 해(home-near branch)를 prev_q로 셋업.
+    _saved_vel_limit = OPT_IK_USE_VEL_LIMIT
+    OPT_IK_USE_VEL_LIMIT = False
     prev_q_per_leg = []
     for leg in range(4):
         front_l = leg < 2
@@ -924,13 +927,17 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
             _foot_dh0 = _sim_to_dh(foot_contact[leg] + _FRONT_J4_TO_J5_SIM, front_leg=True)
             _q_a = analytical_ik_front(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
                                        PHI_FRONT, THETA5_FRONT)
-            prev_q_per_leg.append(list(_q_a) if _q_a is not None else list(Q_HOME_FRONT))
+            _q_init0 = list(_q_a) if _q_a is not None else list(Q_HOME_FRONT)
+            _q_opt, _, _ = opt_ik_front(_foot_dh0, _q_init0, q_ref=list(Q_HOME_FRONT))
+            prev_q_per_leg.append(_q_opt if _q_opt is not None else _q_init0)
         else:
+            # v8은 opt_ik_hind 없음 → analytical만 사용 (그러나 한번 풀어두면 OK)
             _foot_dh0 = _sim_to_dh(foot_contact[leg] + _HIND_J4_TO_J5_SIM, front_leg=False)
             _q_h = analytical_ik_hind(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
                                       PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
             prev_q_per_leg.append(list(_q_h) + [Q_HOME_HIND[4]] if _q_h is not None
                                   else list(Q_HOME_HIND))
+    OPT_IK_USE_VEL_LIMIT = _saved_vel_limit
 
     calc_start = time.perf_counter()
     for fi in range(N_FRAMES):
