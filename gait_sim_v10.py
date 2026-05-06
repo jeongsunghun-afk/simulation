@@ -48,7 +48,7 @@ mpl.rcParams['axes.unicode_minus'] = False
 # ══════════════════════════════════════════════════════════════
 # 0. 파라미터
 # ══════════════════════════════════════════════════════════════
-GAIT_TYPE   = 'trot'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
+GAIT_TYPE   = 'walk'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
@@ -115,7 +115,7 @@ Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
 Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
 
 # swing 중 opt_ik 비용함수 참조 자세 (th4 음수 유도, 나머지는 home과 동일)
-Q_SWING_FRONT_DEG = [0.0, 118.2973, 96.7027, -45.0,    59.3417]  # th4 -45° (vel limit 내 추적, 부드러움 우선)
+Q_SWING_FRONT_DEG = [0.0, 118.2973, 96.7027, -25.0, 59.3417]  # th4 -45° (vel limit 내 추적, 부드러움 우선)
 Q_SWING_FRONT = [math.radians(a) for a in Q_SWING_FRONT_DEG]
 # 뒷다리 swing 참조 자세 (placeholder = home; 발 들기 효과 원하면 튜닝 필요)
 Q_SWING_HIND_DEG = list(Q_HOME_HIND_DEG)
@@ -982,7 +982,7 @@ WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
 WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
 WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
 WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
-USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+USE_SWING_QREF_BLEND = False   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
@@ -1451,16 +1451,17 @@ if USE_WBIC:
     if n_fail > 0:
         print(f"  [WARNING] WBIC solver {n_fail}회 실패. 제약 충돌 가능성.")
 
+_wbc_tau_cmd_no_grf = wbc_tau_cmd - wbc_tau_grf   # GRF feedforward 제외 (실 액추에이터 부담)
 for leg in [0, 2]:
     nj = N_JOINTS_PER_LEG[leg]
-    peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
+    peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(_wbc_tau_cmd_no_grf[:, leg, j])):6.2f}"
                       for j in range(nj))
     peaks_dq  = "  ".join(f"th{j+1}:{np.max(np.abs(joint_vel_hist[:, leg, j])):6.2f}"
                       for j in range(nj))
     fx_peak = np.max(np.abs(wbc_lam_des[:, leg, 0]))
     fy_peak = np.max(np.abs(wbc_lam_des[:, leg, 1]))
     fz_peak = np.max(np.abs(wbc_lam_des[:, leg, 2]))
-    print(f"  {LEG_NAMES[leg]} τ_cmd peak [N·m]:   {peaks_cmd}")
+    print(f"  {LEG_NAMES[leg]} τ_cmd−τ_grf peak [N·m]: {peaks_cmd}")
     print(f"  {LEG_NAMES[leg]} dq    peak [rad/s]: {peaks_dq}")
     print(f"  {LEG_NAMES[leg]} λ (GRF) peak [N]:   Fx={fx_peak:6.2f}, Fy={fy_peak:6.2f}, Fz={fz_peak:6.2f}")
 print("─" * 55)
@@ -1704,13 +1705,13 @@ def animate(fi):
     grf_lines = []
     for leg in range(4):
         d  = deg[leg]
-        tc = wbc_tau_cmd[fi, leg]
+        tc = wbc_tau_cmd[fi, leg] - wbc_tau_grf[fi, leg]   # GRF 성분 제외
         lm = wbc_lam_des[fi, leg]
         jnt_lines.append(f"{LEG_NAMES[leg]} "
                          f"th1={d[0]:+5.1f}d th2={d[1]:+6.1f}d th3={d[2]:+6.1f}d "
                          f"th4={d[3]:+5.1f}d th5={d[4]:+5.1f}d")
         tau_lines.append(f"{LEG_NAMES[leg]} "
-                         f"tau_cmd=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm")
+                         f"tau_cmd−grf=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm")
         grf_lines.append(f"{LEG_NAMES[leg]} "
                          f"lam=[{lm[0]:+5.1f} {lm[1]:+5.1f} {lm[2]:+5.1f}]N")
     info_text.set_text(
