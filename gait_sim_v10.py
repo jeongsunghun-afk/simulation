@@ -115,7 +115,7 @@ Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
 Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
 
 # swing 중 opt_ik 비용함수 참조 자세 (th4 음수 유도, 나머지는 home과 동일)
-Q_SWING_FRONT_DEG = [0.0, 118.2973, 96.7027, -25.0, 59.3417]  # th4 -45° (vel limit 내 추적, 부드러움 우선)
+Q_SWING_FRONT_DEG = [0.0, 118.2973, 96.7027, -25.0, 59.3417]  # th4 -25° (vel-safe boundary)
 Q_SWING_FRONT = [math.radians(a) for a in Q_SWING_FRONT_DEG]
 # 뒷다리 swing 참조 자세 (placeholder = home; 발 들기 효과 원하면 튜닝 필요)
 Q_SWING_HIND_DEG = list(Q_HOME_HIND_DEG)
@@ -982,7 +982,7 @@ WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
 WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
 WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
 WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
-USE_SWING_QREF_BLEND = False   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
@@ -1031,9 +1031,10 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     foot_local_prev = [foot_contact[leg].copy() for leg in range(4)]
     prev_swing      = [sched.is_swing(leg, 0) for leg in range(4)]
 
-    # warm-start 초기화: analytical IK 사용 (PHI 강제 branch).
-    # 메인 루프 q_ref도 analytical(같은 PHI branch)이라 fi=0부터 즉시 일치 → vel_limit hit 없음.
-    # opt_ik refinement는 home-near branch로 가서 q_ref와 mismatch 발생시키므로 제거.
+    # warm-start 초기화: analytical IK로 시작점 → opt_ik(vel_limit OFF)로 정제
+    # stance q_ref=home과 동일 branch(home-near)로 수렴 → fi=0 부근 vel_limit hit 최소화
+    _saved_vel_limit = OPT_IK_USE_VEL_LIMIT
+    OPT_IK_USE_VEL_LIMIT = False
     prev_q_per_leg = []
     for leg in range(4):
         front_l = leg < 2
@@ -1041,13 +1042,17 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
             _foot_dh0 = _sim_to_dh(foot_contact[leg] + _FRONT_J4_TO_J5_SIM, front_leg=True)
             _q_a = analytical_ik_front(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
                                        PHI_FRONT, THETA5_FRONT)
-            prev_q_per_leg.append(list(_q_a) if _q_a is not None else list(Q_HOME_FRONT))
+            _q_init0 = list(_q_a) if _q_a is not None else list(Q_HOME_FRONT)
+            _q_opt, _, _ = opt_ik_front(_foot_dh0, _q_init0, q_ref=list(Q_HOME_FRONT))
+            prev_q_per_leg.append(_q_opt if _q_opt is not None else _q_init0)
         else:
             _foot_dh0 = _sim_to_dh(foot_contact[leg] + _HIND_J4_TO_J5_SIM, front_leg=False)
             _q_h = analytical_ik_hind(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
                                       PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
-            prev_q_per_leg.append(list(_q_h) + [Q_HOME_HIND[4]] if _q_h is not None
-                                  else list(Q_HOME_HIND))
+            _q_init0 = list(_q_h) + [Q_HOME_HIND[4]] if _q_h is not None else list(Q_HOME_HIND)
+            _q_opt, _, _ = opt_ik_hind(_foot_dh0, _q_init0, q_ref=list(Q_HOME_HIND))
+            prev_q_per_leg.append(_q_opt if _q_opt is not None else _q_init0)
+    OPT_IK_USE_VEL_LIMIT = _saved_vel_limit
 
     calc_start = time.perf_counter()
     for fi in range(N_FRAMES):
@@ -1098,6 +1103,11 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                 #   swing(blend ON): home → Q_SWING_FRONT → home (quintic 블렌드)
                 #   stance/swing(blend OFF): 현재 foot 위치 기반 analytical IK
                 #     ← q_ref와 FK constraint 정합 → vel_limit hit 방지
+                # q_ref 정책:
+                #   swing(blend ON): home + α × (Q_SWING - Q_HOME) (quintic blend, 발 들기)
+                #   stance / swing(blend OFF): home (Q_HOME_FRONT)
+                # 시작 시 stance 다리는 fi=0~12에서 vel_limit hit 발생 (1회 transient, 무시 가능)
+                # 매 swing 사이클의 부드러움 우선
                 if is_sw and USE_SWING_QREF_BLEND:
                     _sw_t = sched.swing_t(leg, t)
                     if _sw_t <= 0.5:
@@ -1107,9 +1117,7 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                     _q_ref = [h + _alpha * (sw - h)
                               for h, sw in zip(Q_HOME_FRONT, Q_SWING_FRONT)]
                 else:
-                    _q_a_ref = analytical_ik_front(foot_dh[0], foot_dh[1], foot_dh[2],
-                                                   PHI_FRONT, THETA5_FRONT)
-                    _q_ref = list(_q_a_ref) if _q_a_ref is not None else list(Q_HOME_FRONT)
+                    _q_ref = list(Q_HOME_FRONT)
                 q_opt, nit, pos_err_sq = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5],
                                                       q_ref=_q_ref)
                 opt_ik_nit_hist[fi, col]     = nit
@@ -1136,11 +1144,8 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                 foot_dh = _sim_to_dh(foot_ik_sim, front_leg=False)
                 col = leg  # 2=HR, 3=HL
 
-                # 뒷다리: 현재 foot 위치 기반 analytical IK를 q_ref로
-                # ← q_ref와 FK constraint 정합 → vel_limit hit 방지 (HR/HL 시작 시 12프레임 vel limit lock 해소)
-                _q_a_h = analytical_ik_hind(foot_dh[0], foot_dh[1], foot_dh[2],
-                                            PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
-                _q_ref_h = list(_q_a_h) + [Q_HOME_HIND[4]] if _q_a_h is not None else list(Q_HOME_HIND)
+                # 뒷다리: USE_SWING_QREF_BLEND 무시하고 항상 home 추종
+                _q_ref_h = list(Q_HOME_HIND)
 
                 q_opt, nit, pos_err_sq = opt_ik_hind(foot_dh, prev_q_per_leg[leg][:5],
                                                      q_ref=_q_ref_h)
