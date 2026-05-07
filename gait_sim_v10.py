@@ -48,7 +48,7 @@ mpl.rcParams['axes.unicode_minus'] = False
 # ══════════════════════════════════════════════════════════════
 # 0. 파라미터
 # ══════════════════════════════════════════════════════════════
-GAIT_TYPE   = 'trot'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
+GAIT_TYPE   = 'walk'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
@@ -982,7 +982,8 @@ WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
 WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
 WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
 WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
-USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+USE_SWING_QREF_BLEND = False   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+# ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지)
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
