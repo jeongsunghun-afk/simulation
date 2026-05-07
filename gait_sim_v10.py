@@ -982,8 +982,8 @@ WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
 WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
 WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
 WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
-USE_SWING_QREF_BLEND = False   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
-# ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지)
+USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+# ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지) or 속도한계완화
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
 FRONT_Q_LIM = [
@@ -1032,22 +1032,35 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     foot_local_prev = [foot_contact[leg].copy() for leg in range(4)]
     prev_swing      = [sched.is_swing(leg, 0) for leg in range(4)]
 
-    # warm-start 초기화: analytical IK로 시작점 → opt_ik(vel_limit OFF)로 정제
-    # stance q_ref=home과 동일 branch(home-near)로 수렴 → fi=0 부근 vel_limit hit 최소화
+    # warm-start 초기화: 실제 fi=0 foot 위치(phase 반영) 기준으로 analytical IK
+    #   → opt_ik(vel_limit OFF)로 정제 → home-near branch 수렴
+    # ※ walk처럼 offsets=[0,0.5,0.75,0.25]면 fi=0에서 stance 다리마다 st_t가 다르므로
+    #   foot_contact(touchdown point)가 아닌 phase별 실제 위치로 warm-start해야
+    #   fi=0~수십 프레임 vel_limit hit 트랜션트 회피.
     _saved_vel_limit = OPT_IK_USE_VEL_LIMIT
     OPT_IK_USE_VEL_LIMIT = False
     prev_q_per_leg = []
     for leg in range(4):
         front_l = leg < 2
+        # fi=0 실제 foot 위치 (phase 반영, swing이면 sw_t=0=p_start, stance면 st_t에 따라)
+        _phase0 = sched.phase(leg, 0.0)
+        _p_end0 = home_foot_per_leg[leg] + _step_vec
+        _foot_loc0 = foot_pos_at_phase(
+            _phase0, foot_sw_start[leg], foot_contact[leg], _p_end0,
+            body_vel * traj_scale,
+            swing_ratio=sched.swing_ratio,
+            step_height=STEP_HEIGHT * height_scale,
+            stance_dur=stance_dur,
+        )
         if front_l:
-            _foot_dh0 = _sim_to_dh(foot_contact[leg] + _FRONT_J4_TO_J5_SIM, front_leg=True)
+            _foot_dh0 = _sim_to_dh(_foot_loc0 + _FRONT_J4_TO_J5_SIM, front_leg=True)
             _q_a = analytical_ik_front(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
                                        PHI_FRONT, THETA5_FRONT)
             _q_init0 = list(_q_a) if _q_a is not None else list(Q_HOME_FRONT)
             _q_opt, _, _ = opt_ik_front(_foot_dh0, _q_init0, q_ref=list(Q_HOME_FRONT))
             prev_q_per_leg.append(_q_opt if _q_opt is not None else _q_init0)
         else:
-            _foot_dh0 = _sim_to_dh(foot_contact[leg] + _HIND_J4_TO_J5_SIM, front_leg=False)
+            _foot_dh0 = _sim_to_dh(_foot_loc0 + _HIND_J4_TO_J5_SIM, front_leg=False)
             _q_h = analytical_ik_hind(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
                                       PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
             _q_init0 = list(_q_h) + [Q_HOME_HIND[4]] if _q_h is not None else list(Q_HOME_HIND)
