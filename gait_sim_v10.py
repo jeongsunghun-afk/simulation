@@ -48,7 +48,7 @@ mpl.rcParams['axes.unicode_minus'] = False
 # ══════════════════════════════════════════════════════════════
 # 0. 파라미터
 # ══════════════════════════════════════════════════════════════
-GAIT_TYPE   = 'walk'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
+GAIT_TYPE   = 'trot'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
@@ -109,8 +109,9 @@ DH_HIND = [
 _A2_F = 0.21; _A3_F = 0.235; _A4_F = 0.1; _A5_F = 0.045; _D2_F = 0.0075
 
 #Q_HOME_FRONT_DEG = [0.0, 157.5, 22.5, 30.6583, 59.3417] # BODY_Z_H=-0.1
-Q_HOME_FRONT_DEG = [0.0, 133.2973, 46.7027, 30.6583, 59.3417] # BODY_Z_H=-0.05
-Q_HOME_HIND_DEG  = [0.0, -150.0, -90.0, 90.0, 60.0]
+Q_HOME_FRONT_DEG = [0.0, 133.2973, 46.7027, 30.6583, 59.3417]    # 원본 (BODY_Z_H=-0.05)
+#Q_HOME_HIND_DEG  = [0.0, -154.8138, -92.8840, 88.6091, 60.0000]  # 뒷발 -50mm 확장 (발 간격 451mm)
+Q_HOME_HIND_DEG  = [0.0, -150.0, -90.0, 90.0, 60.0]              # 원본 (발 간격 401mm)
 Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
 Q_HOME_HIND  = [math.radians(a) for a in Q_HOME_HIND_DEG]
 
