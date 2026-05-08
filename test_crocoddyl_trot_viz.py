@@ -28,7 +28,7 @@ V_TARGET   = 1.0
 T_PERIOD   = 0.5
 DT         = 0.02
 N_PER_PHASE = int((T_PERIOD/2) / DT)   # 12
-N_CYCLES   = 2   # 2 cycles (안정), 4+ 는 receding horizon 필요
+N_CYCLES   = 4   # one-shot 발산 시각화 (receding horizon 미구현)
 STEP_HEIGHT = 0.08
 STEP_LENGTH = 0.25
 
