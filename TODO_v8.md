@@ -112,7 +112,7 @@ RNEA로 계산한 τ_ff를 초기값으로, joint limit/마찰 추 제약 하에
 - [x] 부등식: τ_min ≤ τ_ff+Δτ ≤ τ_max, 마찰 추, swing λ=0
 - [x] solver: qpsolvers[quadprog]
 - [ ] task 우선순위 (body pose > foot position > joint limit) — **다음 단계**
-- [ ] 부유 베이스 통합 (현재는 per-leg 분해)
+- [x] 부유 베이스 통합 (단일 QP, body acc 변수 포함) — **v11**
 
 ---
 
@@ -124,6 +124,94 @@ RNEA로 계산한 τ_ff를 초기값으로, joint limit/마찰 추 제약 하에
 - [ ] (장기) pinocchio 연동: URDF 확보 후 RNEA/Jacobian 대체
       pip install pin
       pinocchio.buildModelFromUrdf()
+
+---
+
+## Phase 7 — 모델 충실도 향상 (설계 데이터 신뢰성)
+
+설계 결정(모터 선정, 링크 응력, 배터리 산정 등)에 활용 가능한 데이터를
+얻기 위한 추가 모델링 항목들. 우선순위 = 설계 직결성.
+
+### Tier 1 — 설계 결정 직결
+
+- [ ] **액추에이터 모델** (모터 + 감속기) — `actuator_v??`
+      현재: τ_max 상수 한계만
+      추가:
+        · 토크-속도 곡선 (peak / continuous)
+        · 감속비 N + reflected inertia (J_motor·N²)
+        · 마찰 (Coulomb τ_c·sign(q̇) + viscous c·q̇)
+        · 모터 전류/전압 한계 (선택)
+      영향: "Hip 90형 vs 100형" 같은 모터 사양 검증 가능
+      파라미터: per-joint (τ_max, ω_max, J_motor, gear_ratio, friction_c, viscous_c)
+
+- [x] **Floating-base 통합 동역학** — **v11**
+      현재(v10): body 위치 = V·t (kinematic only)
+      추가: M·v̇ + C·v + g_world = Σ Jᵀ·λ를 6-DoF 적분 (Lie group)
+      영향: 실제 pitch/roll 응답, ZMP, CoM 진동 측정 가능
+      구현: pinocchio.aba() 또는 직접 (M_body·a_lin + I·α + ω×Iω = ...)
+
+- [x] **WBIC 부유 베이스 통합** — **v11**
+      현재(v10): per-leg 4개 분리 QP
+      추가: 단일 QP, [Δv̇_fb (6); Δq̈_legs (20); Δτ (20); Δλ (12)]
+      등식: body 6-DoF 운동방정식 + 4개 다리 운동방정식
+      영향: 다리 간 토크 재분배 정확화, body acc task 우선순위 가능
+
+### Tier 2 — 신호 정확도 개선
+
+- [ ] **Compliant 접촉 모델** (Hunt-Crossley)
+      현재: 강체 접촉 (touchdown 충격력 계단)
+      추가: F_z = K·δ + B·δ̇·δ, δ = penetration depth
+      영향: 충격력 시계열 현실화 → 베어링/링크 피로 해석 가능
+      파라미터: K (지면 강성, ~10^5 N/m), B (감쇠, ~10^3)
+
+- [ ] **Self-collision 검사** (capsule-capsule)
+      현재: 검사 없음 (다리-다리, 다리-body 충돌 가능)
+      추가: 각 링크에 capsule (반경+축) 부여, 거리 검사
+      영향: 새 Q_HOME / swing 궤적의 물리적 가능성 자동 검증
+      라이브러리: python-fcl 또는 직접 구현
+
+- [ ] **Spline 기반 q̇/q̈** (수치 미분 노이즈 감소)
+      현재: np.gradient(q) 직접 미분
+      추가: cubic spline 또는 Savitzky-Golay 필터
+      영향: τ_dyn 잔떨림 제거 → RNEA 토크 노이즈↓ → 모터 사양 산정 정확화
+
+### Tier 3 — 시스템 검증용
+
+- [ ] **센서 모델** (인코더 양자화 + 노이즈, IMU bias/drift)
+      → 제어기가 실 센서 노이즈 견디는지 stress test
+
+- [ ] **Slip detection + handling**
+      마찰 추 위반 시 grip 손실 처리, 회복 제어
+      → 미끄러운 환경 robustness 평가
+
+- [ ] **배터리/전력 모델**
+      I·V·dt → 전력 → 시간당 에너지 → 배터리 용량 산정
+      모터 모델과 결합 (Tier 1 액추에이터 선행 필요)
+
+### 권장 순서 (영향 vs 작업량)
+
+```
+pinocchio (Phase 6 기반)
+   ↓
+액추에이터 모델 (Tier 1.1)  ← 가장 빠른 ROI
+   ↓
+Floating-base 적분 (Tier 1.2) ← v11
+   ↓
+WBIC FB 통합 (Tier 1.3) ← v11
+   ↓
+Compliant contact (Tier 2.4)
+   ↓
+나머지 검증
+```
+
+### 설계 데이터 목적별 우선순위
+
+| 설계 데이터 | 필수 항목 |
+|-----------|----------|
+| 모터/감속기 선정 | Tier 1.1 + 1.2 |
+| 링크/베어링 강성/피로 | Tier 1.1 + 2.4 |
+| Gait robustness | Tier 1.2/1.3 + Tier 3 |
+| 에너지/주행시간 | Tier 3.9 + Tier 1.1 |
 
 ---
 

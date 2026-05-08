@@ -1,27 +1,42 @@
 """
-gait_sim_v10.py  —  4족 보행 Gait 시뮬레이터 + WBIC QP
+gait_sim_v11.py  —  4족 보행 Gait 시뮬레이터 + WBIC QP + Floating-Base
 
-v9 대비 변경:
-    · figure 4에서 tau_grf 표시 라인만 제거 (큰 값으로 시각적 혼란).
-      계산/저장 (tau_grf_leg, wbc_tau_grf)은 그대로 유지 — tau_ff에 필수.
-      tau_grf는 actuator 직접 제어 신호 아니므로 plot에서만 숨김.
+v10 대비 추가 (Phase 7 Tier 1):
+    · Floating-base 통합 동역학 (USE_BODY_DYNAMICS):
+        v10: body 위치 = V·t (kinematic only, GRF 무관하게 강제 직진)
+        v11: body 6-DoF (CoM pos, R, v, ω) 동적 적분
+            M·v̇ = Σλ + M·g_world          (linear, world frame)
+            I_body·ω̇ + ω×(I_body·ω) = Σ(r_i × λ_i)   (angular, about CoM)
+            R_{k+1} = exp(Δt·skew(ω)) · R_k          (Lie group rotation)
+            symplectic Euler 적분
+        효과: 실제 pitch/roll 응답, ZMP, CoM 진동 측정 가능.
+              MPC가 제대로 동작하면 body가 ref 추종, 실패하면 발산.
 
-v8 대비 추가 (v9에서 누적):
-    · Phase 5 — WBIC QP (per-leg baseline):
+    · WBIC 부유 베이스 통합 QP (USE_WBIC_FB):
+        v10: per-leg 4 separate QPs, 다리 간 결합 없음
+        v11: 단일 QP, [Δv̇_fb (6); Δq̈ (4·5); Δτ (4·5); Δλ (4·3)] = 58 vars
+        등식:
+            body 6-DoF: M_fb·(v̇_des + Δv̇_fb) = F_des + ΔF(Δλ)
+                        ΔF_lin = Σ Δλ_i,  ΔF_ang = Σ r_i × Δλ_i
+            per-leg dyn: M_i·(q̈_i_des + Δq̈_i) + h_i = (τ_ff_i + Δτ_i) + Jᵀ_i·(λ_des_i + Δλ_i)
+                        → M_i·Δq̈_i − Δτ_i − Jᵀ_i·Δλ_i = r_i  (per-leg residual)
+        부등: τ 한계, 마찰 추, λ_z ≥ lamz_min (per-leg), swing Δλ = −λ_des
+        효과: GRF 재배분이 body force/torque 평형 동시 만족하도록 강제.
+              per-leg에서는 ΔΛ가 독립적이라 body 평형 깨질 수 있음.
+
+    · 진단 배열: body_pos/R/v/omega_hist (4 array, N_FRAMES 길이)
+    · 신규 figure: body trajectory + orientation + CoM 진동 시계열
+
+v10 누적 (참고):
+    · figure 4 tau_grf line 숨김 (저장은 유지)
+v9 누적 (참고):
+    · Phase 5 WBIC QP (per-leg baseline):
         변수  x_leg = [Δq̈ (nj), Δτ (nj), Δλ (3)]
         비용  α·||Δq̈||² + β·||Δτ||² + γ·||Δλ||²
         등식  M(q)·(q̈+Δq̈) + h(q,q̇) = (τ_ff+Δτ) + Jᵀ·(λ_des+Δλ)
-              → M·Δq̈ - Δτ - Jᵀ·Δλ = r,  r = τ_ff + Jᵀ·λ_des − M·q̈ − h
         부등  τ_min ≤ τ_ff+Δτ ≤ τ_max
               stance: |λ_x|,|λ_y| ≤ μ·λ_z,  λ_z ≥ λ_z_min
               swing : λ = 0 (Δλ = −λ_des)
-        결과: τ_cmd_leg = τ_pd + (τ_ff + Δτ_opt) + τ_imp
-              λ_used    = λ_des + Δλ_opt    (로깅용)
-
-    · WBIC 토글: USE_WBIC = True/False
-        False면 v8 동작 (RNEA τ_ff 직접 사용 + clip)
-
-    · 진단 배열: wbic_dtau_hist, wbic_dlam_hist, wbic_residual_hist
 
 v8 누적 (참고):
     · Phase 1 MPC QP, Phase 2 QP GRF, Phase 3 RNEA, Phase 4 Opt-IK (앞/뒷다리)
@@ -36,7 +51,7 @@ import numpy as np
 import qpsolvers
 
 # 비교 모드: HIND_VARIANT={'orig','ext'}, COMPARE_MODE=1이면 figure 생략 후 metrics 덤프
-_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'ext')
+_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'orig')
 _COMPARE_MODE = os.environ.get('COMPARE_MODE', '0') == '1'
 assert _HIND_VARIANT in ('orig', 'ext'), f"HIND_VARIANT={_HIND_VARIANT} (expected 'orig' or 'ext')"
 import matplotlib as mpl
@@ -56,7 +71,7 @@ mpl.rcParams['axes.unicode_minus'] = False
 # ══════════════════════════════════════════════════════════════
 # 0. 파라미터
 # ══════════════════════════════════════════════════════════════
-GAIT_TYPE   = 'walk'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
+GAIT_TYPE   = 'trot'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
@@ -639,6 +654,248 @@ def wbic_qp_leg(M, h, ddq_des, tau_ff, lam_des, J, contact, nj,
     return sol[:nj], sol[nj:2*nj], sol[2*nj:], True, residual_pre
 
 
+# ── v11 Phase 7: Floating-Base 동역학 + WBIC FB ───────────────
+
+def _skew(v):
+    """3-vector → 3×3 skew-symmetric (cross product matrix)."""
+    return np.array([[0.0, -v[2], v[1]],
+                     [v[2], 0.0, -v[0]],
+                     [-v[1], v[0], 0.0]], dtype=float)
+
+
+def _exp_so3(omega_dt):
+    """Lie group exponential: skew-vec → SO(3) rotation matrix.
+    Rodrigues' formula. ω·dt 입력, ‖ω·dt‖ < ε이면 I 반환.
+    """
+    angle = float(np.linalg.norm(omega_dt))
+    if angle < 1e-12:
+        return np.eye(3)
+    axis = omega_dt / angle
+    K = _skew(axis)
+    return np.eye(3) + math.sin(angle)*K + (1.0 - math.cos(angle))*(K @ K)
+
+
+def integrate_body_state(body_state, lam_used_all, foot_world_all,
+                         M_total, I_body, dt):
+    """
+    Floating-base 6-DoF 동역학 적분 (symplectic Euler).
+
+    Args:
+        body_state: dict with keys 'pos','R','v','omega'
+        lam_used_all: (4, 3) — 각 발의 GRF (world frame)
+        foot_world_all: (4, 3) — 각 발의 world position (CoM 기준 r_i 계산용)
+        M_total: 전체 질량 [kg]
+        I_body: body inertia tensor [kg·m²] (body frame)
+        dt: 시간 간격 [s]
+
+    Returns:
+        업데이트된 body_state (in-place 수정 + 반환)
+    """
+    pos   = body_state['pos']
+    R     = body_state['R']
+    v     = body_state['v']
+    omega = body_state['omega']
+
+    # Linear: M·v̇ = Σλ + M·g_world
+    F_grf  = np.sum(lam_used_all, axis=0)
+    F_grav = np.array([0.0, 0.0, -M_total * G_ACC])
+    a_lin  = (F_grf + F_grav) / M_total
+
+    # Angular about CoM: I_world·ω̇ + ω×(I_world·ω) = Σ r_i × λ_i
+    I_world = R @ I_body @ R.T
+    tau_com = np.zeros(3)
+    for i in range(4):
+        r_i = foot_world_all[i] - pos
+        tau_com += np.cross(r_i, lam_used_all[i])
+    rhs = tau_com - np.cross(omega, I_world @ omega)
+    a_ang = np.linalg.solve(I_world, rhs)
+
+    # Symplectic Euler: 속도 먼저 업데이트, 위치/회전은 새 속도로 적분
+    v_new     = v     + dt * a_lin
+    omega_new = omega + dt * a_ang
+    pos_new   = pos   + dt * v_new
+    R_new     = _exp_so3(omega_new * dt) @ R
+
+    body_state['pos']   = pos_new
+    body_state['R']     = R_new
+    body_state['v']     = v_new
+    body_state['omega'] = omega_new
+    body_state['a_lin'] = a_lin
+    body_state['a_ang'] = a_ang
+    return body_state
+
+
+def wbic_qp_full(M_legs, h_legs, ddq_des_legs, tau_ff_legs, lam_des_all,
+                 J_legs, contact_mask, nj_per_leg, foot_world_all, body_pos,
+                 v_dot_des_fb,
+                 M_total, I_body, omega_world,
+                 w_ddq, w_tau, w_lam, w_fb, lamz_min, mu):
+    """
+    v11 Phase 7 — WBIC 부유 베이스 통합 단일 QP.
+
+    변수 (총 nv = 6 + 4·nj·2 + 4·3):
+        x = [ Δv̇_fb (6); Δq̈ (sum_nj); Δτ (sum_nj); Δλ (12) ]
+
+    비용:
+        w_fb·||Δv̇_fb||² + w_ddq·||Δq̈||² + w_tau·||Δτ||² + w_lam·||Δλ||²
+
+    등식:
+        body 6-DoF (6):
+            M_fb·(v̇_fb_des + Δv̇_fb) = F_des(λ_des) + ΔF(Δλ)
+            → M_fb·Δv̇_fb − [I_3⊗4 ; r̂_i⊗4]·Δλ = F_des − M_fb·v̇_fb_des
+            (M_fb = block_diag(M·I3, I_world);  r̂_i = skew(foot_i - CoM))
+        per-leg dyn (Σ nj):
+            M_i·Δq̈_i − Δτ_i − Jᵀ_i·Δλ_i = r_i
+            r_i = tau_ff_i + Jᵀ_i·λ_des_i − M_i·ddq_des_i − h_i
+
+    부등:
+        per-leg torque limits, friction cone, λ_z ≥ lamz_min (stance only)
+        swing: Δλ = −λ_des (bound으로 고정)
+
+    body 6-DoF residual (좌변 검증용; 작을수록 MPC와 정합)도 반환.
+    """
+    # 인덱스 헬퍼
+    n_legs = 4
+    nj_total = sum(nj_per_leg[:n_legs])
+    n_fb  = 6
+    n_ddq = nj_total
+    n_tau = nj_total
+    n_lam = 12
+    n_v   = n_fb + n_ddq + n_tau + n_lam
+
+    # 슬라이스
+    sl_fb  = slice(0, n_fb)
+    sl_ddq = slice(n_fb, n_fb + n_ddq)
+    sl_tau = slice(n_fb + n_ddq, n_fb + n_ddq + n_tau)
+    sl_lam = slice(n_fb + n_ddq + n_tau, n_v)
+    leg_off_ddq = [sum(nj_per_leg[:i]) for i in range(n_legs)]   # leg i의 ddq 시작 (within sl_ddq)
+    leg_off_tau = leg_off_ddq                                     # 동일 사이즈
+    leg_off_lam = [3*i for i in range(n_legs)]
+
+    # 비용
+    P = np.zeros((n_v, n_v), dtype=float)
+    P[sl_fb,  sl_fb]  = w_fb  * np.eye(n_fb)
+    P[sl_ddq, sl_ddq] = w_ddq * np.eye(n_ddq)
+    P[sl_tau, sl_tau] = w_tau * np.eye(n_tau)
+    P[sl_lam, sl_lam] = w_lam * np.eye(n_lam)
+    qv = np.zeros(n_v, dtype=float)
+
+    # ── 등식 1: body 6-DoF ─────────────────────────────────────
+    # M_fb·v̇_fb_des = F_des  (이 등식이 정확히 만족되면 RHS=0)
+    # M_fb = [M·I3, 0; 0, I_world]
+    I_world = np.zeros((3,3))
+    # body_R는 호출자가 omega와 함께 넘겨야 정확. 여기선 I_body 자체 사용 (world ≈ body 가정).
+    # → 호출자가 R·I_body·R.T를 미리 넣어 호출하도록 (인터페이스 단순화 위해 I_body 그대로 사용)
+    I_world = I_body.copy()
+    M_fb_lin = M_total * np.eye(3)
+    M_fb     = np.zeros((6, 6))
+    M_fb[:3, :3] = M_fb_lin
+    M_fb[3:, 3:] = I_world
+
+    # F_des: linear = Σ λ_des + M·g, angular = Σ r_i × λ_des_i − ω×(I·ω)
+    F_lin_des = np.sum(lam_des_all, axis=0) + np.array([0.0, 0.0, -M_total*G_ACC])
+    F_ang_des = -np.cross(omega_world, I_world @ omega_world)
+    for i in range(n_legs):
+        r_i = foot_world_all[i] - body_pos
+        F_ang_des += np.cross(r_i, lam_des_all[i])
+    F_des = np.concatenate([F_lin_des, F_ang_des])
+
+    # 등식 RHS: M_fb·v̇_fb_des − F_des  (= 0이어야 일관)
+    rhs_fb = M_fb @ v_dot_des_fb - F_des
+
+    A_eq_fb = np.zeros((6, n_v))
+    A_eq_fb[:, sl_fb] = M_fb
+    # ΔF coupling: -[I_3 -r̂_i ; ...] · Δλ_i (각 다리)
+    for i in range(n_legs):
+        r_i = foot_world_all[i] - body_pos
+        col = sl_lam.start + leg_off_lam[i]
+        A_eq_fb[:3, col:col+3] += -np.eye(3)
+        A_eq_fb[3:, col:col+3] += -_skew(r_i)
+    b_eq_fb = -rhs_fb   # M_fb·Δv̇_fb − ΔF = -rhs_fb  (즉, F_des + ΔF = M_fb·(v̇_des+Δv̇))
+
+    # ── 등식 2: per-leg dynamics ─────────────────────────────────
+    A_eq_legs_list = []
+    b_eq_legs_list = []
+    residual_legs = np.zeros(n_legs)
+    for i in range(n_legs):
+        nj = nj_per_leg[i]
+        Mi  = M_legs[i]
+        hi  = h_legs[i]
+        Ji  = J_legs[i]
+        ddq_des_i = ddq_des_legs[i]
+        tau_ff_i  = tau_ff_legs[i]
+        lam_des_i = lam_des_all[i]
+        r_i_resid = tau_ff_i + Ji.T @ lam_des_i - Mi @ ddq_des_i - hi
+
+        Ai = np.zeros((nj, n_v))
+        Ai[:, sl_ddq.start + leg_off_ddq[i] : sl_ddq.start + leg_off_ddq[i] + nj] = Mi
+        Ai[:, sl_tau.start + leg_off_tau[i] : sl_tau.start + leg_off_tau[i] + nj] = -np.eye(nj)
+        Ai[:, sl_lam.start + leg_off_lam[i] : sl_lam.start + leg_off_lam[i] + 3]  = -Ji.T
+        A_eq_legs_list.append(Ai)
+        b_eq_legs_list.append(r_i_resid)
+        residual_legs[i] = float(np.linalg.norm(r_i_resid))
+
+    A_eq = np.vstack([A_eq_fb] + A_eq_legs_list)
+    b_eq = np.concatenate([b_eq_fb] + b_eq_legs_list)
+
+    # ── bounds ────────────────────────────────────────────────
+    lb = np.full(n_v, -1e8)
+    ub = np.full(n_v,  1e8)
+    for i in range(n_legs):
+        nj = nj_per_leg[i]
+        tau_lim = JOINT_TORQUE_LIMIT[:nj]
+        s_off = sl_tau.start + leg_off_tau[i]
+        lb[s_off : s_off + nj] = -tau_lim - tau_ff_legs[i]
+        ub[s_off : s_off + nj] =  tau_lim - tau_ff_legs[i]
+
+    # ── 부등식: 마찰 추 (stance) ────────────────────────────────
+    G_ineq_list = []
+    h_ineq_list = []
+    for i in range(n_legs):
+        l_off = sl_lam.start + leg_off_lam[i]
+        if contact_mask[i]:
+            # λ_z + Δλ_z ≥ lamz_min → bound으로 적용
+            lb[l_off + 2] = max(lb[l_off + 2], lamz_min - lam_des_all[i, 2])
+            # 마찰: ±Δλ_x − μ·Δλ_z ≤ μ·λ_z ∓ λ_x   (4 행)
+            mu_l = mu
+            for sgn_x, sgn_y in [(+1, 0), (-1, 0), (0, +1), (0, -1)]:
+                row = np.zeros(n_v)
+                row[l_off + 0] = sgn_x
+                row[l_off + 1] = sgn_y
+                row[l_off + 2] = -mu_l
+                rhs = mu_l * lam_des_all[i, 2] - sgn_x * lam_des_all[i, 0] - sgn_y * lam_des_all[i, 1]
+                G_ineq_list.append(row)
+                h_ineq_list.append(rhs)
+        else:
+            # swing: Δλ = -λ_des (bound으로 정확 고정)
+            for k in range(3):
+                lb[l_off + k] = -lam_des_all[i, k]
+                ub[l_off + k] = -lam_des_all[i, k]
+
+    G_ineq = np.vstack(G_ineq_list) if G_ineq_list else None
+    h_ineq = np.array(h_ineq_list) if h_ineq_list else None
+
+    try:
+        sol = qpsolvers.solve_qp(P, qv, G_ineq, h_ineq, A_eq, b_eq, lb, ub, solver='quadprog')
+    except Exception:
+        sol = None
+
+    if sol is None:
+        return None
+    out = {
+        'd_v_fb': sol[sl_fb],
+        'd_ddq_legs': [sol[sl_ddq.start + leg_off_ddq[i] : sl_ddq.start + leg_off_ddq[i] + nj_per_leg[i]]
+                       for i in range(n_legs)],
+        'd_tau_legs': [sol[sl_tau.start + leg_off_tau[i] : sl_tau.start + leg_off_tau[i] + nj_per_leg[i]]
+                       for i in range(n_legs)],
+        'd_lam_legs': [sol[sl_lam.start + leg_off_lam[i] : sl_lam.start + leg_off_lam[i] + 3]
+                       for i in range(n_legs)],
+        'residual_legs': residual_legs,
+        'residual_fb':   float(np.linalg.norm(rhs_fb)),
+    }
+    return out
+
+
 def qp_grf_distribute(contact_mask, foot_pos_world):
     """
     Phase 2 — 단일 스텝 QP GRF 배분 (MPC fallback)
@@ -994,6 +1251,12 @@ WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
 WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
 WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
 WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
+
+# ── v11 Phase 7: Floating-base 동역학 + WBIC FB 파라미터 ─────
+USE_BODY_DYNAMICS = True  # True: GRF 기반 body 6-DoF 적분 (v11), False: V·t kinematic
+USE_WBIC_FB       = False # True: 단일 QP (body acc 변수 포함, v11 신규)
+                          # False: per-leg WBIC (v9~v10 기존 동작) — 기본값 안정성 유지
+WBIC_W_FB         = 0.1   # ‖Δv̇_fb‖² 가중치 (body acc 보정 최소화)
 USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 # ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지) or 속도한계완화
 
@@ -1328,8 +1591,35 @@ wbic_residual_hist = np.zeros((N_FRAMES, 4))    # eq 잔차 norm (사실상 0이
 wbic_status_hist   = np.zeros((N_FRAMES, 4), dtype=bool)  # solver 성공 여부
 wbic_lam_used      = np.zeros((N_FRAMES, 4, 3))   # 실제 사용된 λ = λ_des + Δλ
 
+# ── v11: Floating-base 동역학 진단 배열 ────────────────────
+body_pos_hist   = np.zeros((N_FRAMES, 3))           # CoM world position
+body_R_hist     = np.zeros((N_FRAMES, 3, 3))        # rotation matrix
+body_v_hist     = np.zeros((N_FRAMES, 3))           # CoM linear velocity
+body_omega_hist = np.zeros((N_FRAMES, 3))           # body angular velocity
+body_alin_hist  = np.zeros((N_FRAMES, 3))           # CoM linear accel
+body_aang_hist  = np.zeros((N_FRAMES, 3))           # body angular accel
+# Reference (kinematic V·t) for deviation 계산
+body_pos_ref_hist = np.zeros((N_FRAMES, 3))
+body_v_ref_hist   = np.zeros((N_FRAMES, 3))
+
+# 초기 body 상태 (steady-state stance posture)
+body_state = {
+    'pos':   np.array([0.0, 0.0, 0.0]),     # initial CoM at origin
+    'R':     np.eye(3),
+    'v':     np.array([V, 0.0, 0.0]),       # 정상 보행 속도로 시작
+    'omega': np.zeros(3),
+    'a_lin': np.zeros(3),
+    'a_ang': np.zeros(3),
+}
+
+# WBIC FB 진단
+wbic_fb_residual_hist = np.zeros(N_FRAMES)          # body 6-DoF residual norm
+wbic_fb_status_hist   = np.zeros(N_FRAMES, dtype=bool)
+wbic_fb_dvfb_hist     = np.zeros((N_FRAMES, 6))     # Δv̇_fb
+
 mpc_fail_count = 0
 wbic_fail_count = 0
+wbic_fb_fail_count = 0
 
 for fi in range(N_FRAMES):
     t_cur = fi * DT
@@ -1379,7 +1669,9 @@ for fi in range(N_FRAMES):
 
     wbc_lam_des[fi] = lam_des_all
 
-    # ── leg별 WBC 계산 ────────────────────────────────────────
+    # ── Pass 1: per-leg kinematics + RNEA + M, h ─────────────
+    leg_data = [None]*4
+    foot_world_all = np.zeros((4, 3))
     for leg in range(4):
         nj    = N_JOINTS_PER_LEG[leg]
         front = leg < 2
@@ -1394,61 +1686,128 @@ for fi in range(N_FRAMES):
 
         J   = compute_jacobian_sim(q_t, dh, front)
         J_a = compute_jacobian_sim(q_a, dh, front)
-        tau_g = compute_gravity_torque_sim(q_t, dh, lm, front)   # 플롯용 g(q) 보존
+        tau_g = compute_gravity_torque_sim(q_t, dh, lm, front)
 
-        lam_des_leg = lam_des_all[leg]   # [Fx, Fy, Fz]
+        lam_des_leg = lam_des_all[leg]
 
-        # Phase 3: RNEA 완전 동역학 분해
-        #   tau_dyn = M·q̈ + C·q̇ + g(q)   (RNEA 결과, 중력 포함)
-        #   tau_grf = -Jᵀ·λ_des          (GRF reaction, 부호: tau_ff = tau_dyn + tau_grf)
         tau_dyn_leg  = rnea(q_t, dq_t, ddq_t, dh, lm)
         tau_grf_leg  = -J.T @ lam_des_leg
-        tau_rnea_leg = tau_dyn_leg                    # alias (compute_mh_leg 호환)
         tau_ff_leg   = tau_dyn_leg + tau_grf_leg
 
-        # Phase 5: WBIC QP — τ_ff/λ_des를 토크 한계·마찰 추 안으로 보정
-        lam_used_leg = lam_des_leg.copy()
-        if USE_WBIC:
-            M_leg, h_leg = compute_mh_leg(q_t, dq_t, dh, lm)
-            d_ddq, d_tau, d_lam, ok, res = wbic_qp_leg(
-                M_leg, h_leg, ddq_t, tau_ff_leg, lam_des_leg, J,
-                contact=(not swing_flag[fi, leg]), nj=nj,
-                w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM,
-                lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
-            )
-            wbic_residual_hist[fi, leg] = res
-            wbic_status_hist[fi, leg]   = ok
-            if ok:
-                tau_ff_leg = tau_ff_leg + d_tau
-                lam_used_leg = lam_des_leg + d_lam
-                wbic_dtau_hist[fi, leg, :nj] = d_tau
-                wbic_dlam_hist[fi, leg]      = d_lam
-            else:
-                wbic_fail_count += 1
+        # foot world position (body integration용 r_i 계산)
+        foot_world_all[leg] = body_state['pos'] + body_state['R'] @ foot_hist[fi, leg]
+
+        M_leg, h_leg = compute_mh_leg(q_t, dq_t, dh, lm) if (USE_WBIC or USE_WBIC_FB) else (None, None)
 
         foot_t_j5 = foot_local[fi, leg] + J4_TO_J5_SIM_PER_LEG[leg]
         pts_a     = forward_kinematics(q_a, dh=dh)
         foot_a_j5 = _dh_to_sim(pts_a[-1], front_leg=front)
         vel_t     = foot_vel_t[fi, leg]
         vel_a     = J_a @ dq_a
-
         f_imp       = KP_IMP * (foot_t_j5 - foot_a_j5) + KD_IMP * (vel_t - vel_a)
         tau_imp_leg = J.T @ f_imp
         tau_pd_leg  = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
-        tau_cmd_leg = tau_pd_leg + tau_ff_leg + tau_imp_leg
-        tau_cmd_leg = np.clip(tau_cmd_leg, -JOINT_TORQUE_LIMIT[:nj], JOINT_TORQUE_LIMIT[:nj])  # 토크 클리핑
-        wbic_lam_used[fi, leg] = lam_used_leg
 
-        JJT          = J @ J.T + MU_DAMP * np.eye(3)
-        lam_calc_leg = np.linalg.solve(JJT, J @ (tau_g - tau_cmd_leg))
+        leg_data[leg] = dict(nj=nj, J=J, ddq_t=ddq_t,
+                             tau_g=tau_g, tau_dyn=tau_dyn_leg, tau_grf=tau_grf_leg,
+                             tau_ff=tau_ff_leg, tau_pd=tau_pd_leg, tau_imp=tau_imp_leg,
+                             M_leg=M_leg, h_leg=h_leg,
+                             lam_des=lam_des_leg, lam_used=lam_des_leg.copy())
 
-        wbc_tau_ff  [fi, leg, :nj] = tau_ff_leg          # WBIC 보정 d_tau 포함
-        wbc_tau_dyn [fi, leg, :nj] = tau_dyn_leg          # pre-WBIC RNEA
-        wbc_tau_pd  [fi, leg, :nj] = tau_pd_leg
-        wbc_tau_imp [fi, leg, :nj] = tau_imp_leg
-        wbc_tau_grf [fi, leg, :nj] = tau_grf_leg          # pre-WBIC -Jᵀ·λ_des
+    # ── Pass 2: WBIC (FB single QP OR per-leg) ──────────────
+    used_fb = False
+    if USE_WBIC_FB:
+        # body state로부터 ω, R 가져옴 (world inertia)
+        R_world = body_state['R']
+        I_world = R_world @ BODY_INERTIA @ R_world.T
+        # v̇_des: MPC가 가정한 정상 보행 → linear=0, angular=0 (정상상태에서)
+        v_dot_des_fb = np.zeros(6)
+        fb_out = wbic_qp_full(
+            M_legs=[leg_data[i]['M_leg'] for i in range(4)],
+            h_legs=[leg_data[i]['h_leg'] for i in range(4)],
+            ddq_des_legs=[leg_data[i]['ddq_t'] for i in range(4)],
+            tau_ff_legs=[leg_data[i]['tau_ff'] for i in range(4)],
+            lam_des_all=lam_des_all,
+            J_legs=[leg_data[i]['J'] for i in range(4)],
+            contact_mask=contact_mask, nj_per_leg=N_JOINTS_PER_LEG,
+            foot_world_all=foot_world_all, body_pos=body_state['pos'],
+            v_dot_des_fb=v_dot_des_fb,
+            M_total=TOTAL_MASS, I_body=I_world, omega_world=body_state['omega'],
+            w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM, w_fb=WBIC_W_FB,
+            lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+        )
+        if fb_out is not None:
+            used_fb = True
+            wbic_fb_residual_hist[fi] = fb_out['residual_fb']
+            wbic_fb_status_hist[fi]   = True
+            wbic_fb_dvfb_hist[fi]     = fb_out['d_v_fb']
+            for leg in range(4):
+                nj = leg_data[leg]['nj']
+                d_tau = fb_out['d_tau_legs'][leg]
+                d_lam = fb_out['d_lam_legs'][leg]
+                leg_data[leg]['tau_ff']  = leg_data[leg]['tau_ff'] + d_tau
+                leg_data[leg]['lam_used'] = leg_data[leg]['lam_des'] + d_lam
+                wbic_dtau_hist[fi, leg, :nj] = d_tau
+                wbic_dlam_hist[fi, leg]      = d_lam
+                wbic_residual_hist[fi, leg]  = fb_out['residual_legs'][leg]
+                wbic_status_hist[fi, leg]    = True
+        else:
+            wbic_fb_fail_count += 1
+            # fallback: per-leg WBIC
+
+    if (not used_fb) and USE_WBIC:
+        for leg in range(4):
+            d = leg_data[leg]
+            nj = d['nj']
+            d_ddq, d_tau, d_lam, ok, res = wbic_qp_leg(
+                d['M_leg'], d['h_leg'], d['ddq_t'], d['tau_ff'], d['lam_des'], d['J'],
+                contact=contact_mask[leg], nj=nj,
+                w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM,
+                lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+            )
+            wbic_residual_hist[fi, leg] = res
+            wbic_status_hist[fi, leg]   = ok
+            if ok:
+                d['tau_ff']  = d['tau_ff'] + d_tau
+                d['lam_used'] = d['lam_des'] + d_lam
+                wbic_dtau_hist[fi, leg, :nj] = d_tau
+                wbic_dlam_hist[fi, leg]      = d_lam
+            else:
+                wbic_fail_count += 1
+
+    # ── Pass 3: τ_cmd 계산 + 히스토리 저장 ──────────────────
+    for leg in range(4):
+        d = leg_data[leg]
+        nj = d['nj']
+        tau_cmd_leg = d['tau_pd'] + d['tau_ff'] + d['tau_imp']
+        tau_cmd_leg = np.clip(tau_cmd_leg, -JOINT_TORQUE_LIMIT[:nj], JOINT_TORQUE_LIMIT[:nj])
+        wbic_lam_used[fi, leg] = d['lam_used']
+
+        JJT          = d['J'] @ d['J'].T + MU_DAMP * np.eye(3)
+        lam_calc_leg = np.linalg.solve(JJT, d['J'] @ (d['tau_g'] - tau_cmd_leg))
+
+        wbc_tau_ff  [fi, leg, :nj] = d['tau_ff']
+        wbc_tau_dyn [fi, leg, :nj] = d['tau_dyn']
+        wbc_tau_pd  [fi, leg, :nj] = d['tau_pd']
+        wbc_tau_imp [fi, leg, :nj] = d['tau_imp']
+        wbc_tau_grf [fi, leg, :nj] = d['tau_grf']
         wbc_tau_cmd [fi, leg, :nj] = tau_cmd_leg
         wbc_lam_calc[fi, leg]      = lam_calc_leg
+
+    # ── Pass 4: Floating-base body 6-DoF 적분 ──────────────
+    if USE_BODY_DYNAMICS:
+        integrate_body_state(body_state, wbic_lam_used[fi], foot_world_all,
+                             TOTAL_MASS, BODY_INERTIA, DT)
+    # 항상 히스토리 저장 (USE_BODY_DYNAMICS=False면 정상 보행 ref)
+    body_pos_hist[fi]   = body_state['pos']
+    body_R_hist[fi]     = body_state['R']
+    body_v_hist[fi]     = body_state['v']
+    body_omega_hist[fi] = body_state['omega']
+    body_alin_hist[fi]  = body_state.get('a_lin', np.zeros(3))
+    body_aang_hist[fi]  = body_state.get('a_ang', np.zeros(3))
+    # Reference (kinematic V·t)
+    body_pos_ref_hist[fi] = np.array([V * t_cur, 0.0, 0.0])
+    body_v_ref_hist[fi]   = np.array([V, 0.0, 0.0])
 
 wbc_dur = time.perf_counter() - wbc_t0
 mode_str = f"MPC(N={N_MPC},dt={DT_MPC*1e3:.0f}ms)" if USE_MPC else "QP GRF"
@@ -1479,6 +1838,29 @@ if USE_WBIC:
         print(f"  [INFO] WBIC 보정량 0 — 모든 제약이 비활성. WBIC OFF와 동일 결과.")
     if n_fail > 0:
         print(f"  [WARNING] WBIC solver {n_fail}회 실패. 제약 충돌 가능성.")
+
+# v11: WBIC FB 진단
+if USE_WBIC_FB:
+    fb_res_max  = float(np.max(wbic_fb_residual_hist))
+    fb_res_mean = float(np.mean(wbic_fb_residual_hist))
+    fb_dvfb_max = float(np.max(np.abs(wbic_fb_dvfb_hist)))
+    print(f"  WBIC FB: residual_fb max={fb_res_max:.2e} mean={fb_res_mean:.2e}  "
+          f"|Δv̇_fb|max={fb_dvfb_max:.4f}  fail={wbic_fb_fail_count}/{N_FRAMES}")
+
+# v11: Floating-base body 동역학 진단
+if USE_BODY_DYNAMICS:
+    body_pos_dev   = body_pos_hist - body_pos_ref_hist
+    body_v_dev     = body_v_hist   - body_v_ref_hist
+    pos_dev_norm   = float(np.max(np.linalg.norm(body_pos_dev, axis=1)))
+    v_dev_norm     = float(np.max(np.linalg.norm(body_v_dev, axis=1)))
+    pitch_max      = float(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[:, 2, 0], -1, 1)))))
+    roll_max       = float(np.max(np.abs(np.arctan2(body_R_hist[:, 2, 1], body_R_hist[:, 2, 2]))))
+    omega_max      = float(np.max(np.abs(body_omega_hist)))
+    z_dev_max      = float(np.max(np.abs(body_pos_hist[:, 2])))   # CoM 수직 진동
+    print(f"  Body dyn: |pos_dev|max={pos_dev_norm*1e3:.2f}mm  |v_dev|max={v_dev_norm*1e3:.2f}mm/s  "
+          f"|z|max={z_dev_max*1e3:.2f}mm")
+    print(f"  Body dyn: pitch_max={math.degrees(pitch_max):.3f}° roll_max={math.degrees(roll_max):.3f}° "
+          f"|ω|max={omega_max:.4f}rad/s")
 
 _wbc_tau_cmd_no_grf = wbc_tau_cmd - wbc_tau_grf   # GRF feedforward 제외 (실 액추에이터 부담)
 for leg in [0, 3]:
