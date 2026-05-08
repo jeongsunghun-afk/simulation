@@ -28,7 +28,7 @@ V_TARGET   = 1.0
 T_PERIOD   = 0.5
 DT         = 0.02
 N_PER_PHASE = int((T_PERIOD/2) / DT)   # 12
-N_CYCLES   = 2
+N_CYCLES   = 2   # 2 cycles (안정), 4+ 는 receding horizon 필요
 STEP_HEIGHT = 0.08
 STEP_LENGTH = 0.25
 
@@ -165,13 +165,22 @@ print(f'ShootingProblem: {len(actions)} actions + 1 terminal')
 
 # ── Solve ──────────────────────────────────────
 solver = crocoddyl.SolverFDDP(problem)
-xs_init = [x0] * (N_TOTAL + 1)
+# Warm-start: q0를 모든 horizon에 깔되, base x를 V·k·DT만큼 progress
+# (자유낙하 시작점 회피)
+xs_init = []
+for fi in range(N_TOTAL + 1):
+    xi = x0.copy()
+    xi[0] = q0[0] + V_TARGET * fi * DT   # base x progress
+    xs_init.append(xi)
+# u 초기값: gravity compensation 근사 (각 stance 발에 ~Mg/2 vertical force)
+# 단순화 위해 모든 joint에 zero, FDDP가 알아서 찾도록
 us_init = [np.zeros(actuation.nu)] * N_TOTAL
 
 t0 = time.time()
-done = solver.solve(xs_init, us_init, maxiter=300, is_feasible=False, init_reg=1.0)
+done = solver.solve(xs_init, us_init, maxiter=500, is_feasible=False, init_reg=1.0)
 elapsed = time.time() - t0
-print(f'\nFDDP: done={done}, iters={solver.iter}, time={elapsed*1e3:.1f}ms')
+print(f'\nFDDP: done={done}, iters={solver.iter}, time={elapsed*1e3:.1f}ms, '
+      f'final_cost={solver.cost:.4e}')
 
 xs_arr = np.array(solver.xs)   # (N+1, 53)
 us_arr = np.array(solver.us)   # (N, 20)
@@ -332,7 +341,7 @@ ax_x.legend(fontsize=8, ncol=4, facecolor='#1a1a2e', labelcolor='white', edgecol
 ani = FuncAnimation(fig, update, frames=N_FRAMES, interval=50, blit=False, repeat=True)
 
 # Save GIF (Pillow writer, ffmpeg 불필요)
-gif_path = '/tmp/crocoddyl_trot_2cycle.gif'
+gif_path = f'/tmp/crocoddyl_trot_{N_CYCLES}cycle.gif'
 try:
     ani.save(gif_path, fps=20, writer='pillow')
     print(f'animation saved → {gif_path}')
@@ -365,7 +374,7 @@ for ax_i, fi in enumerate(key_frames):
               'X', color='yellow', ms=8)
     ax_k.set_title(f't={fi*DT:.2f}s  roll={rolls[fi]:+.1f}°', color='white', fontsize=9)
 
-png_path = '/tmp/crocoddyl_trot_2cycle.png'
+png_path = f'/tmp/crocoddyl_trot_{N_CYCLES}cycle.png'
 fig2.tight_layout()
 fig2.savefig(png_path, facecolor='#1a1a2e', dpi=110)
 print(f'키 프레임 PNG saved → {png_path}')
