@@ -777,6 +777,116 @@ def integrate_body_state(body_state, lam_used_all, foot_world_all,
     return body_state
 
 
+def wbic_qp_full_pin(M_full, h_full, J_full,
+                      ddq_des_legs, tau_ff_legs, lam_des_all,
+                      contact_mask, nj_per_leg,
+                      v_dot_des_fb,
+                      w_ddq, w_tau, w_lam, w_fb, lamz_min, mu):
+    """
+    v11 Phase 7 (FULL M version) — pinocchio가 제공한 26×26 M, 26 h, 12×26 J 사용.
+
+    변수: x = [Δv̇_fb (6); Δq̈_legs (Σ nj); Δτ_legs (Σ nj); Δλ (12)]
+
+    등식 (26개): M_full·Δq̈_full − [0(6); Δτ_legs] − J_full^T · Δλ = r_full
+        Δq̈_full = [Δv̇_fb; Δq̈_legs]   (26-dim)
+        r_full   = τ_ff_full + J_full^T·λ_des − M_full·ddq_des_full − h_full
+        τ_ff_full = [0(6); τ_ff_legs] (base는 actuator 없음)
+        ddq_des_full = [v_dot_des_fb; ddq_des_legs]
+
+    이 형태는 floating base + leg coupling을 행렬에 자동 반영.
+    block-diagonal 근사 wbic_qp_full 보다 정확.
+
+    Note: pinocchio LOCAL convention (FB v는 body frame). 호출자가 body 상태를
+          적절히 변환해서 넘기되, R=I 근사면 world와 동일.
+    """
+    n_legs = 4
+    nj_total = sum(nj_per_leg[:n_legs])
+    n_fb  = 6
+    n_v   = n_fb + nj_total + nj_total + 12
+    n_eq  = n_fb + nj_total   # 26 = base 6 + legs 20
+
+    sl_fb  = slice(0, n_fb)
+    sl_ddq = slice(n_fb, n_fb + nj_total)
+    sl_tau = slice(n_fb + nj_total, n_fb + 2*nj_total)
+    sl_lam = slice(n_fb + 2*nj_total, n_v)
+    leg_off = [sum(nj_per_leg[:i]) for i in range(n_legs)]
+
+    # 비용
+    P = np.zeros((n_v, n_v), dtype=float)
+    P[sl_fb,  sl_fb]  = w_fb  * np.eye(n_fb)
+    P[sl_ddq, sl_ddq] = w_ddq * np.eye(nj_total)
+    P[sl_tau, sl_tau] = w_tau * np.eye(nj_total)
+    P[sl_lam, sl_lam] = w_lam * np.eye(12)
+    qv = np.zeros(n_v, dtype=float)
+
+    # 등식: M_full·Δq̈_full − [0(6); Δτ_legs] − J^T · Δλ = r_full
+    # 변수 layout: [Δv̇_fb(6) | Δq̈_legs(20) | Δτ_legs(20) | Δλ(12)]
+    # M_full @ Δq̈_full = M_full[:, 0:6] @ Δv̇_fb + M_full[:, 6:26] @ Δq̈_legs
+    A_eq = np.zeros((n_eq, n_v), dtype=float)
+    A_eq[:, sl_fb]  = M_full[:, 0:6]
+    A_eq[:, sl_ddq] = M_full[:, 6:26]
+    # τ 부분: Δτ_full = [0(6); Δτ_legs] → -A_eq[:, sl_tau] = [0(6); -I(20)]
+    A_eq[6:26, sl_tau] = -np.eye(nj_total)
+    # J_full^T · Δλ
+    A_eq[:, sl_lam] = -J_full.T
+
+    # ddq_des_full, τ_ff_full
+    ddq_des_full = np.concatenate([v_dot_des_fb, *ddq_des_legs])
+    tau_ff_full  = np.concatenate([np.zeros(n_fb), *tau_ff_legs])
+    lam_des_flat = lam_des_all.reshape(-1)
+    # residual r_full = τ_ff + J^T·λ_des − M·ddq_des − h
+    r_full = tau_ff_full + J_full.T @ lam_des_flat - M_full @ ddq_des_full - h_full
+    b_eq = r_full
+
+    # bounds
+    lb = np.full(n_v, -1e8)
+    ub = np.full(n_v,  1e8)
+    for i in range(n_legs):
+        nj = nj_per_leg[i]
+        tau_lim = JOINT_TORQUE_LIMIT[:nj]
+        s_off = sl_tau.start + leg_off[i]
+        lb[s_off:s_off+nj] = -tau_lim - tau_ff_legs[i]
+        ub[s_off:s_off+nj] =  tau_lim - tau_ff_legs[i]
+
+    # 부등식: 마찰 추 (stance) + bounds로 swing Δλ=−λ_des 고정
+    G_list = []; h_list = []
+    for i in range(n_legs):
+        l_off = sl_lam.start + 3*i
+        if contact_mask[i]:
+            lb[l_off + 2] = max(lb[l_off + 2], lamz_min - lam_des_all[i, 2])
+            for sgn_x, sgn_y in [(+1, 0), (-1, 0), (0, +1), (0, -1)]:
+                row = np.zeros(n_v)
+                row[l_off + 0] = sgn_x
+                row[l_off + 1] = sgn_y
+                row[l_off + 2] = -mu
+                rhs = mu * lam_des_all[i, 2] - sgn_x * lam_des_all[i, 0] - sgn_y * lam_des_all[i, 1]
+                G_list.append(row); h_list.append(rhs)
+        else:
+            for k in range(3):
+                lb[l_off + k] = -lam_des_all[i, k]
+                ub[l_off + k] = -lam_des_all[i, k]
+
+    G_ineq = np.vstack(G_list) if G_list else None
+    h_ineq = np.array(h_list) if h_list else None
+
+    try:
+        sol = qpsolvers.solve_qp(P, qv, G_ineq, h_ineq, A_eq, b_eq, lb, ub, solver='quadprog')
+    except Exception:
+        sol = None
+
+    if sol is None:
+        return None
+    return {
+        'd_v_fb': sol[sl_fb],
+        'd_ddq_legs': [sol[sl_ddq.start + leg_off[i] : sl_ddq.start + leg_off[i] + nj_per_leg[i]]
+                       for i in range(n_legs)],
+        'd_tau_legs': [sol[sl_tau.start + leg_off[i] : sl_tau.start + leg_off[i] + nj_per_leg[i]]
+                       for i in range(n_legs)],
+        'd_lam_legs': [sol[sl_lam.start + 3*i : sl_lam.start + 3*i + 3] for i in range(n_legs)],
+        'residual_full': float(np.linalg.norm(r_full)),
+    }
+
+
 def wbic_qp_full(M_legs, h_legs, ddq_des_legs, tau_ff_legs, lam_des_all,
                  J_legs, contact_mask, nj_per_leg, foot_world_all, body_pos,
                  v_dot_des_fb,
@@ -1379,6 +1489,10 @@ USE_BODY_DYNAMICS = True  # True: GRF 기반 body 6-DoF 적분 (v11, 진단 목�
 # True : pin_helpers.py의 rnea/compute_mh_leg/compute_jacobian_sim 사용 (검증된 정확)
 # False: v11 native 함수 사용 (이전 동작)
 USE_PINOCCHIO = False
+# 실험적: USE_PINOCCHIO + USE_WBIC_FB일 때 Full M(q) (26×26 floating base 결합) 사용
+# 현재 90% solver fail (per-leg τ_ff와 full M 모델 inconsistency).
+# False면 pinocchio per-leg M(5×5) 사용 (block-diagonal, 안정).
+USE_PINOCCHIO_FULL_M = False
 # v11 토글 조합:
 #   (CL=False, FB=False) ← 기본. v10 호환 동작 + body state 진단 추적
 #                          body는 발산 가능 (open-loop). 시각화는 VIZ='static' 권장
@@ -1908,43 +2022,121 @@ for fi in range(N_FRAMES):
     # ── Pass 2: WBIC (FB single QP OR per-leg) ──────────────
     used_fb = False
     if USE_WBIC_FB:
-        # body state로부터 ω, R 가져옴 (world inertia)
-        R_world = body_state['R']
-        I_world = R_world @ BODY_INERTIA @ R_world.T
-        # v̇_des: MPC가 가정한 정상 보행 → linear=0, angular=0 (정상상태에서)
         v_dot_des_fb = np.zeros(6)
-        fb_out = wbic_qp_full(
-            M_legs=[leg_data[i]['M_leg'] for i in range(4)],
-            h_legs=[leg_data[i]['h_leg'] for i in range(4)],
-            ddq_des_legs=[leg_data[i]['ddq_t'] for i in range(4)],
-            tau_ff_legs=[leg_data[i]['tau_ff'] for i in range(4)],
-            lam_des_all=lam_des_all,
-            J_legs=[leg_data[i]['J'] for i in range(4)],
-            contact_mask=contact_mask, nj_per_leg=N_JOINTS_PER_LEG,
-            foot_world_all=foot_world_all, body_pos=body_state['pos'],
-            v_dot_des_fb=v_dot_des_fb,
-            M_total=TOTAL_MASS, I_body=I_world, omega_world=body_state['omega'],
-            w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM, w_fb=WBIC_W_FB,
-            lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
-        )
-        if fb_out is not None:
-            used_fb = True
-            wbic_fb_residual_hist[fi] = fb_out['residual_fb']
-            wbic_fb_status_hist[fi]   = True
-            wbic_fb_dvfb_hist[fi]     = fb_out['d_v_fb']
-            for leg in range(4):
-                nj = leg_data[leg]['nj']
-                d_tau = fb_out['d_tau_legs'][leg]
-                d_lam = fb_out['d_lam_legs'][leg]
-                leg_data[leg]['tau_ff']  = leg_data[leg]['tau_ff'] + d_tau
-                leg_data[leg]['lam_used'] = leg_data[leg]['lam_des'] + d_lam
-                wbic_dtau_hist[fi, leg, :nj] = d_tau
-                wbic_dlam_hist[fi, leg]      = d_lam
-                wbic_residual_hist[fi, leg]  = fb_out['residual_legs'][leg]
-                wbic_status_hist[fi, leg]    = True
+
+        if USE_PINOCCHIO and USE_PINOCCHIO_FULL_M and _PIN_AVAILABLE:
+            # FULL M(q) WBIC FB — pinocchio CRBA + Jacobian (floating base coupling 정확)
+            # ⚠️ 실험적: 현재 90% solver fail (per-leg τ_ff와 full M 모델 inconsistency).
+            # τ_ff와 ddq_des를 full pinocchio 모델로 일관되게 계산하지 않으면 발산.
+            leg_q_dict  = {LEG_NAMES[i]: list(joint_hist[fi, i, :N_JOINTS_PER_LEG[i]])
+                           for i in range(4)}
+            leg_dq_dict = {LEG_NAMES[i]: list(joint_vel_hist[fi, i, :N_JOINTS_PER_LEG[i]])
+                           for i in range(4)}
+            M_full_pin, h_full_pin, q_full_pin, _ = _pin_helpers.compute_full_M_h(
+                leg_q_dict, leg_dq_dict)
+            # Pinocchio는 다리를 알파벳순 (FL/FR/HL/HR) 정렬 → v11 순서 (FR/FL/HR/HL)로 permute
+            # perm[i] = pinocchio v-idx that 매핑되는 v11 v-idx i
+            _pin_v_idx = _pin_helpers._LEG_V_IDX   # {FR, FL, HR, HL: list of 5 pin v-idx}
+            perm = list(range(6))   # base (0..5) 그대로
+            for v11_leg_idx in range(4):
+                leg_name = LEG_NAMES[v11_leg_idx]   # FR, FL, HR, HL
+                perm.extend(_pin_v_idx[leg_name])
+            perm = np.array(perm)
+            # M, h를 v11 순서로 재배열
+            M_full = M_full_pin[np.ix_(perm, perm)]
+            h_full = h_full_pin[perm]
+            # 12×26 contact Jacobian (4 feet × 3 linear), pin 결과를 v11 순서 col로
+            import pinocchio as _pin
+            _pin.computeJointJacobians(_pin_helpers._MODEL, _pin_helpers._DATA, q_full_pin)
+            _pin.updateFramePlacements(_pin_helpers._MODEL, _pin_helpers._DATA)
+            J_full = np.zeros((12, _pin_helpers._MODEL.nv))
+            for fi_idx, leg in enumerate(LEG_NAMES):
+                fid = _pin_helpers._LEG_FOOT_FID[leg]
+                J6 = _pin.getFrameJacobian(_pin_helpers._MODEL, _pin_helpers._DATA, fid,
+                                            _pin.LOCAL_WORLD_ALIGNED)
+                J_full[fi_idx*3:(fi_idx+1)*3, :] = J6[:3, :]
+            # J columns도 v11 순서로 permute
+            J_full = J_full[:, perm]
+
+            # ddq_des=0 (quasi-static target) — numerical noise 회피.
+            # τ_ff도 ddq=0 가정으로 다시 계산 (pinocchio gravity + Coriolis만).
+            # 이렇게 하면 model consistency 확보.
+            v_full_pin = np.zeros(_pin_helpers._MODEL.nv)
+            for v11_leg_idx in range(4):
+                leg_name = LEG_NAMES[v11_leg_idx]
+                for j, dqj in enumerate(joint_vel_hist[fi, v11_leg_idx, :N_JOINTS_PER_LEG[v11_leg_idx]]):
+                    v_full_pin[_pin_helpers._LEG_V_IDX[leg_name][j]] = dqj
+            import pinocchio as _pin
+            # tau_full_q = pin.rnea(q, v, 0) = M·0 + C·v + g = h(q,v)
+            tau_full_q_pin = _pin.rnea(_pin_helpers._MODEL, _pin_helpers._DATA,
+                                        q_full_pin, v_full_pin, np.zeros(_pin_helpers._MODEL.nv))
+            tau_full_q = tau_full_q_pin[perm]   # v11 순서로 재배열
+            # ⇒ tau_ff_legs = tau_full_q[6:] in v11 leg order (5 per leg)
+            tau_ff_legs_pin = []
+            for v11_leg_idx in range(4):
+                start = 6 + v11_leg_idx * 5
+                tau_ff_legs_pin.append(tau_full_q[start:start+5])
+
+            fb_out = wbic_qp_full_pin(
+                M_full=M_full, h_full=h_full, J_full=J_full,
+                ddq_des_legs=[np.zeros(N_JOINTS_PER_LEG[i]) for i in range(4)],
+                tau_ff_legs=tau_ff_legs_pin,
+                lam_des_all=lam_des_all,
+                contact_mask=contact_mask, nj_per_leg=N_JOINTS_PER_LEG,
+                v_dot_des_fb=v_dot_des_fb,
+                w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM, w_fb=WBIC_W_FB,
+                lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+            )
+            if fb_out is not None:
+                used_fb = True
+                wbic_fb_residual_hist[fi] = fb_out['residual_full']
+                wbic_fb_status_hist[fi]   = True
+                wbic_fb_dvfb_hist[fi]     = fb_out['d_v_fb']
+                for leg in range(4):
+                    nj = leg_data[leg]['nj']
+                    d_tau = fb_out['d_tau_legs'][leg]
+                    d_lam = fb_out['d_lam_legs'][leg]
+                    leg_data[leg]['tau_ff']  = leg_data[leg]['tau_ff'] + d_tau
+                    leg_data[leg]['lam_used'] = leg_data[leg]['lam_des'] + d_lam
+                    wbic_dtau_hist[fi, leg, :nj] = d_tau
+                    wbic_dlam_hist[fi, leg]      = d_lam
+                    wbic_status_hist[fi, leg]    = True
         else:
-            wbic_fb_fail_count += 1
-            # fallback: per-leg WBIC
+            # 기존 block-diagonal WBIC FB (v11 native)
+            R_world = body_state['R']
+            I_world = R_world @ BODY_INERTIA @ R_world.T
+            fb_out = wbic_qp_full(
+                M_legs=[leg_data[i]['M_leg'] for i in range(4)],
+                h_legs=[leg_data[i]['h_leg'] for i in range(4)],
+                ddq_des_legs=[leg_data[i]['ddq_t'] for i in range(4)],
+                tau_ff_legs=[leg_data[i]['tau_ff'] for i in range(4)],
+                lam_des_all=lam_des_all,
+                J_legs=[leg_data[i]['J'] for i in range(4)],
+                contact_mask=contact_mask, nj_per_leg=N_JOINTS_PER_LEG,
+                foot_world_all=foot_world_all, body_pos=body_state['pos'],
+                v_dot_des_fb=v_dot_des_fb,
+                M_total=TOTAL_MASS, I_body=I_world, omega_world=body_state['omega'],
+                w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM, w_fb=WBIC_W_FB,
+                lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+            )
+            if fb_out is not None:
+                used_fb = True
+                wbic_fb_residual_hist[fi] = fb_out['residual_fb']
+                wbic_fb_status_hist[fi]   = True
+                wbic_fb_dvfb_hist[fi]     = fb_out['d_v_fb']
+                for leg in range(4):
+                    nj = leg_data[leg]['nj']
+                    d_tau = fb_out['d_tau_legs'][leg]
+                    d_lam = fb_out['d_lam_legs'][leg]
+                    leg_data[leg]['tau_ff']  = leg_data[leg]['tau_ff'] + d_tau
+                    leg_data[leg]['lam_used'] = leg_data[leg]['lam_des'] + d_lam
+                    wbic_dtau_hist[fi, leg, :nj] = d_tau
+                    wbic_dlam_hist[fi, leg]      = d_lam
+                    wbic_residual_hist[fi, leg]  = fb_out['residual_legs'][leg]
+                    wbic_status_hist[fi, leg]    = True
+
+        if not used_fb:
+            wbic_fb_fail_count += 1   # FB 시도 모두 실패 → fallback per-leg
 
     if (not used_fb) and USE_WBIC:
         for leg in range(4):
