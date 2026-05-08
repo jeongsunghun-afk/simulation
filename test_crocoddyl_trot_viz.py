@@ -100,21 +100,39 @@ def cycloid_swing(p_start, p_end, sw_t, height=STEP_HEIGHT):
 N_TOTAL = N_PER_PHASE * 2 * N_CYCLES   # 48 steps
 print(f'N_TOTAL = {N_TOTAL} steps × DT={DT}s = {N_TOTAL*DT}s = {N_CYCLES} cycles')
 
+# 각 phase 시작 시점에 swing 이벤트의 p_start/p_end를 한 번만 계산
+# 이벤트 진행 동안 (k = phase_start_k .. phase_start_k+N_PER_PHASE-1) 두 점은 고정.
+# p_start/p_end (world frame) for each swing event:
+#   p_start = home_world + V·t_phase_start - STEP/2
+#   p_end   = home_world + V·t_phase_end   + STEP/2
+#   (t_phase_end = t_phase_start + T_SW)
+T_SW_PHASE = N_PER_PHASE * DT   # = T_PERIOD/2 = 0.25s
+STEP = STEP_LENGTH
+
 actions = []
 for k in range(N_TOTAL):
-    in_phase_A = (k % (N_PER_PHASE * 2)) < N_PER_PHASE
+    cycle_idx = k // (N_PER_PHASE * 2)
+    in_cycle_idx = k % (N_PER_PHASE * 2)
+    in_phase_A = in_cycle_idx < N_PER_PHASE
     if in_phase_A:
         stance, swing = ['FL', 'HR'], ['FR', 'HL']
-        sw_t = ((k % N_PER_PHASE) + 0.5) / N_PER_PHASE
+        k_in_phase = in_cycle_idx
+        phase_start_k = cycle_idx * N_PER_PHASE * 2
     else:
         stance, swing = ['FR', 'HL'], ['FL', 'HR']
-        sw_t = (((k % (N_PER_PHASE * 2)) - N_PER_PHASE) + 0.5) / N_PER_PHASE
+        k_in_phase = in_cycle_idx - N_PER_PHASE
+        phase_start_k = cycle_idx * N_PER_PHASE * 2 + N_PER_PHASE
 
-    body_advance = V_TARGET * (k * DT)
+    sw_t = (k_in_phase + 0.5) / N_PER_PHASE
+    t_phase_start = phase_start_k * DT
+    t_phase_end   = t_phase_start + T_SW_PHASE
+
     swing_targets = {}
     for leg in swing:
-        p_start = foot_home[leg].copy(); p_start[0] += body_advance - STEP_LENGTH/2
-        p_end   = foot_home[leg].copy(); p_end[0]   += body_advance + STEP_LENGTH/2
+        p_start = foot_home[leg].copy()
+        p_start[0] += V_TARGET * t_phase_start - STEP/2
+        p_end   = foot_home[leg].copy()
+        p_end[0]   += V_TARGET * t_phase_end   + STEP/2
         swing_targets[leg] = cycloid_swing(p_start, p_end, sw_t)
 
     actions.append(build_action(stance, swing, swing_targets, DT))
@@ -200,25 +218,25 @@ for fi in range(N_FRAMES):
         foot_id = model.getFrameId(f'leg_{leg}_foot')
         foot_hist[fi, leg_idx] = data.oMf[foot_id].translation
 
-# Figure 설정
-fig = plt.figure(figsize=(14, 10))
+# Figure: 3D 애니메이션(좌) + 발 높이 시계열(우)
+fig = plt.figure(figsize=(18, 9))
 fig.patch.set_facecolor('#1a1a2e')
-ax = fig.add_subplot(111, projection='3d')
+ax = fig.add_subplot(121, projection='3d')
 ax.set_facecolor('#16213e')
 ax.tick_params(colors='gray')
 
-# axis ranges
-x_range = (xs_arr[:, 0].min() - 0.4, xs_arr[:, 0].max() + 0.4)
-ax.set_xlim(x_range)
+# Body-following view: 카메라가 body 따라가도록 — body local frame 기준
+# axis ranges: body 주변 ±0.6m 만 보이도록 (좁게)
+ax.set_xlim(-0.6, 0.6)
 ax.set_ylim(-0.4, 0.4)
 ax.set_zlim(-0.6, 0.4)
-ax.set_xlabel('X (m)', color='white')
+ax.set_xlabel('X rel body (m)', color='white')
 ax.set_ylabel('Y (m)', color='white')
 ax.set_zlabel('Z (m)', color='white')
 ax.view_init(elev=20, azim=-55)
 
-# Ground plane
-xx, yy = np.meshgrid([x_range[0], x_range[1]], [-0.4, 0.4])
+# Ground plane (body 따라가는 view에서도 ground는 보이도록)
+xx, yy = np.meshgrid([-0.6, 0.6], [-0.4, 0.4])
 ax.plot_surface(xx, yy, np.zeros_like(xx), alpha=0.15, color='#888888')
 
 LEG_COLORS = ['#00d4ff', '#ff6b35', '#00ff99', '#c264ff']
@@ -241,24 +259,27 @@ time_text = ax.text2D(0.02, 0.97, '', transform=ax.transAxes, color='white', fon
 
 
 def update(fi):
+    # body x를 빼서 body-following 시점 (body가 화면 중앙에 머무름)
+    body_x = xs_arr[fi, 0]
     # Chassis: 4 hips
-    bases = leg_link_hist[fi, :, 0, :]   # (4, 3)
+    bases = leg_link_hist[fi, :, 0, :].copy()   # (4, 3)
+    bases[:, 0] -= body_x
     chassis = np.array([bases[0], bases[2], bases[3], bases[1], bases[0]])
     chassis_line.set_data(chassis[:,0], chassis[:,1])
     chassis_line.set_3d_properties(chassis[:,2])
-    # Body CoM
-    com = xs_arr[fi, :3]
+    # Body CoM (relative to body x = 0)
+    com = xs_arr[fi, :3].copy(); com[0] = 0.0
     com_marker.set_data([com[0]], [com[1]])
     com_marker.set_3d_properties([com[2]])
     # Leg links
     for leg_idx in range(4):
         for j in range(5):
-            A = leg_link_hist[fi, leg_idx, j]
-            B = leg_link_hist[fi, leg_idx, j+1]
+            A = leg_link_hist[fi, leg_idx, j].copy(); A[0] -= body_x
+            B = leg_link_hist[fi, leg_idx, j+1].copy(); B[0] -= body_x
             leg_lines[leg_idx][j].set_data([A[0], B[0]], [A[1], B[1]])
             leg_lines[leg_idx][j].set_3d_properties([A[2], B[2]])
-        # Foot trace
-        fp = foot_hist[fi, leg_idx]
+        # Foot trace (body-relative)
+        fp = foot_hist[fi, leg_idx].copy(); fp[0] -= body_x
         trace_buf[leg_idx][0].append(fp[0])
         trace_buf[leg_idx][1].append(fp[1])
         trace_buf[leg_idx][2].append(fp[2])
@@ -266,6 +287,7 @@ def update(fi):
             trace_buf[leg_idx][0][-TRACE_LEN:], trace_buf[leg_idx][1][-TRACE_LEN:])
         foot_traces[leg_idx].set_3d_properties(trace_buf[leg_idx][2][-TRACE_LEN:])
     time_text.set_text(f't = {fi*DT:.3f}s  ({fi}/{N_FRAMES-1})\n'
+                        f'body x = {body_x:+.3f}m (world)\n'
                         f'roll={rolls[fi]:+.2f}° pitch={pitches[fi]:+.2f}°\n'
                         f'vx={body_vx[fi]:.3f} m/s')
     return [chassis_line, com_marker, time_text] + sum(leg_lines, []) + foot_traces
@@ -274,6 +296,33 @@ def update(fi):
 ax.set_title(f'crocoddyl NMPC: trot {N_CYCLES} cycles ({N_TOTAL*DT:.1f}s) — '
               f'roll<{rolls.max():.1f}° pitch<{pitches.max():.1f}°',
               color='white', fontsize=11)
+
+# 발 높이 + x 위치 시계열 (오른쪽 plot)
+ax_z = fig.add_subplot(222)
+ax_z.set_facecolor('#16213e')
+ax_z.tick_params(colors='gray')
+ax_z.set_title('Foot Z (world) — swing peaks visible', color='white', fontsize=10)
+ax_z.set_ylabel('Z (m)', color='white')
+ax_z.grid(alpha=0.3, color='gray')
+t_axis = np.arange(N_FRAMES) * DT
+for leg_idx, c in enumerate(LEG_COLORS):
+    ax_z.plot(t_axis, foot_hist[:, leg_idx, 2], '-', color=c,
+              label=LEG_NAMES[leg_idx], lw=1.5)
+ax_z.axhline(0, color='white', ls='--', lw=0.5, alpha=0.5)
+ax_z.legend(fontsize=8, ncol=4, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
+
+ax_x = fig.add_subplot(224)
+ax_x.set_facecolor('#16213e')
+ax_x.tick_params(colors='gray')
+ax_x.set_title('Foot X (world) — stance flat / swing forward', color='white', fontsize=10)
+ax_x.set_xlabel('t (s)', color='white')
+ax_x.set_ylabel('X (m)', color='white')
+ax_x.grid(alpha=0.3, color='gray')
+for leg_idx, c in enumerate(LEG_COLORS):
+    ax_x.plot(t_axis, foot_hist[:, leg_idx, 0], '-', color=c,
+              label=LEG_NAMES[leg_idx], lw=1.5)
+ax_x.legend(fontsize=8, ncol=4, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
+
 ani = FuncAnimation(fig, update, frames=N_FRAMES, interval=50, blit=False, repeat=True)
 
 # Save GIF (Pillow writer, ffmpeg 불필요)
