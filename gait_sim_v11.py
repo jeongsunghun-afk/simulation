@@ -891,7 +891,8 @@ def wbic_qp_full(M_legs, h_legs, ddq_des_legs, tau_ff_legs, lam_des_all,
                  J_legs, contact_mask, nj_per_leg, foot_world_all, body_pos,
                  v_dot_des_fb,
                  M_total, I_body, omega_world,
-                 w_ddq, w_tau, w_lam, w_fb, lamz_min, mu):
+                 w_ddq, w_tau, w_lam, w_fb, lamz_min, mu,
+                 stance_foot_J_v11=None):
     """
     v11 Phase 7 — WBIC 부유 베이스 통합 단일 QP.
 
@@ -999,6 +1000,21 @@ def wbic_qp_full(M_legs, h_legs, ddq_des_legs, tau_ff_legs, lam_des_all,
 
     A_eq = np.vstack([A_eq_fb] + A_eq_legs_list)
     b_eq = np.concatenate([b_eq_fb] + b_eq_legs_list)
+
+    # v11 ANYmal-style: stance foot acceleration = 0 (SOFT constraint via cost)
+    # Cost 추가: w_sf · ||J_stance · Δq̈_full||²
+    # → Hessian P에 w_sf·J^T·J 가 더해지고, friction cone과 충돌 시 자동 trade-off
+    if stance_foot_J_v11 is not None:
+        W_STANCE = 1.0   # 가중치 (1.0 = 보통, 100 = 매우 strict, 0.1 = 약함)
+        for i in range(n_legs):
+            if contact_mask[i]:
+                Ji = stance_foot_J_v11[i]   # 3×26 (FB 6 + 20 legs v11 order)
+                # Δq̈_full = [Δv̇_fb (6) | Δq̈_legs (sl_ddq, FR/FL/HR/HL)]
+                J_aug = np.zeros((3, n_v))
+                J_aug[:, :6]      = Ji[:, :6]
+                J_aug[:, sl_ddq]  = Ji[:, 6:]
+                # cost: ||J_aug · x||² → P += J_aug^T·J_aug, no linear term
+                P += W_STANCE * (J_aug.T @ J_aug)
 
     # ── bounds ────────────────────────────────────────────────
     lb = np.full(n_v, -1e8)
@@ -1493,6 +1509,11 @@ USE_PINOCCHIO = False
 # 현재 90% solver fail (per-leg τ_ff와 full M 모델 inconsistency).
 # False면 pinocchio per-leg M(5×5) 사용 (block-diagonal, 안정).
 USE_PINOCCHIO_FULL_M = False
+# v11 ANYmal-style: stance foot acceleration = 0 제약 (soft cost term)
+# 코드는 wbic_qp_full에 통합되어 있지만 효과 검증 결과 본질 해결 X.
+# 원인: body 발산은 MPC linearization 한계라서 WBIC 제약 추가로는 못 잡음.
+# 실험용 토글 (default False).
+USE_STANCE_FOOT_CONSTRAINT = False
 # v11 토글 조합:
 #   (CL=False, FB=False) ← 기본. v10 호환 동작 + body state 진단 추적
 #                          body는 발산 가능 (open-loop). 시각화는 VIZ='static' 권장
@@ -2105,6 +2126,30 @@ for fi in range(N_FRAMES):
             # 기존 block-diagonal WBIC FB (v11 native)
             R_world = body_state['R']
             I_world = R_world @ BODY_INERTIA @ R_world.T
+
+            # ANYmal-style stance foot 제약: J·Δq̈_full = 0 (pinocchio J_full 사용)
+            stance_foot_J = None
+            if USE_STANCE_FOOT_CONSTRAINT and USE_PINOCCHIO and _PIN_AVAILABLE:
+                leg_q_dict_sf = {LEG_NAMES[i]: list(joint_hist[fi, i, :N_JOINTS_PER_LEG[i]])
+                                  for i in range(4)}
+                q_full_sf = _pin_helpers._build_full_q(leg_q_dict_sf)
+                import pinocchio as _pin_sf
+                _pin_sf.computeJointJacobians(_pin_helpers._MODEL,
+                                               _pin_helpers._DATA, q_full_sf)
+                _pin_sf.updateFramePlacements(_pin_helpers._MODEL, _pin_helpers._DATA)
+                # v11 순서로 col permute
+                _perm_sf = list(range(6))
+                for v11_idx in range(4):
+                    _perm_sf.extend(_pin_helpers._LEG_V_IDX[LEG_NAMES[v11_idx]])
+                _perm_sf = np.array(_perm_sf)
+                stance_foot_J = []
+                for v11_idx in range(4):
+                    fid = _pin_helpers._LEG_FOOT_FID[LEG_NAMES[v11_idx]]
+                    J6 = _pin_sf.getFrameJacobian(_pin_helpers._MODEL,
+                                                   _pin_helpers._DATA, fid,
+                                                   _pin_sf.LOCAL_WORLD_ALIGNED)
+                    stance_foot_J.append(J6[:3, _perm_sf])  # 3×26 in v11 order
+
             fb_out = wbic_qp_full(
                 M_legs=[leg_data[i]['M_leg'] for i in range(4)],
                 h_legs=[leg_data[i]['h_leg'] for i in range(4)],
@@ -2118,6 +2163,7 @@ for fi in range(N_FRAMES):
                 M_total=TOTAL_MASS, I_body=I_world, omega_world=body_state['omega'],
                 w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM, w_fb=WBIC_W_FB,
                 lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+                stance_foot_J_v11=stance_foot_J,
             )
             if fb_out is not None:
                 used_fb = True
