@@ -68,6 +68,25 @@ def _dh_fixed_se3(alpha, a, d):
     return pin.SE3(R, t)
 
 
+# ── v11 sim frame 변환을 leg attach SE3에 흡수 ───
+# v11 _dh_to_sim의 frame 회전을 leg_base placement에 baking.
+# 이렇게 안 하면 발이 body 위에 있게 되어 gravity 방향 모순.
+# Front: sim_x=-dh_z, sim_y=dh_y, sim_z=dh_x
+#   → R_front = [[0,0,-1],[0,1,0],[1,0,0]]
+# Hind:  sim_x=dh_z, sim_y=-dh_y, sim_z=dh_x
+#   → R_hind  = [[0,0,1],[0,-1,0],[1,0,0]]
+_R_LEG_ATTACH_FRONT = np.array([
+    [0.0, 0.0, -1.0],
+    [0.0, 1.0,  0.0],
+    [1.0, 0.0,  0.0],
+])
+_R_LEG_ATTACH_HIND = np.array([
+    [0.0, 0.0,  1.0],
+    [0.0, -1.0, 0.0],
+    [1.0, 0.0,  0.0],
+])
+
+
 def _cyl_inertia_pin(mass, length, radius):
     """원통 (축 = local x) 관성 → pin.Inertia."""
     # 원통 축이 x인 경우: ixx=(1/2)mr², iyy=izz=(1/12)m(3r²+L²)
@@ -101,10 +120,11 @@ def build_model():
     # 각 다리 추가
     for leg_idx, (name, dh) in enumerate(zip(LEG_NAMES, LEG_DH)):
         hip = LEG_HIP_OFFSETS[leg_idx]
-        # leg_base frame: 부착 지점, fixed
-        # joint 1은 leg_base의 z축에 대해 rotate
-        # P_1 = leg attachment translation (no rotation, axis = parent z)
-        leg_attach = pin.SE3(np.eye(3), np.array(hip))
+        # leg attach: translation + frame rotation (DH→sim 변환을 attach에 baking)
+        # 결과: leg_base의 z축이 world의 -x축 정도가 됨 (FK가 sim frame 좌표 출력)
+        is_front = (leg_idx < 2)
+        R_attach = _R_LEG_ATTACH_FRONT if is_front else _R_LEG_ATTACH_HIND
+        leg_attach = pin.SE3(R_attach, np.array(hip))
 
         parent_jid = root_jid
         prev_dh_fixed = leg_attach  # joint i의 placement = 이전 fixed (i-1)

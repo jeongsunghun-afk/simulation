@@ -46,15 +46,22 @@ def main():
     # joint id 매핑
     print(f'joint 순서: {[model.names[i] for i in range(model.njoints)]}\n')
 
-    for leg, q_home, dh, hip in [
-        ('FR', Q_HOME_FRONT, bm.DH_FRONT, bm.LEG_HIP_OFFSETS[0]),
-        ('FL', Q_HOME_FRONT, bm.DH_FRONT, bm.LEG_HIP_OFFSETS[1]),
-        ('HR', Q_HOME_HIND,  bm.DH_HIND,  bm.LEG_HIP_OFFSETS[2]),
-        ('HL', Q_HOME_HIND,  bm.DH_HIND,  bm.LEG_HIP_OFFSETS[3]),
+    def _dh_to_sim(vec, front_leg):
+        sim = np.array([vec[2], -vec[1], vec[0]], dtype=float)
+        if front_leg:
+            sim[:2] *= -1.0
+        return sim
+
+    for leg, q_home, dh, hip, is_front in [
+        ('FR', Q_HOME_FRONT, bm.DH_FRONT, bm.LEG_HIP_OFFSETS[0], True),
+        ('FL', Q_HOME_FRONT, bm.DH_FRONT, bm.LEG_HIP_OFFSETS[1], True),
+        ('HR', Q_HOME_HIND,  bm.DH_HIND,  bm.LEG_HIP_OFFSETS[2], False),
+        ('HL', Q_HOME_HIND,  bm.DH_HIND,  bm.LEG_HIP_OFFSETS[3], False),
     ]:
-        # native FK: leg_base 기준 foot tip
+        # native FK: leg_base 기준 foot tip → v11 sim frame으로 변환
         T_native = fk_native(q_home, dh)
-        foot_native = T_native[:3, 3]
+        foot_native_dh = T_native[:3, 3]
+        foot_native = _dh_to_sim(foot_native_dh, front_leg=is_front)   # v11 sim frame
 
         # pinocchio FK
         q = pin.neutral(model)   # base = identity, 모든 다리 0
