@@ -675,6 +675,23 @@ def _exp_so3(omega_dt):
     return np.eye(3) + math.sin(angle)*K + (1.0 - math.cos(angle))*(K @ K)
 
 
+def _R_to_euler_xyz(R):
+    """Rotation matrix → (roll, pitch, yaw) [rad].
+    XYZ 고정축 회전 순서 가정 (small-angle MPC 모델과 일관).
+    pitch 특이점(±π/2) 부근에서는 atan2 fallback.
+    """
+    sy = -R[2, 0]
+    sy = max(-1.0, min(1.0, sy))
+    pitch = math.asin(sy)
+    if abs(R[2, 0]) < 0.99999:
+        roll = math.atan2(R[2, 1], R[2, 2])
+        yaw  = math.atan2(R[1, 0], R[0, 0])
+    else:
+        roll = math.atan2(-R[1, 2], R[1, 1])
+        yaw  = 0.0
+    return roll, pitch, yaw
+
+
 def integrate_body_state(body_state, lam_used_all, foot_world_all,
                          M_total, I_body, dt):
     """
@@ -990,7 +1007,7 @@ def _build_Bc(contact_mask_k, foot_pos_k):
     return DT_MPC * Bc
 
 
-def mpc_qp_plan(x0, contact_schedule, foot_positions):
+def mpc_qp_plan(x0, contact_schedule, foot_positions, x_ref_step=None):
     """
     Phase 1 — Convex MPC QP  (Di Carlo et al., IROS 2018 simplified)
 
@@ -998,6 +1015,9 @@ def mpc_qp_plan(x0, contact_schedule, foot_positions):
                       [roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
     contact_schedule: (N_MPC, 4) bool  — horizon 내 접촉 패턴
     foot_positions  : (N_MPC, 4, 3)   — horizon 내 발 위치 (world frame)
+    x_ref_step      : (13,) or None — horizon 내 모든 스텝의 목표 상태 (steady ref).
+                      None이면 hover-at-x0 (open-loop 동작, v10 호환).
+                      ≠None이면 closed-loop: MPC가 x0을 x_ref_step으로 끌어옴.
     Returns         : lam_des (4, 3)  — 첫 번째 스텝 최적 GRF
     """
     nx = 13
@@ -1015,8 +1035,11 @@ def mpc_qp_plan(x0, contact_schedule, foot_positions):
         for j in range(i+1):
             Bq[i*nx:(i+1)*nx, j*nu:(j+1)*nu] = _Ad_powers[i-j] @ Bc_list[j]
 
-    # 목표 상태: 현재 상태 유지 (hover at x0)
-    X_ref = np.tile(x0, N)   # (N*nx,)
+    # 목표 상태: x_ref_step 우선, 없으면 hover-at-x0
+    if x_ref_step is None:
+        X_ref = np.tile(x0, N)
+    else:
+        X_ref = np.tile(x_ref_step, N)
 
     # 비용 H, f  — block-diagonal Q_bar 직접 누산으로 메모리 절약
     # H = 2*(Bq^T Q_bar Bq + R_bar),  f = 2*Bq^T Q_bar (Aq x0 − X_ref)
@@ -1257,6 +1280,19 @@ USE_BODY_DYNAMICS = True  # True: GRF 기반 body 6-DoF 적분 (v11), False: V·
 USE_WBIC_FB       = False # True: 단일 QP (body acc 변수 포함, v11 신규)
                           # False: per-leg WBIC (v9~v10 기존 동작) — 기본값 안정성 유지
 WBIC_W_FB         = 0.1   # ‖Δv̇_fb‖² 가중치 (body acc 보정 최소화)
+
+# v11: MPC closed-loop (실 body state로 x0 갱신)
+USE_MPC_CLOSED_LOOP = True
+# 단순 body 궤적 (steady ref): upright + V 직진 + z=0
+# 형식: [roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
+# px/py weight=0이라 자유, pz=0 추종, vx=V 추종, 자세는 0(평탄) 추종
+BODY_REF_STEP = np.array([
+    0.0, 0.0, 0.0,   # roll, pitch, yaw (평탄 자세)
+    0.0, 0.0, 0.0,   # px, py, pz (z=0; px/py는 weight 0)
+    0.0, 0.0, 0.0,   # ω
+    0.0, 0.0, 0.0,   # v (vx는 main loop에서 V로 채움)
+    0.0,             # g (constant)
+])
 
 # Figure 1 시각화 모드 (USE_BODY_DYNAMICS=True일 때만 효과)
 #   'static'      : v10 동작 — robot 항상 원점 고정 (body state 무시)
@@ -1650,15 +1686,31 @@ for fi in range(N_FRAMES):
                 cs[k, leg] = not sched.is_swing(leg, t_k)
                 fp[k, leg] = foot_hist[fi, leg]   # 발 위치 현재값 유지 (quasi-static)
 
-        # body 상태 x0 (이상적: 항상 upright, vx=V)
-        x0_mpc = np.array([
-            0.0, 0.0, 0.0,      # roll, pitch, yaw
-            0.0, 0.0, 0.0,      # px, py, pz
-            0.0, 0.0, 0.0,      # ωx, ωy, ωz
-            V,   0.0, 0.0,      # vx, vy, vz
-            -G_ACC              # g
-        ])
-        lam_des_all = mpc_qp_plan(x0_mpc, cs, fp)
+        # body 상태 x0
+        if USE_MPC_CLOSED_LOOP and USE_BODY_DYNAMICS:
+            # 실 body state 피드백 (closed-loop)
+            roll, pitch, yaw = _R_to_euler_xyz(body_state['R'])
+            x0_mpc = np.array([
+                roll, pitch, yaw,
+                body_state['pos'][0], body_state['pos'][1], body_state['pos'][2],
+                body_state['omega'][0], body_state['omega'][1], body_state['omega'][2],
+                body_state['v'][0], body_state['v'][1], body_state['v'][2],
+                -G_ACC,
+            ])
+            # x_ref: 단순 steady 궤적 (upright + vx=V + z=0)
+            x_ref_step = BODY_REF_STEP.copy()
+            x_ref_step[9]  = V       # vx 추종
+            x_ref_step[12] = -G_ACC
+        else:
+            # open-loop (이상적 hover-at-origin, v10 동작)
+            x0_mpc = np.array([
+                0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+                V,   0.0, 0.0,
+                -G_ACC
+            ])
+            x_ref_step = None  # mpc_qp_plan이 hover-at-x0 사용
+        lam_des_all = mpc_qp_plan(x0_mpc, cs, fp, x_ref_step=x_ref_step)
         # swing foot 강제 0
         for leg in range(4):
             if swing_flag[fi, leg]:
