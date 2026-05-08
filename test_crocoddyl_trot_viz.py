@@ -64,11 +64,14 @@ foot_home = {leg: data.oMf[foot_frames[leg]].translation.copy()
 
 # ── ActionModel 빌드 helper ────────────────────
 def build_action(stance_legs, swing_legs, swing_targets, dt):
+    # 튜닝된 가중치 (tune_crocoddyl.py 결과):
+    #   contact baumgarte: kp=0, kd=20 (drift 최소화)
+    #   foot tracking: xy 100, z 10000 (z 강화로 swing peak 정확)
     contact_model = crocoddyl.ContactModelMultiple(state, actuation.nu)
     for leg in stance_legs:
         contact = crocoddyl.ContactModel3D(
             state, foot_frames[leg], np.zeros(3),
-            pin.LOCAL_WORLD_ALIGNED, actuation.nu, np.array([0.0, 50.0]))
+            pin.LOCAL_WORLD_ALIGNED, actuation.nu, np.array([0.0, 20.0]))
         contact_model.addContact(f'contact_{leg}', contact)
 
     cost_model = crocoddyl.CostModelSum(state, actuation.nu)
@@ -79,11 +82,13 @@ def build_action(stance_legs, swing_legs, swing_targets, dt):
         state, crocoddyl.ResidualModelControl(state, actuation.nu))
     cost_model.addCost('ctrlReg', ctrl_reg, 1e-3)
     for leg, tgt in swing_targets.items():
-        track = crocoddyl.CostModelResidual(
-            state,
-            crocoddyl.ResidualModelFrameTranslation(
-                state, foot_frames[leg], tgt, actuation.nu))
-        cost_model.addCost(f'foot_{leg}', track, 1e2)
+        residual = crocoddyl.ResidualModelFrameTranslation(
+            state, foot_frames[leg], tgt, actuation.nu)
+        # 개별 축 가중치 (xy=100, z=10000) for swing peak 정확 추종
+        activation = crocoddyl.ActivationModelWeightedQuad(
+            np.array([100.0, 100.0, 10000.0]))
+        cost = crocoddyl.CostModelResidual(state, activation, residual)
+        cost_model.addCost(f'foot_{leg}', cost, 1.0)
 
     diff_model = crocoddyl.DifferentialActionModelContactFwdDynamics(
         state, actuation, contact_model, cost_model, 0.0, True)
@@ -123,7 +128,8 @@ for k in range(N_TOTAL):
         k_in_phase = in_cycle_idx - N_PER_PHASE
         phase_start_k = cycle_idx * N_PER_PHASE * 2 + N_PER_PHASE
 
-    sw_t = (k_in_phase + 0.5) / N_PER_PHASE
+    # sw_t를 0~1 정확히 cover: k=0 → sw_t=0 (발 시작), k=N-1 → sw_t≈1 (발 도착)
+    sw_t = k_in_phase / max(N_PER_PHASE - 1, 1)
     t_phase_start = phase_start_k * DT
     t_phase_end   = t_phase_start + T_SW_PHASE
 
