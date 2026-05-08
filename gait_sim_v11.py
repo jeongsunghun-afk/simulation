@@ -670,8 +670,13 @@ def _skew(v):
 def _exp_so3(omega_dt):
     """Lie group exponential: skew-vec → SO(3) rotation matrix.
     Rodrigues' formula. ω·dt 입력, ‖ω·dt‖ < ε이면 I 반환.
+    NaN/inf/극대값 입력은 발산 발생 시 안전하게 I 반환 (math domain error 방지).
     """
+    if not np.all(np.isfinite(omega_dt)):
+        return np.eye(3)
     angle = float(np.linalg.norm(omega_dt))
+    if angle > 1e2:   # ω·dt > 100 rad는 비물리적 → 발산 가드
+        return np.eye(3)
     if angle < 1e-12:
         return np.eye(3)
     axis = omega_dt / angle
@@ -734,6 +739,25 @@ def integrate_body_state(body_state, lam_used_all, foot_world_all,
     # Symplectic Euler: 속도 먼저 업데이트, 위치/회전은 새 속도로 적분
     v_new     = v     + dt * a_lin
     omega_new = omega + dt * a_ang
+
+    # 발산 가드: 비물리적 영역 도달 시 clamp (open-loop에서 body 발산 빈번)
+    OMEGA_LIMIT = 50.0   # rad/s (실 robot은 거의 도달 불가)
+    V_LIMIT     = 50.0   # m/s
+    omega_norm = float(np.linalg.norm(omega_new))
+    if omega_norm > OMEGA_LIMIT:
+        omega_new = omega_new * (OMEGA_LIMIT / omega_norm)
+        body_state['_diverged'] = True
+    v_norm = float(np.linalg.norm(v_new))
+    if v_norm > V_LIMIT:
+        v_new = v_new * (V_LIMIT / v_norm)
+        body_state['_diverged'] = True
+    if not np.all(np.isfinite(omega_new)):
+        omega_new = np.zeros(3)
+        body_state['_diverged'] = True
+    if not np.all(np.isfinite(v_new)):
+        v_new = np.zeros(3)
+        body_state['_diverged'] = True
+
     pos_new   = pos   + dt * v_new
     R_new     = _exp_so3(omega_new * dt) @ R
 
@@ -1669,6 +1693,7 @@ body_state = {
     'omega': np.zeros(3),
     'a_lin': np.zeros(3),
     'a_ang': np.zeros(3),
+    '_diverged': False,                     # 발산 시 integrate_body_state가 set
 }
 
 # WBIC FB 진단
@@ -1936,6 +1961,10 @@ if USE_BODY_DYNAMICS:
           f"|z|max={z_dev_max*1e3:.2f}mm")
     print(f"  Body dyn: pitch_max={math.degrees(pitch_max):.3f}° roll_max={math.degrees(roll_max):.3f}° "
           f"|ω|max={omega_max:.4f}rad/s")
+    if body_state.get('_diverged', False):
+        print(f"  [WARNING] body 발산 감지 (|ω|>{50}rad/s 또는 |v|>{50}m/s 발생) — clamp 적용됨.")
+        print(f"            open-loop MPC + 작은 Ixx + trot 한계로 인한 정상적 발산. "
+              f"USE_MPC_CLOSED_LOOP=True + USE_WBIC_FB=True 권장.")
 
 _wbc_tau_cmd_no_grf = wbc_tau_cmd - wbc_tau_grf   # GRF feedforward 제외 (실 액추에이터 부담)
 for leg in [0, 3]:
