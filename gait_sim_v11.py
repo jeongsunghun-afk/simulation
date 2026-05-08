@@ -1276,13 +1276,17 @@ WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
 WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
 
 # ── v11 Phase 7: Floating-base 동역학 + WBIC FB 파라미터 ─────
-USE_BODY_DYNAMICS = True  # True: GRF 기반 body 6-DoF 적분 (v11), False: V·t kinematic
-USE_WBIC_FB       = False # True: 단일 QP (body acc 변수 포함, v11 신규)
-                          # False: per-leg WBIC (v9~v10 기존 동작) — 기본값 안정성 유지
-WBIC_W_FB         = 0.1   # ‖Δv̇_fb‖² 가중치 (body acc 보정 최소화)
-
-# v11: MPC closed-loop (실 body state로 x0 갱신)
-USE_MPC_CLOSED_LOOP = True
+USE_BODY_DYNAMICS = True  # True: GRF 기반 body 6-DoF 적분 (v11, 진단 목적), False: V·t kinematic
+# v11 토글 조합:
+#   (CL=False, FB=False) ← 기본. v10 호환 동작 + body state 진단 추적
+#                          body는 발산 가능 (open-loop). 시각화는 VIZ='static' 권장
+#   (CL=True,  FB=True)  — closed-loop 추적 (pitch<1°, z<6mm). 단 trot의 경우 roll은
+#                          여전히 80°+ 까지 발산 (선형 MPC 한계). VIZ='world' 가능
+#   (CL=True,  FB=False) — 위험: 선형 MPC가 큰 보정 시도→발산. 사용 권장X
+#   (CL=False, FB=True)  — body 평형 강제, MPC는 idealized
+USE_WBIC_FB         = False
+USE_MPC_CLOSED_LOOP = False
+WBIC_W_FB           = 0.1   # ‖Δv̇_fb‖² 가중치 (body acc 보정 최소화)
 # 단순 body 궤적 (steady ref): upright + V 직진 + z=0
 # 형식: [roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
 # px/py weight=0이라 자유, pz=0 추종, vx=V 추종, 자세는 0(평탄) 추종
@@ -1295,10 +1299,12 @@ BODY_REF_STEP = np.array([
 ])
 
 # Figure 1 시각화 모드 (USE_BODY_DYNAMICS=True일 때만 효과)
-#   'static'      : v10 동작 — robot 항상 원점 고정 (body state 무시)
+#   'static'      : v10 동작 — robot 항상 원점 고정 (body state 무시) ← 기본
 #   'world'       : 카메라 원점 고정, robot이 body_pos만큼 이동 + R 회전 (drift 그대로)
 #   'body_follow' : 카메라가 body_pos 따라감, R 회전만 적용 (자세 진단용)
-VIZ_BODY_MODE = 'world'
+# ※ trot+open-loop+FB=False 조합에선 body roll 179°까지 발산 → 'world' 모드에서
+#   다리가 거의 수평으로 누워보임. body_dyn 보고 싶으면 closed-loop+FB 둘 다 ON 권장.
+VIZ_BODY_MODE = 'static'
 USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 # ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지) or 속도한계완화
 
