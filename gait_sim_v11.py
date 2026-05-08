@@ -51,7 +51,7 @@ import numpy as np
 import qpsolvers
 
 # 비교 모드: HIND_VARIANT={'orig','ext'}, COMPARE_MODE=1이면 figure 생략 후 metrics 덤프
-_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'orig')
+_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'ext')
 _COMPARE_MODE = os.environ.get('COMPARE_MODE', '0') == '1'
 assert _HIND_VARIANT in ('orig', 'ext'), f"HIND_VARIANT={_HIND_VARIANT} (expected 'orig' or 'ext')"
 import matplotlib as mpl
@@ -1939,7 +1939,7 @@ ax3d.set_ylabel('Y (m)', color='white', labelpad=4)
 ax3d.set_zlabel('Z (m)', color='white', labelpad=4)
 ax3d.tick_params(colors=_gray)
 ax3d.set_title(
-    f'Gait Sim v8  [{GAIT_TYPE.upper()}]  v={V}m/s  T={T}s  D={D}  '
+    f'Gait Sim v11  [{GAIT_TYPE.upper()}]  v={V}m/s  T={T}s  D={D}  '
     f'step_h={STEP_HEIGHT}m  step_l={STEP_LENGTH:.3f}m  total_mass={TOTAL_MASS:.2f}kg',
     color='white', fontsize=9)
 ax3d.view_init(elev=20, azim=-55)
@@ -2345,7 +2345,7 @@ fig4.suptitle(
 
 plt.figure(fig.number)
 plt.suptitle(
-    f'Gait Sim v8  |  {GAIT_TYPE.upper()}  |  '
+    f'Gait Sim v11  |  {GAIT_TYPE.upper()}  |  '
     f'v={V}m/s  T={T}s  D={D}  T_sw={T_SW:.2f}s  '
     f'step_h={STEP_HEIGHT*1e3:.0f}mm  step_l={STEP_LENGTH*1e3:.0f}mm',
     color='white', fontsize=9)
