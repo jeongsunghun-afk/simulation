@@ -1007,35 +1007,77 @@ def qp_grf_distribute(contact_mask, foot_pos_world):
 
 # MPC 관련 캐시 (프레임 간 재사용)
 _I_inv = np.linalg.inv(BODY_INERTIA)
+_I_BODY = BODY_INERTIA.copy()
+
+
+def _euler_to_R(roll, pitch, yaw):
+    """XYZ Euler (intrinsic) → R = Rx(r)·Ry(p)·Rz(y)."""
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    Rx = np.array([[1, 0, 0], [0, cr, -sr], [0, sr, cr]])
+    Ry = np.array([[cp, 0, sp], [0, 1, 0], [-sp, 0, cp]])
+    Rz = np.array([[cy, -sy, 0], [sy, cy, 0], [0, 0, 1]])
+    return Rx @ Ry @ Rz
+
+
+def _euler_rate_T(roll, pitch):
+    """world ω → Euler-rate transform (XYZ extrinsic).
+    [ṙ, ṗ, ẏ] = T(r,p)·ω_world.  pitch=±π/2에서 특이점 → cos(p) clamp.
+    """
+    cr, sr = math.cos(roll), math.sin(roll)
+    cp, sp = math.cos(pitch), math.sin(pitch)
+    if abs(cp) < 1e-3:
+        cp = 1e-3 * (1.0 if cp >= 0 else -1.0)
+    tp = sp / cp
+    return np.array([
+        [1.0,    sr * tp,    cr * tp],
+        [0.0,    cr,         -sr    ],
+        [0.0,    sr / cp,    cr / cp],
+    ])
+
+
+def _build_Ac_at(roll, pitch):
+    """v11 LTV-MPC: 현재 자세에서의 연속 시간 A 행렬 (13×13).
+    Euler rate가 작은 각도 가정(I)이 아닌 T(r,p)·ω로 정확화.
+    """
+    Ac = np.zeros((13, 13), dtype=float)
+    Ac[0:3, 6:9]  = _euler_rate_T(roll, pitch)   # dΘ/dt = T·ω
+    Ac[3:6, 9:12] = np.eye(3)                    # dp/dt = v
+    Ac[9:12, 12]  = [0.0, 0.0, 1.0]              # dv/dt += g·ẑ
+    return Ac
+
+
+def _build_Bc_at(contact_mask_k, foot_pos_k, I_world_inv):
+    """v11 LTV-MPC: B 행렬에 현재 자세의 I_world_inv 반영 (13×12)."""
+    Bc = np.zeros((13, 12), dtype=float)
+    for i in range(4):
+        if contact_mask_k[i]:
+            r = foot_pos_k[i]
+            Bc[6:9,  i*3:(i+1)*3] = I_world_inv @ _skew(r)   # angular (world)
+            Bc[9:12, i*3:(i+1)*3] = np.eye(3) / TOTAL_MASS    # linear
+    return Bc
+
 
 def _build_Ac_d():
-    """시불변 Ac_d (13×13) — contact 무관"""
-    Ac = np.zeros((13, 13), dtype=float)
-    Ac[0:3, 6:9]  = np.eye(3)    # dΘ/dt = ω
-    Ac[3:6, 9:12] = np.eye(3)    # dp/dt = v
-    Ac[9:12, 12]  = [0.0, 0.0, 1.0]   # dv/dt += g·ẑ
+    """[deprecated, hover-at-x0 호환용] 시불변 Ac_d — small-angle 가정 (T=I)."""
+    Ac = _build_Ac_at(0.0, 0.0)
     return np.eye(13) + DT_MPC * Ac
 
-_Ac_d = _build_Ac_d()
 
-# Ac_d 거듭제곱 사전 계산 (0 ~ N_MPC)
+_Ac_d = _build_Ac_d()
+# Ac_d 거듭제곱 사전 계산 (0 ~ N_MPC) — closed_loop=False 경로용
 _Ad_powers = [np.eye(13, dtype=float)]
 for _k in range(N_MPC):
     _Ad_powers.append(_Ac_d @ _Ad_powers[-1])
 
 
 def _build_Bc(contact_mask_k, foot_pos_k):
-    """접촉 패턴별 Bc_d (13×12)"""
-    Bc = np.zeros((13, 12), dtype=float)
-    for i in range(4):
-        if contact_mask_k[i]:
-            r = foot_pos_k[i]
-            Bc[6:9,  i*3:(i+1)*3] = _I_inv @ _skew(r)   # angular
-            Bc[9:12, i*3:(i+1)*3] = np.eye(3) / TOTAL_MASS  # linear
-    return DT_MPC * Bc
+    """[deprecated, hover-at-x0 호환용] 시불변 I_inv 사용."""
+    return DT_MPC * _build_Bc_at(contact_mask_k, foot_pos_k, _I_inv)
 
 
-def mpc_qp_plan(x0, contact_schedule, foot_positions, x_ref_step=None):
+def mpc_qp_plan(x0, contact_schedule, foot_positions, x_ref_step=None, ltv=False):
     """
     Phase 1 — Convex MPC QP  (Di Carlo et al., IROS 2018 simplified)
 
@@ -1046,22 +1088,43 @@ def mpc_qp_plan(x0, contact_schedule, foot_positions, x_ref_step=None):
     x_ref_step      : (13,) or None — horizon 내 모든 스텝의 목표 상태 (steady ref).
                       None이면 hover-at-x0 (open-loop 동작, v10 호환).
                       ≠None이면 closed-loop: MPC가 x0을 x_ref_step으로 끌어옴.
+    ltv             : True면 v11 Linear Time-Varying — 매 호출마다 현재 자세 (x0의 r,p,y)로
+                      A_d, I_world_inv 재계산 (큰 각도 정확). 단, horizon 내 R은 고정.
+                      False면 small-angle 시불변 (캐시된 _Ad_powers 사용, 빠름).
     Returns         : lam_des (4, 3)  — 첫 번째 스텝 최적 GRF
     """
     nx = 13
     nu = 12   # 4 feet × 3
 
-    # Bc_k 리스트 (horizon별)
-    Bc_list = [_build_Bc(contact_schedule[k], foot_positions[k]) for k in range(N_MPC)]
+    # ── A_d, B_c 빌드 ─────────────────────────────────
+    if ltv:
+        # 현재 자세에서 LTV 모델 (horizon 내 R 고정 가정)
+        roll0, pitch0, yaw0 = x0[0], x0[1], x0[2]
+        R_now      = _euler_to_R(roll0, pitch0, yaw0)
+        I_world    = R_now @ _I_BODY @ R_now.T
+        I_world_inv = np.linalg.inv(I_world)
+        Ac_now     = _build_Ac_at(roll0, pitch0)
+        Ad_now     = np.eye(nx) + DT_MPC * Ac_now
+        # horizon 내 거듭제곱 (재계산)
+        Ad_powers_now = [np.eye(nx, dtype=float)]
+        for _k in range(N_MPC):
+            Ad_powers_now.append(Ad_now @ Ad_powers_now[-1])
+        Bc_list = [DT_MPC * _build_Bc_at(contact_schedule[k], foot_positions[k], I_world_inv)
+                   for k in range(N_MPC)]
+        Ad_powers_use = Ad_powers_now
+    else:
+        # 시불변 (캐시 사용) — 작은 각도 가정
+        Bc_list = [_build_Bc(contact_schedule[k], foot_positions[k]) for k in range(N_MPC)]
+        Ad_powers_use = _Ad_powers
 
     # 응축 행렬 Aq (N*nx × nx), Bq (N*nx × N*nu)
     N   = N_MPC
     Aq  = np.zeros((N*nx, nx),   dtype=float)
     Bq  = np.zeros((N*nx, N*nu), dtype=float)
     for i in range(N):
-        Aq[i*nx:(i+1)*nx, :] = _Ad_powers[i+1]
+        Aq[i*nx:(i+1)*nx, :] = Ad_powers_use[i+1]
         for j in range(i+1):
-            Bq[i*nx:(i+1)*nx, j*nu:(j+1)*nu] = _Ad_powers[i-j] @ Bc_list[j]
+            Bq[i*nx:(i+1)*nx, j*nu:(j+1)*nu] = Ad_powers_use[i-j] @ Bc_list[j]
 
     # 목표 상태: x_ref_step 우선, 없으면 hover-at-x0
     if x_ref_step is None:
@@ -1332,7 +1395,7 @@ BODY_REF_STEP = np.array([
 #   'body_follow' : 카메라가 body_pos 따라감, R 회전만 적용 (자세 진단용)
 # ※ trot+open-loop+FB=False 조합에선 body roll 179°까지 발산 → 'world' 모드에서
 #   다리가 거의 수평으로 누워보임. body_dyn 보고 싶으면 closed-loop+FB 둘 다 ON 권장.
-VIZ_BODY_MODE = 'world'
+VIZ_BODY_MODE = 'world' 
 USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 # ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지) or 속도한계완화
 
@@ -1745,7 +1808,9 @@ for fi in range(N_FRAMES):
                 -G_ACC
             ])
             x_ref_step = None  # mpc_qp_plan이 hover-at-x0 사용
-        lam_des_all = mpc_qp_plan(x0_mpc, cs, fp, x_ref_step=x_ref_step)
+        # closed-loop이면 LTV (현재 자세 기반 정확한 A,B), 아니면 small-angle 시불변
+        lam_des_all = mpc_qp_plan(x0_mpc, cs, fp, x_ref_step=x_ref_step,
+                                   ltv=USE_MPC_CLOSED_LOOP and USE_BODY_DYNAMICS)
         # swing foot 강제 0
         for leg in range(4):
             if swing_flag[fi, leg]:
