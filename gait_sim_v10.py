@@ -56,7 +56,7 @@ mpl.rcParams['axes.unicode_minus'] = False
 # ══════════════════════════════════════════════════════════════
 # 0. 파라미터
 # ══════════════════════════════════════════════════════════════
-GAIT_TYPE   = 'walk'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
+GAIT_TYPE   = 'trot'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
 DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
 N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
 
@@ -1232,6 +1232,13 @@ _front_lim_lo = np.array([b[0] for b in FRONT_Q_LIM])
 _front_lim_hi = np.array([b[1] for b in FRONT_Q_LIM])
 _hind_lim_lo  = np.array([b[0] for b in HIND_Q_LIM])
 _hind_lim_hi  = np.array([b[1] for b in HIND_Q_LIM])
+
+# Opt-IK 진단 항목 설명
+print("  [INFO] nit_avg     : SLSQP 수렴 반복 횟수 평균 (낮을수록 빠른 수렴, maxiter 도달 시 fallback)")
+print("  [INFO] fallback    : N/M = swing M프레임 중 N프레임이 SLSQP 실패 → analytical IK 강등")
+print("  [INFO] pos_err     : FK(q_opt)와 목표 발 위치의 잔차 (mm, 0이면 등식 제약 정확히 만족)")
+print("  [INFO] bound_viol  : opt IK 성공 프레임 중 관절 한계(FRONT/HIND_Q_LIM) 벗어난 프레임 수")
+print("  [INFO] home_dev_avg: opt IK 성공 프레임 평균 ‖q − q_home‖ [rad] (자세가 home에서 멀수록 큼)")
 
 for _col, _leg, _sw_mask, _fb, _q_home, _lim_lo, _lim_hi, _leg_name, _lim_name in [
     (0, 0, swing_flag[:, 0], _fb_per_leg[0], _q_home_f, _front_lim_lo, _front_lim_hi, 'FR', 'FRONT_Q_LIM'),
