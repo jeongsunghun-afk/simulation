@@ -50,6 +50,13 @@ import time
 import numpy as np
 import qpsolvers
 
+# v11 Phase 7: Pinocchio (선택적 — USE_PINOCCHIO=True일 때 사용)
+try:
+    import pin_helpers as _pin_helpers
+    _PIN_AVAILABLE = True
+except ImportError:
+    _PIN_AVAILABLE = False
+
 # 비교 모드: HIND_VARIANT={'orig','ext'}, COMPARE_MODE=1이면 figure 생략 후 metrics 덤프
 _HIND_VARIANT = os.environ.get('HIND_VARIANT', 'ext')
 _COMPARE_MODE = os.environ.get('COMPARE_MODE', '0') == '1'
@@ -1368,6 +1375,10 @@ WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
 
 # ── v11 Phase 7: Floating-base 동역학 + WBIC FB 파라미터 ─────
 USE_BODY_DYNAMICS = True  # True: GRF 기반 body 6-DoF 적분 (v11, 진단 목적), False: V·t kinematic
+# v11 Phase 7: Pinocchio dynamics 백엔드 (URDF 우회, DH→pinocchio.Model 직접 빌드)
+# True : pin_helpers.py의 rnea/compute_mh_leg/compute_jacobian_sim 사용 (검증된 정확)
+# False: v11 native 함수 사용 (이전 동작)
+USE_PINOCCHIO = False
 # v11 토글 조합:
 #   (CL=False, FB=False) ← 기본. v10 호환 동작 + body state 진단 추적
 #                          body는 발산 가능 (open-loop). 시각화는 VIZ='static' 권장
@@ -1849,20 +1860,35 @@ for fi in range(N_FRAMES):
         dq_a  = dtheta_a_hist[fi, leg, :nj]
         ddq_t = joint_acc_hist[fi, leg, :nj]
 
-        J   = compute_jacobian_sim(q_t, dh, front)
-        J_a = compute_jacobian_sim(q_a, dh, front)
+        if USE_PINOCCHIO and _PIN_AVAILABLE:
+            _leg_name_pin = LEG_NAMES[leg]
+            J   = _pin_helpers.compute_jacobian_sim_pin(list(q_t), _leg_name_pin)
+            J_a = _pin_helpers.compute_jacobian_sim_pin(list(q_a), _leg_name_pin)
+        else:
+            J   = compute_jacobian_sim(q_t, dh, front)
+            J_a = compute_jacobian_sim(q_a, dh, front)
         tau_g = compute_gravity_torque_sim(q_t, dh, lm, front)
 
         lam_des_leg = lam_des_all[leg]
 
-        tau_dyn_leg  = rnea(q_t, dq_t, ddq_t, dh, lm)
+        if USE_PINOCCHIO and _PIN_AVAILABLE:
+            tau_dyn_leg = _pin_helpers.rnea_pin_per_leg(list(q_t), list(dq_t), list(ddq_t),
+                                                         LEG_NAMES[leg])
+        else:
+            tau_dyn_leg  = rnea(q_t, dq_t, ddq_t, dh, lm)
         tau_grf_leg  = -J.T @ lam_des_leg
         tau_ff_leg   = tau_dyn_leg + tau_grf_leg
 
         # foot world position (body integration용 r_i 계산)
         foot_world_all[leg] = body_state['pos'] + body_state['R'] @ foot_hist[fi, leg]
 
-        M_leg, h_leg = compute_mh_leg(q_t, dq_t, dh, lm) if (USE_WBIC or USE_WBIC_FB) else (None, None)
+        if (USE_WBIC or USE_WBIC_FB):
+            if USE_PINOCCHIO and _PIN_AVAILABLE:
+                M_leg, h_leg = _pin_helpers.compute_mh_leg_pin(list(q_t), list(dq_t), LEG_NAMES[leg])
+            else:
+                M_leg, h_leg = compute_mh_leg(q_t, dq_t, dh, lm)
+        else:
+            M_leg, h_leg = None, None
 
         foot_t_j5 = foot_local[fi, leg] + J4_TO_J5_SIM_PER_LEG[leg]
         pts_a     = forward_kinematics(q_a, dh=dh)
