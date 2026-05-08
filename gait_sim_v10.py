@@ -148,11 +148,15 @@ LEG_DH           = [DH_FRONT, DH_FRONT, DH_HIND, DH_HIND]
 N_JOINTS_PER_LEG = [5, 5, 5, 5]
 N_JOINTS_MAX     = 5
 
+# DH의 D2 오프셋(=0.0075)으로 인한 좌우 비대칭 보정:
+# foot_local_y = -0.0075 (모든 다리 동일) → hip_y에 +0.0075 적용 시
+# foot_world_y = ±BODY_LAT 정확히 대칭 (CoM 기준 roll moment ≈ 0)
+_HIP_Y_BIAS = 0.0075   # ≡ DH dh[1][2] (= D2_F = D2_H)
 LEG_HIP_OFFSETS = np.array([
-    [+BODY_FWD_F, -BODY_LAT, 0.0     ],
-    [+BODY_FWD_F, +BODY_LAT, 0.0     ],
-    [+BODY_FWD_H, -BODY_LAT, BODY_Z_H],
-    [+BODY_FWD_H, +BODY_LAT, BODY_Z_H],
+    [+BODY_FWD_F, -BODY_LAT + _HIP_Y_BIAS, 0.0     ],
+    [+BODY_FWD_F, +BODY_LAT + _HIP_Y_BIAS, 0.0     ],
+    [+BODY_FWD_H, -BODY_LAT + _HIP_Y_BIAS, BODY_Z_H],
+    [+BODY_FWD_H, +BODY_LAT + _HIP_Y_BIAS, BODY_Z_H],
 ])
 
 PHASE_OFFSETS = {name: cfg['offsets'] for name, cfg in GAIT_PRESETS.items()}
