@@ -1257,6 +1257,12 @@ USE_BODY_DYNAMICS = True  # True: GRF 기반 body 6-DoF 적분 (v11), False: V·
 USE_WBIC_FB       = False # True: 단일 QP (body acc 변수 포함, v11 신규)
                           # False: per-leg WBIC (v9~v10 기존 동작) — 기본값 안정성 유지
 WBIC_W_FB         = 0.1   # ‖Δv̇_fb‖² 가중치 (body acc 보정 최소화)
+
+# Figure 1 시각화 모드 (USE_BODY_DYNAMICS=True일 때만 효과)
+#   'static'      : v10 동작 — robot 항상 원점 고정 (body state 무시)
+#   'world'       : 카메라 원점 고정, robot이 body_pos만큼 이동 + R 회전 (drift 그대로)
+#   'body_follow' : 카메라가 body_pos 따라감, R 회전만 적용 (자세 진단용)
+VIZ_BODY_MODE = 'world'
 USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 # ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지) or 속도한계완화
 
@@ -1945,22 +1951,54 @@ ax3d.set_title(
 ax3d.view_init(elev=20, azim=-55)
 ax3d.xaxis.pane.fill = ax3d.yaxis.pane.fill = ax3d.zaxis.pane.fill = False
 
-_bc = np.array([
+# Body chassis 박스 + hip 마커 — animate에서 매 프레임 갱신 (VIZ_BODY_MODE='world'/'body_follow')
+_BC_BODY = np.array([
     LEG_HIP_OFFSETS[0], LEG_HIP_OFFSETS[2],
     LEG_HIP_OFFSETS[3], LEG_HIP_OFFSETS[1],
     LEG_HIP_OFFSETS[0],
 ])
-ax3d.plot(_bc[:,0], _bc[:,1], _bc[:,2], '-', color='white', lw=2.5, alpha=0.7)
+body_chassis_line, = ax3d.plot([], [], [], '-', color='white', lw=2.5, alpha=0.7)
+hip_markers = [ax3d.plot([], [], [], 'o', color=LEG_COLORS[leg],
+                          markersize=7, alpha=0.8)[0] for leg in range(4)]
+# CoM 마커 (USE_BODY_DYNAMICS=True에서 body_pos 시각화)
+body_com_marker, = ax3d.plot([], [], [], 'X', color='yellow',
+                              markersize=10, alpha=0.9, markeredgecolor='black')
+# hip 라벨은 정적 — body 따라 움직이지 않음 (matplotlib 3D text 동적 갱신 비용 큼)
+for leg in range(4):
+    h = LEG_HIP_OFFSETS[leg]
+    ax3d.text(h[0], h[1], h[2]+0.02, LEG_NAMES[leg], color=LEG_COLORS[leg], fontsize=7)
 
 gnd_z = home_foot[2]
 xx, yy = np.meshgrid([-reach, reach], [-0.5, 0.5])
 ax3d.plot_surface(xx, yy, np.full_like(xx, gnd_z), alpha=0.12, color='#888888')
 
 _AX_COLORS = ['#ff4444', '#44ff44', '#4444ff']
-for leg in range(4):
-    h = LEG_HIP_OFFSETS[leg]
-    ax3d.plot([h[0]], [h[1]], [h[2]], 'o', color=LEG_COLORS[leg], markersize=7, alpha=0.8)
-    ax3d.text(h[0], h[1], h[2]+0.02, LEG_NAMES[leg], color=LEG_COLORS[leg], fontsize=7)
+
+def _body_T_at(fi):
+    """프레임 fi의 시각화 변환 (translation, R) — VIZ_BODY_MODE 기반.
+    'static' or USE_BODY_DYNAMICS=False : I (변환 없음)
+    'world'                              : (body_pos, body_R)  ← drift 그대로
+    'body_follow'                        : (0, body_R)         ← 회전만, 카메라가 body 따라감
+    """
+    if (not USE_BODY_DYNAMICS) or VIZ_BODY_MODE == 'static':
+        return np.zeros(3), np.eye(3)
+    if VIZ_BODY_MODE == 'body_follow':
+        return np.zeros(3), body_R_hist[fi]
+    return body_pos_hist[fi], body_R_hist[fi]   # 'world' 기본
+
+def _body_T_apply(p_body, fi):
+    """body-frame 점 → 시각화 좌표."""
+    pos, R = _body_T_at(fi)
+    return pos + R @ p_body
+
+# VIZ_BODY_MODE='world'에서 body가 +X 방향으로 이동하니 ax 범위 확장
+if USE_BODY_DYNAMICS and VIZ_BODY_MODE == 'world':
+    _x_max = float(np.max(body_pos_hist[:, 0]))
+    _x_min = float(np.min(body_pos_hist[:, 0]))
+    _z_min_b = float(np.min(body_pos_hist[:, 2]))
+    _z_max_b = float(np.max(body_pos_hist[:, 2]))
+    ax3d.set_xlim(min(-reach, _x_min - 0.3), max(reach, _x_max + 0.3))
+    ax3d.set_zlim(min(-0.65, _z_min_b - 0.3), max(0.15, _z_max_b + 0.3))
 
 _BASE_FRAME_LEN = 0.12
 for ax_i, lbl in enumerate(['X (fwd)', 'Y (lat)', 'Z (up)']):
@@ -2099,20 +2137,37 @@ def init_anim():
 
 def animate(fi):
     t = fi * DT
+    body_pos_v, body_R_v = _body_T_at(fi)
+
+    # Body chassis 박스 갱신 (4개 hip을 잇는 사각형)
+    bc_world = np.array([body_pos_v + body_R_v @ p for p in _BC_BODY])
+    body_chassis_line.set_data(bc_world[:, 0], bc_world[:, 1])
+    body_chassis_line.set_3d_properties(bc_world[:, 2])
+    # CoM 마커 (body_pos)
+    body_com_marker.set_data([body_pos_v[0]], [body_pos_v[1]])
+    body_com_marker.set_3d_properties([body_pos_v[2]])
+
     for leg in range(4):
         nj     = N_JOINTS_PER_LEG[leg]
         q      = joint_hist[fi, leg, :nj]
         pts_dh = forward_kinematics(q, dh=LEG_DH[leg])
         pts    = [_dh_to_sim(p, front_leg=(leg < 2)) for p in pts_dh]
-        hip    = LEG_HIP_OFFSETS[leg]
+        hip_b  = LEG_HIP_OFFSETS[leg]   # body-frame
+        hip_w  = body_pos_v + body_R_v @ hip_b
+        # hip 마커 갱신
+        hip_markers[leg].set_data([hip_w[0]], [hip_w[1]])
+        hip_markers[leg].set_3d_properties([hip_w[2]])
         for k in range(nj):
-            A = hip + pts[k]; B = hip + pts[k+1]
+            A_b = hip_b + pts[k];   B_b = hip_b + pts[k+1]
+            A   = body_pos_v + body_R_v @ A_b
+            B   = body_pos_v + body_R_v @ B_b
             leg_links[leg][k].set_data([A[0], B[0]], [A[1], B[1]])
             leg_links[leg][k].set_3d_properties([A[2], B[2]])
             mid = 0.5 * (A + B)
             link_com_markers[leg][k].set_data([mid[0]], [mid[1]])
             link_com_markers[leg][k].set_3d_properties([mid[2]])
-        pe = foot_hist[fi, leg]
+        pe_b = foot_hist[fi, leg]   # body-frame
+        pe   = body_pos_v + body_R_v @ pe_b
         if swing_flag[fi, leg]:
             swing_dots[leg].set_data([pe[0]], [pe[1]])
             swing_dots[leg].set_3d_properties([pe[2]])
@@ -2125,10 +2180,12 @@ def animate(fi):
         leg_traces[leg].set_3d_properties(trace_buf[leg][2][-TRACE_LEN:])
         T_dh = np.eye(4)
         for j in range(nj + 1):
-            orig_sim = _dh_to_sim(T_dh[:3, 3], front_leg=(leg < 2))
-            pos = hip + orig_sim
+            orig_sim_b = _dh_to_sim(T_dh[:3, 3], front_leg=(leg < 2))
+            pos_b      = hip_b + orig_sim_b
+            pos        = body_pos_v + body_R_v @ pos_b
             for ax_i in range(3):
-                dv = _dh_to_sim(T_dh[:3, ax_i], front_leg=(leg < 2))
+                dv_b = _dh_to_sim(T_dh[:3, ax_i], front_leg=(leg < 2))
+                dv   = body_R_v @ dv_b
                 if _jf_quivers[leg][j][ax_i] is not None:
                     _jf_quivers[leg][j][ax_i].remove()
                 _jf_quivers[leg][j][ax_i] = ax3d.quiver(
