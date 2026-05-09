@@ -2077,7 +2077,7 @@ def _solve_nmpc_trot():
         # Friction cone soft barrier — stance leg only (contact 추가 후)
         for leg in stance:
             fc = _crocoddyl.FrictionCone(np.eye(3), MU_FRICTION, NMPC_FRIC_NF,
-                                         False, 0.0, NMPC_FRIC_FZ_MAX)
+                                         True, 0.0, NMPC_FRIC_FZ_MAX)
             fc_act = _crocoddyl.ActivationModelQuadraticBarrier(
                 _crocoddyl.ActivationBounds(fc.lb, fc.ub))
             fc_res = _crocoddyl.ResidualModelContactFrictionCone(
@@ -2269,7 +2269,7 @@ def _solve_nmpc_trot_receding():
         # Friction cone soft barrier — stance leg only (contact 추가 후)
         for leg in stance:
             fc = _crocoddyl.FrictionCone(np.eye(3), MU_FRICTION, NMPC_FRIC_NF,
-                                         False, 0.0, NMPC_FRIC_FZ_MAX)
+                                         True, 0.0, NMPC_FRIC_FZ_MAX)
             fc_act = _crocoddyl.ActivationModelQuadraticBarrier(
                 _crocoddyl.ActivationBounds(fc.lb, fc.ub))
             fc_res = _crocoddyl.ResidualModelContactFrictionCone(
