@@ -1582,6 +1582,17 @@ NMPC_W_TAU_LIM     = 1e-2
 # 충격 감쇄 (impact spike 직접 억제)
 NMPC_W_TOUCHDOWN_V    = 1e1   # weight on |v_foot|² (linear part)
 NMPC_TOUCHDOWN_LAST_N = 2     # 마지막 몇 step에 적용
+# Stance leg foot 위치 잠금 (slip 방지)
+# Baumgarte Kp=0 으로 인한 mid-stance drift (~40mm/stance) 보완
+# Position residual + weighted activation, xy 강 / z 약 (z는 contact constraint으로 충분)
+NMPC_W_STANCE_POS_XY = 1e2    # foot xy 위치 유지 weight
+NMPC_W_STANCE_POS_Z  = 2e0    # foot z 는 contact가 잡으니 약하게
+# Perturbation test: receding horizon 도중 body state에 외란 주입
+# (NMPC re-solve로 회복하는지 검증)
+USE_PERTURBATION   = False
+PERTURB_TIME       = 1.0       # [s] (cycle 2 phase A 중간)
+PERTURB_VEL_LIN    = np.array([0.0, 0.5, 0.0])    # body linear velocity 추가 [m/s]
+PERTURB_VEL_ANG    = np.array([0.0, 0.0, 0.0])    # body angular velocity 추가 [rad/s]
 # 단순 body 궤적 (steady ref): upright + V 직진 + z=0
 # 형식: [roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
 # px/py weight=0이라 자유, pz=0 추종, vx=V 추종, 자세는 0(평탄) 추종
@@ -2125,6 +2136,19 @@ def _solve_nmpc_trot():
                 cost.addCost(f'tdv_{leg}',
                     _crocoddyl.CostModelResidual(cstate, v_act, v_res),
                     NMPC_W_TOUCHDOWN_V)
+        # Stance leg foot world-frame velocity → 0 cost (slip 방지)
+        # 위치 target 은 NMPC가 전역으로 모르므로 (cycle 0 swing 불완전 등),
+        # velocity 직접 0 으로 강제 — 본질적으로 contact constraint 보강
+        for leg in stance:
+            v_ref = pin.Motion(np.zeros(6))
+            v_res = _crocoddyl.ResidualModelFrameVelocity(
+                cstate, foot_frames_pin[leg], v_ref,
+                pin.LOCAL_WORLD_ALIGNED, cactuation.nu)
+            v_act = _crocoddyl.ActivationModelWeightedQuad(
+                np.array([NMPC_W_STANCE_POS_XY, NMPC_W_STANCE_POS_XY,
+                          NMPC_W_STANCE_POS_Z, 0.0, 0.0, 0.0]))   # linear only
+            cost.addCost(f'svel_{leg}',
+                _crocoddyl.CostModelResidual(cstate, v_act, v_res), 1.0)
         diff = _crocoddyl.DifferentialActionModelContactFwdDynamics(
             cstate, cactuation, cm_contact, cost, 0.0, True)
         actions.append(_crocoddyl.IntegratedActionModelEuler(diff, DT_NMPC))
@@ -2317,6 +2341,19 @@ def _solve_nmpc_trot_receding():
                 cost.addCost(f'tdv_{leg}',
                     _crocoddyl.CostModelResidual(cstate, v_act, v_res),
                     NMPC_W_TOUCHDOWN_V)
+        # Stance leg foot world-frame velocity → 0 cost (slip 방지)
+        # 위치 target 은 NMPC가 전역으로 모르므로 (cycle 0 swing 불완전 등),
+        # velocity 직접 0 으로 강제 — 본질적으로 contact constraint 보강
+        for leg in stance:
+            v_ref = pin.Motion(np.zeros(6))
+            v_res = _crocoddyl.ResidualModelFrameVelocity(
+                cstate, foot_frames_pin[leg], v_ref,
+                pin.LOCAL_WORLD_ALIGNED, cactuation.nu)
+            v_act = _crocoddyl.ActivationModelWeightedQuad(
+                np.array([NMPC_W_STANCE_POS_XY, NMPC_W_STANCE_POS_XY,
+                          NMPC_W_STANCE_POS_Z, 0.0, 0.0, 0.0]))   # linear only
+            cost.addCost(f'svel_{leg}',
+                _crocoddyl.CostModelResidual(cstate, v_act, v_res), 1.0)
         diff = _crocoddyl.DifferentialActionModelContactFwdDynamics(
             cstate, cactuation, cm_contact, cost, 0.0, True)
         return _crocoddyl.IntegratedActionModelEuler(diff, DT_NMPC)
@@ -2356,7 +2393,16 @@ def _solve_nmpc_trot_receding():
     n_failures = 0
     iter_total = 0
     fi_nmpc = 0
+    perturb_done = False
     while fi_nmpc < N_TOTAL:
+        # Perturbation 주입: PERTURB_TIME 도달 시 x_current 의 body velocity 에 impulse 추가
+        t_now = fi_nmpc * DT_NMPC
+        if USE_PERTURBATION and (not perturb_done) and t_now >= PERTURB_TIME:
+            # x_current layout: [q (nq), v (nv)]; v[0:3] = body linear vel, v[3:6] = ang vel
+            x_current[pin_model.nq    :pin_model.nq + 3] += PERTURB_VEL_LIN
+            x_current[pin_model.nq + 3:pin_model.nq + 6] += PERTURB_VEL_ANG
+            print(f"  [PERTURB] t={t_now:.2f}s: body v += {PERTURB_VEL_LIN}, ω += {PERTURB_VEL_ANG}")
+            perturb_done = True
         # 남은 step에 맞춰 horizon 길이 조정
         rem = N_TOTAL - fi_nmpc
         h_eff = min(N_HORIZON, rem)
