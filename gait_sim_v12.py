@@ -3184,7 +3184,7 @@ ax3d.set_ylabel('Y (m)', color='white', labelpad=4)
 ax3d.set_zlabel('Z (m)', color='white', labelpad=4)
 ax3d.tick_params(colors=_gray)
 ax3d.set_title(
-    f'Gait Sim v11  [{GAIT_TYPE.upper()}]  v={V}m/s  T={T}s  D={D}  '
+    f'Gait Sim v12  [{GAIT_TYPE.upper()}]  v={V}m/s  T={T}s  D={D}  '
     f'step_h={STEP_HEIGHT}m  step_l={STEP_LENGTH:.3f}m  total_mass={TOTAL_MASS:.2f}kg',
     color='white', fontsize=9)
 ax3d.view_init(elev=20, azim=-55)
@@ -3963,7 +3963,7 @@ fig8.suptitle(
 
 plt.figure(fig.number)
 plt.suptitle(
-    f'Gait Sim v11  |  {GAIT_TYPE.upper()}  |  '
+    f'Gait Sim v12  |  {GAIT_TYPE.upper()}  |  '
     f'v={V}m/s  T={T}s  D={D}  T_sw={T_SW:.2f}s  '
     f'step_h={STEP_HEIGHT*1e3:.0f}mm  step_l={STEP_LENGTH*1e3:.0f}mm',
     color='white', fontsize=9)
