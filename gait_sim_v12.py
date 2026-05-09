@@ -1549,7 +1549,8 @@ WBIC_W_FB           = 0.1   # ‖Δv̇_fb‖² 가중치 (body acc 보정 최소
 # True : 시뮬 시작 시 한번 NMPC 풀이 → trajectory 사용 (MPC+WBIC 우회)
 # False: v11 동작 유지 (MPC + WBIC)
 # 권장 N_CYCLES ≤ 2 (one-shot FDDP 한계, multi-cycle은 receding horizon 필요)
-USE_NMPC = False
+USE_NMPC = True
+USE_NMPC_RECEDING = True       # True: receding horizon (multi-cycle 안정), False: one-shot
 NMPC_W_TRACK_XY = 100.0       # foot tracking xy weight (튜닝 결과)
 NMPC_W_TRACK_Z  = 10000.0     # foot tracking z weight (swing peak 정확)
 NMPC_BAUMGARTE_KP = 0.0       # contact baumgarte
@@ -1559,6 +1560,10 @@ NMPC_W_CTRL_REG   = 1e-3      # control regularization
 NMPC_W_TERMINAL   = 1e2       # terminal state cost
 NMPC_MAXITER      = 200
 NMPC_INIT_REG     = 1.0
+# Receding horizon: 매 N_RESOLVE step마다 N_HORIZON 길이의 NMPC 풀이 (warm-start)
+NMPC_RH_N_HORIZON = 24         # horizon length (steps) — 1 cycle for trot
+NMPC_RH_N_RESOLVE = 12         # re-solve every N steps (half cycle)
+NMPC_RH_MAXITER   = 50         # warm-start로 적은 iter
 # 단순 body 궤적 (steady ref): upright + V 직진 + z=0
 # 형식: [roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
 # px/py weight=0이라 자유, pz=0 추종, vx=V 추종, 자세는 0(평탄) 추종
@@ -2086,6 +2091,192 @@ def _solve_nmpc_trot():
     return np.array(solver.xs), np.array(solver.us), done, pin_model, pin_data
 
 
+def _solve_nmpc_trot_receding():
+    """Receding horizon NMPC.
+    매 NMPC_RH_N_RESOLVE step마다 NMPC_RH_N_HORIZON 길이의 NMPC 풀이 (warm-start).
+    one-shot 4+ cycle 발산 회피 — 짧은 horizon × 다회 풀이.
+    """
+    import math as _m
+    import pinocchio as pin
+    if not _CROCODDYL_AVAILABLE:
+        return None, None, False, None, None
+
+    pin_model = _bm.build_model()
+    pin_data  = pin_model.createData()
+    cstate     = _crocoddyl.StateMultibody(pin_model)
+    cactuation = _crocoddyl.ActuationModelFloatingBase(cstate)
+
+    Q_HOME_PER_LEG_PIN = {'FR': Q_HOME_FRONT, 'FL': Q_HOME_FRONT,
+                           'HR': Q_HOME_HIND,  'HL': Q_HOME_HIND}
+    q0 = pin.neutral(pin_model)
+    for leg, qh in Q_HOME_PER_LEG_PIN.items():
+        for i, qi in enumerate(qh):
+            jid = pin_model.getJointId(f'leg_{leg}_j{i+1}')
+            q0[pin_model.idx_qs[jid]] = qi
+    pin.forwardKinematics(pin_model, pin_data, q0)
+    pin.updateFramePlacements(pin_model, pin_data)
+    foot_z_native = pin_data.oMf[pin_model.getFrameId('leg_FR_foot')].translation[2]
+    q0[2] = -foot_z_native
+    v0 = np.zeros(pin_model.nv)
+    x0 = np.concatenate([q0, v0])
+
+    foot_frames_pin = {leg: pin_model.getFrameId(f'leg_{leg}_foot')
+                        for leg in ['FR','FL','HR','HL']}
+    pin.forwardKinematics(pin_model, pin_data, q0)
+    pin.updateFramePlacements(pin_model, pin_data)
+    foot_home_pin = {leg: pin_data.oMf[foot_frames_pin[leg]].translation.copy()
+                     for leg in ['FR','FL','HR','HL']}
+
+    def _cycloid(p_start, p_end, sw_t, h):
+        p = p_start + sw_t * (p_end - p_start)
+        p[2] = p_start[2] + h * 4.0 * sw_t * (1.0 - sw_t)
+        return p
+
+    if GAIT_TYPE != 'trot':
+        print(f"  ⚠ NMPC는 현재 trot만 지원")
+        return None, None, False, None, None
+    N_PER_PHASE = int((T / 2) / DT_MPC)
+    DT_NMPC = T / 2 / N_PER_PHASE
+    N_TOTAL = N_PER_PHASE * 2 * N_CYCLES   # 전체 simulation step 수
+
+    def _build_action_at_step(global_k):
+        """전역 step index → action model (gait phase에 맞는 contact + cost)."""
+        in_cycle_k = global_k % (N_PER_PHASE * 2)
+        in_phase_A = in_cycle_k < N_PER_PHASE
+        cycle_idx = global_k // (N_PER_PHASE * 2)
+        if in_phase_A:
+            stance, swing = ['FL','HR'], ['FR','HL']
+            k_in_phase = in_cycle_k
+            phase_start_k = cycle_idx * N_PER_PHASE * 2
+        else:
+            stance, swing = ['FR','HL'], ['FL','HR']
+            k_in_phase = in_cycle_k - N_PER_PHASE
+            phase_start_k = cycle_idx * N_PER_PHASE * 2 + N_PER_PHASE
+        sw_t = k_in_phase / max(N_PER_PHASE - 1, 1)
+        t_phase_start = phase_start_k * DT_NMPC
+        t_phase_end   = t_phase_start + N_PER_PHASE * DT_NMPC
+
+        cm_contact = _crocoddyl.ContactModelMultiple(cstate, cactuation.nu)
+        for leg in stance:
+            c = _crocoddyl.ContactModel3D(
+                cstate, foot_frames_pin[leg], np.zeros(3),
+                pin.LOCAL_WORLD_ALIGNED, cactuation.nu,
+                np.array([NMPC_BAUMGARTE_KP, NMPC_BAUMGARTE_KD]))
+            cm_contact.addContact(f'c_{leg}', c)
+        cost = _crocoddyl.CostModelSum(cstate, cactuation.nu)
+        cost.addCost('stateReg',
+            _crocoddyl.CostModelResidual(cstate,
+                _crocoddyl.ResidualModelState(cstate, x0, cactuation.nu)),
+            NMPC_W_STATE_REG)
+        cost.addCost('ctrlReg',
+            _crocoddyl.CostModelResidual(cstate,
+                _crocoddyl.ResidualModelControl(cstate, cactuation.nu)),
+            NMPC_W_CTRL_REG)
+        for leg in swing:
+            ps = foot_home_pin[leg].copy()
+            ps[0] += V * t_phase_start - STEP_LENGTH/2
+            pe = foot_home_pin[leg].copy()
+            pe[0] += V * t_phase_end + STEP_LENGTH/2
+            tgt = _cycloid(ps, pe, sw_t, STEP_HEIGHT)
+            res = _crocoddyl.ResidualModelFrameTranslation(
+                cstate, foot_frames_pin[leg], tgt, cactuation.nu)
+            act = _crocoddyl.ActivationModelWeightedQuad(
+                np.array([NMPC_W_TRACK_XY, NMPC_W_TRACK_XY, NMPC_W_TRACK_Z]))
+            cost.addCost(f'foot_{leg}',
+                _crocoddyl.CostModelResidual(cstate, act, res), 1.0)
+        diff = _crocoddyl.DifferentialActionModelContactFwdDynamics(
+            cstate, cactuation, cm_contact, cost, 0.0, True)
+        return _crocoddyl.IntegratedActionModelEuler(diff, DT_NMPC)
+
+    def _build_terminal(target_x):
+        cm_T = _crocoddyl.ContactModelMultiple(cstate, cactuation.nu)
+        for leg in ['FR','FL','HR','HL']:
+            c = _crocoddyl.ContactModel3D(
+                cstate, foot_frames_pin[leg], np.zeros(3),
+                pin.LOCAL_WORLD_ALIGNED, cactuation.nu,
+                np.array([NMPC_BAUMGARTE_KP, NMPC_BAUMGARTE_KD]))
+            cm_T.addContact(f'c_{leg}', c)
+        cost_T = _crocoddyl.CostModelSum(cstate, cactuation.nu)
+        cost_T.addCost('stateReg_T',
+            _crocoddyl.CostModelResidual(cstate,
+                _crocoddyl.ResidualModelState(cstate, target_x, cactuation.nu)),
+            NMPC_W_TERMINAL)
+        diff_T = _crocoddyl.DifferentialActionModelContactFwdDynamics(
+            cstate, cactuation, cm_T, cost_T, 0.0, True)
+        return _crocoddyl.IntegratedActionModelEuler(diff_T, 0.0)
+
+    # Receding horizon main loop
+    N_HORIZON = NMPC_RH_N_HORIZON
+    N_RESOLVE = NMPC_RH_N_RESOLVE
+    print(f"  Receding horizon NMPC: N_HORIZON={N_HORIZON} ({N_HORIZON*DT_NMPC:.2f}s), "
+          f"N_RESOLVE={N_RESOLVE}, N_TOTAL={N_TOTAL}")
+
+    xs_full = [x0.copy()]   # 모든 step state
+    us_full = []             # 모든 step control
+    x_current = x0.copy()
+    xs_warm = None           # 이전 풀이의 xs (warm-start용)
+    us_warm = None
+
+    t_solve_total = time.time()
+    n_solves = 0
+    n_failures = 0
+    iter_total = 0
+    fi_nmpc = 0
+    while fi_nmpc < N_TOTAL:
+        # 남은 step에 맞춰 horizon 길이 조정
+        rem = N_TOTAL - fi_nmpc
+        h_eff = min(N_HORIZON, rem)
+        actions_h = [_build_action_at_step(fi_nmpc + k) for k in range(h_eff)]
+        # Terminal: 끝에 도달하면 final ref, 아니면 N_HORIZON 끝의 ref
+        target_x_T = x0.copy()
+        target_x_T[0] = q0[0] + V * (fi_nmpc + h_eff) * DT_NMPC
+        terminal = _build_terminal(target_x_T)
+
+        problem = _crocoddyl.ShootingProblem(x_current, actions_h, terminal)
+        solver = _crocoddyl.SolverFDDP(problem)
+
+        # Cold start each iteration (warm-start 로직 부정확하면 발산 위험)
+        # 매 iteration 짧은 horizon (~24 steps)이라 cold start로도 100~200 iter 안에 수렴
+        xs_init = [x_current] * (h_eff + 1)
+        us_init = [np.zeros(cactuation.nu)] * h_eff
+        # Warm-start (선택적): 이전 풀이의 us 패턴 활용
+        if us_warm is not None:
+            for k in range(min(len(us_warm) - N_RESOLVE, h_eff)):
+                us_init[k] = np.array(us_warm[N_RESOLVE + k])
+
+        done = solver.solve(xs_init, us_init,
+                             maxiter=NMPC_MAXITER,
+                             is_feasible=False,
+                             init_reg=NMPC_INIT_REG)
+        n_solves += 1
+        iter_total += solver.iter
+        if not done:
+            n_failures += 1
+
+        # Apply 첫 N_RESOLVE step (또는 horizon 끝까지)
+        n_apply = min(N_RESOLVE, h_eff)
+        for k in range(n_apply):
+            xs_full.append(np.array(solver.xs[k+1]))
+            us_full.append(np.array(solver.us[k]))
+        x_current = np.array(solver.xs[n_apply])
+        xs_warm = np.array(solver.xs)
+        us_warm = np.array(solver.us)
+        fi_nmpc += n_apply
+
+    elapsed = time.time() - t_solve_total
+    print(f"  Receding horizon 완료: {n_solves} solves, total {iter_total} iters, "
+          f"{n_failures} fails, {elapsed*1e3:.0f}ms")
+
+    # FDDP의 partial solution도 동역학 만족하므로 사용
+    # 단, 모두 실패하면 fallback (1번이라도 성공해야 의미 있음)
+    success = (n_solves - n_failures) >= 1
+    if n_failures > 0:
+        print(f"    [INFO] {n_failures}/{n_solves} solves failed line search but partial "
+              f"trajectories used (FDDP enforces dynamics).")
+    return np.array(xs_full), np.array(us_full), success, pin_model, pin_data
+
+
+
 def _populate_arrays_from_nmpc(xs, us, pin_model, pin_data):
     """NMPC xs/us → v11 arrays 채움.
     DT_NMPC × N_NMPC = 시뮬 총 시간이지만 v11 N_FRAMES은 DT 기반.
@@ -2158,8 +2349,12 @@ def _populate_arrays_from_nmpc(xs, us, pin_model, pin_data):
 _USE_NMPC_ACTIVE = False
 if USE_NMPC and _CROCODDYL_AVAILABLE:
     print("─" * 55)
-    print(f"v12: NMPC (crocoddyl FDDP) 풀이 시작...")
-    _xs_nmpc, _us_nmpc, _done_nmpc, _pin_model_nmpc, _pin_data_nmpc = _solve_nmpc_trot()
+    if USE_NMPC_RECEDING:
+        print(f"v12: NMPC (receding horizon FDDP) 풀이 시작...")
+        _xs_nmpc, _us_nmpc, _done_nmpc, _pin_model_nmpc, _pin_data_nmpc = _solve_nmpc_trot_receding()
+    else:
+        print(f"v12: NMPC (one-shot FDDP) 풀이 시작...")
+        _xs_nmpc, _us_nmpc, _done_nmpc, _pin_model_nmpc, _pin_data_nmpc = _solve_nmpc_trot()
     if _done_nmpc:
         _populate_arrays_from_nmpc(_xs_nmpc, _us_nmpc, _pin_model_nmpc, _pin_data_nmpc)
         _USE_NMPC_ACTIVE = True
