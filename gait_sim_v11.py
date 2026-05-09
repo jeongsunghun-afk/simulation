@@ -58,7 +58,7 @@ except ImportError:
     _PIN_AVAILABLE = False
 
 # 비교 모드: HIND_VARIANT={'orig','ext'}, COMPARE_MODE=1이면 figure 생략 후 metrics 덤프
-_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'ext')
+_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'orig')
 _COMPARE_MODE = os.environ.get('COMPARE_MODE', '0') == '1'
 assert _HIND_VARIANT in ('orig', 'ext'), f"HIND_VARIANT={_HIND_VARIANT} (expected 'orig' or 'ext')"
 import matplotlib as mpl
@@ -1541,7 +1541,7 @@ BODY_REF_STEP = np.array([
 #   'body_follow' : 카메라가 body_pos 따라감, R 회전만 적용 (자세 진단용)
 # ※ trot+open-loop+FB=False 조합에선 body roll 179°까지 발산 → 'world' 모드에서
 #   다리가 거의 수평으로 누워보임. body_dyn 보고 싶으면 closed-loop+FB 둘 다 ON 권장.
-VIZ_BODY_MODE = 'world' 
+VIZ_BODY_MODE = 'static' 
 USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
 # ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지) or 속도한계완화
 

@@ -78,7 +78,7 @@ except ImportError:
     _CROCODDYL_AVAILABLE = False
 
 # 비교 모드: HIND_VARIANT={'orig','ext'}, COMPARE_MODE=1이면 figure 생략 후 metrics 덤프
-_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'ext')
+_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'orig')
 _COMPARE_MODE = os.environ.get('COMPARE_MODE', '0') == '1'
 assert _HIND_VARIANT in ('orig', 'ext'), f"HIND_VARIANT={_HIND_VARIANT} (expected 'orig' or 'ext')"
 import matplotlib as mpl
