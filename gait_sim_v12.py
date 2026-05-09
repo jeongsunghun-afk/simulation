@@ -2497,43 +2497,58 @@ for fi in range(N_FRAMES):
 wbc_dur = time.perf_counter() - wbc_t0
 mode_str = f"MPC(N={N_MPC},dt={DT_MPC*1e3:.0f}ms)" if USE_MPC else "QP GRF"
 wbic_str = "WBIC ON" if USE_WBIC else "WBIC OFF"
-print(f"WBC 완료 [{mode_str}, {wbic_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
+if _USE_NMPC_ACTIVE:
+    print(f"v12 NMPC 활성 — v11 main loop SKIP, joint/body arrays NMPC trajectory로 채움")
+    # NMPC 결과 진단 출력
+    import math as _m
+    _roll_max = _m.degrees(np.max(np.abs(np.arctan2(body_R_hist[:,2,1], body_R_hist[:,2,2]))))
+    _pitch_max = _m.degrees(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[:,2,0],-1,1)))))
+    print(f"  body roll_max={_roll_max:.2f}°, pitch_max={_pitch_max:.2f}°")
+    print(f"  body z range: [{body_pos_hist[:,2].min()*1e3:.2f}, {body_pos_hist[:,2].max()*1e3:.2f}] mm")
+    print(f"  body x final: {body_pos_hist[-1,0]:.3f}m  (target {V*T*N_CYCLES:.3f})")
+    print(f"  body vx mean: {body_v_hist[:,0].mean():.3f} m/s  (target {V})")
+    print(f"  |τ|max: {np.abs(wbc_tau_cmd).max():.2f} Nm")
+    fz_sum_des = np.zeros(N_FRAMES)   # placeholder (NMPC는 GRF 직접 풀이 안 함)
+    fz_sum_used = np.zeros(N_FRAMES)
+else:
+    print(f"WBC 완료 [{mode_str}, {wbic_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
 
 # GRF 합산 검증 (λ_des = MPC/QP 출력, λ_used = WBIC 보정 후)
-fz_sum_des  = np.sum(wbc_lam_des[:, :, 2], axis=1)
-fz_sum_used = np.sum(wbic_lam_used[:, :, 2], axis=1)
-print(f"  Σλz_des  평균={fz_sum_des.mean():.2f}N  (Mg={TOTAL_MASS*G_ACC:.2f}N)  "
-      f"오차={abs(fz_sum_des.mean()-TOTAL_MASS*G_ACC):.2f}N")
-if USE_WBIC:
-    print(f"  Σλz_used 평균={fz_sum_used.mean():.2f}N  "
-          f"오차={abs(fz_sum_used.mean()-TOTAL_MASS*G_ACC):.2f}N")
-    # WBIC 보정 통계
-    dtau_max  = float(np.max(np.abs(wbic_dtau_hist)))
-    dtau_mean = float(np.mean(np.abs(wbic_dtau_hist)))
-    dlam_max  = float(np.max(np.abs(wbic_dlam_hist)))
-    dlam_mean = float(np.mean(np.abs(wbic_dlam_hist)))
-    res_max   = float(np.max(wbic_residual_hist))
-    res_mean  = float(np.mean(wbic_residual_hist))
-    n_fail    = int(np.sum(~wbic_status_hist))
-    print(f"  WBIC: |Δτ|max={dtau_max:.3f}Nm mean={dtau_mean:.4f}Nm  "
-          f"|Δλ|max={dlam_max:.3f}N mean={dlam_mean:.4f}N")
-    print(f"  WBIC: residual max={res_max:.2e} mean={res_mean:.2e}  "
-          f"solver fail={n_fail}/{4*N_FRAMES}")
-    if dtau_max < 1e-3 and dlam_max < 1e-3:
-        print(f"  [INFO] WBIC 보정량 0 — 모든 제약이 비활성. WBIC OFF와 동일 결과.")
-    if n_fail > 0:
-        print(f"  [WARNING] WBIC solver {n_fail}회 실패. 제약 충돌 가능성.")
+if not _USE_NMPC_ACTIVE:
+    fz_sum_des  = np.sum(wbc_lam_des[:, :, 2], axis=1)
+    fz_sum_used = np.sum(wbic_lam_used[:, :, 2], axis=1)
+    print(f"  Σλz_des  평균={fz_sum_des.mean():.2f}N  (Mg={TOTAL_MASS*G_ACC:.2f}N)  "
+          f"오차={abs(fz_sum_des.mean()-TOTAL_MASS*G_ACC):.2f}N")
+    if USE_WBIC:
+        print(f"  Σλz_used 평균={fz_sum_used.mean():.2f}N  "
+              f"오차={abs(fz_sum_used.mean()-TOTAL_MASS*G_ACC):.2f}N")
+        # WBIC 보정 통계
+        dtau_max  = float(np.max(np.abs(wbic_dtau_hist)))
+        dtau_mean = float(np.mean(np.abs(wbic_dtau_hist)))
+        dlam_max  = float(np.max(np.abs(wbic_dlam_hist)))
+        dlam_mean = float(np.mean(np.abs(wbic_dlam_hist)))
+        res_max   = float(np.max(wbic_residual_hist))
+        res_mean  = float(np.mean(wbic_residual_hist))
+        n_fail    = int(np.sum(~wbic_status_hist))
+        print(f"  WBIC: |Δτ|max={dtau_max:.3f}Nm mean={dtau_mean:.4f}Nm  "
+              f"|Δλ|max={dlam_max:.3f}N mean={dlam_mean:.4f}N")
+        print(f"  WBIC: residual max={res_max:.2e} mean={res_mean:.2e}  "
+              f"solver fail={n_fail}/{4*N_FRAMES}")
+        if dtau_max < 1e-3 and dlam_max < 1e-3:
+            print(f"  [INFO] WBIC 보정량 0 — 모든 제약이 비활성. WBIC OFF와 동일 결과.")
+        if n_fail > 0:
+            print(f"  [WARNING] WBIC solver {n_fail}회 실패. 제약 충돌 가능성.")
 
-# v11: WBIC FB 진단
-if USE_WBIC_FB:
-    fb_res_max  = float(np.max(wbic_fb_residual_hist))
-    fb_res_mean = float(np.mean(wbic_fb_residual_hist))
-    fb_dvfb_max = float(np.max(np.abs(wbic_fb_dvfb_hist)))
-    print(f"  WBIC FB: residual_fb max={fb_res_max:.2e} mean={fb_res_mean:.2e}  "
-          f"|Δv̇_fb|max={fb_dvfb_max:.4f}  fail={wbic_fb_fail_count}/{N_FRAMES}")
+    # v11: WBIC FB 진단
+    if USE_WBIC_FB:
+        fb_res_max  = float(np.max(wbic_fb_residual_hist))
+        fb_res_mean = float(np.mean(wbic_fb_residual_hist))
+        fb_dvfb_max = float(np.max(np.abs(wbic_fb_dvfb_hist)))
+        print(f"  WBIC FB: residual_fb max={fb_res_max:.2e} mean={fb_res_mean:.2e}  "
+              f"|Δv̇_fb|max={fb_dvfb_max:.4f}  fail={wbic_fb_fail_count}/{N_FRAMES}")
 
-# v11: Floating-base body 동역학 진단
-if USE_BODY_DYNAMICS:
+# v11/v12: Floating-base body 동역학 진단
+if USE_BODY_DYNAMICS and not _USE_NMPC_ACTIVE:
     body_pos_dev   = body_pos_hist - body_pos_ref_hist
     body_v_dev     = body_v_hist   - body_v_ref_hist
     pos_dev_norm   = float(np.max(np.linalg.norm(body_pos_dev, axis=1)))
