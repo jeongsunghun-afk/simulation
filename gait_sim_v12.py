@@ -1553,8 +1553,8 @@ USE_NMPC = True
 USE_NMPC_RECEDING = True       # True: receding horizon (multi-cycle 안정), False: one-shot
 NMPC_W_TRACK_XY = 100.0       # foot tracking xy weight (튜닝 결과)
 NMPC_W_TRACK_Z  = 10000.0     # foot tracking z weight (swing peak 정확)
-NMPC_BAUMGARTE_KP = 0.0       # contact baumgarte
-NMPC_BAUMGARTE_KD = 20.0      # contact baumgarte
+NMPC_BAUMGARTE_KP = 0.0       # contact baumgarte (Kp>0 시도해봤으나 explicit Euler에서 발산 경향, future tuning)
+NMPC_BAUMGARTE_KD = 20.0      # contact baumgarte (velocity damping)
 NMPC_W_STATE_REG  = 1e0       # state regularization
 NMPC_W_CTRL_REG   = 1e-3      # control regularization
 NMPC_W_TERMINAL   = 1e2       # terminal state cost
@@ -1564,6 +1564,22 @@ NMPC_INIT_REG     = 1.0
 NMPC_RH_N_HORIZON = 24         # horizon length (steps) — 1 cycle for trot
 NMPC_RH_N_RESOLVE = 12         # re-solve every N steps (half cycle)
 NMPC_RH_MAXITER   = 50         # warm-start로 적은 iter
+# Friction cone barrier (stance leg마다 |Fxy| ≤ μ·Fz, Fz ≥ 0 soft constraint)
+# weight 너무 크면 수렴 어려움 / 너무 작으면 효과 없음 → 1e-2 ~ 1e+1 사이 튜닝
+NMPC_W_FRICTION    = 1e0       # quadratic barrier weight on cone violation
+NMPC_FRIC_NF       = 4         # pyramid sides (4-side / 8-side)
+NMPC_FRIC_FZ_MAX   = 1e4       # 최대 normal force [N] (over-spike 억제)
+# Contact force regularization (target=0, weight Fxy>Fz로 lateral spike 억제)
+# 너무 크면 stance leg 가 정지 마찰력 못 만들어 미끄러짐 → 1e-5 ~ 1e-3 권장
+NMPC_W_FORCE_REG   = 1e-4
+NMPC_W_FORCE_XY    = 5.0        # x,y 성분 가중 (z 대비)
+NMPC_W_FORCE_Z     = 1.0        # z 성분 가중
+# Joint torque limit barrier (|u_i| ≤ JOINT_TORQUE_LIMIT[i], soft penalty)
+NMPC_W_TAU_LIM     = 1e-2
+# Pre-touchdown velocity penalty: swing 마지막 N step에서 발 v_world → 0
+# 충격 감쇄 (impact spike 직접 억제)
+NMPC_W_TOUCHDOWN_V    = 1e1   # weight on |v_foot|² (linear part)
+NMPC_TOUCHDOWN_LAST_N = 2     # 마지막 몇 step에 적용
 # 단순 body 궤적 (steady ref): upright + V 직진 + z=0
 # 형식: [roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
 # px/py weight=0이라 자유, pz=0 추종, vx=V 추종, 자세는 0(평탄) 추종
@@ -1996,10 +2012,22 @@ def _solve_nmpc_trot():
     foot_home_pin = {leg: pin_data.oMf[foot_frames_pin[leg]].translation.copy()
                      for leg in ['FR','FL','HR','HL']}
 
-    # Cycloid swing target
+    # Joint torque limit array (cactuation.nu 차원, idx_vs 매핑 반영)
+    tau_lim_full = np.zeros(cactuation.nu)
+    for leg in ['FR','FL','HR','HL']:
+        for i in range(5):
+            u_idx = pin_model.idx_vs[pin_model.getJointId(f'leg_{leg}_j{i+1}')] - 6
+            tau_lim_full[u_idx] = JOINT_TORQUE_LIMIT[i]
+    tau_lim_lb = -tau_lim_full
+    tau_lim_ub = +tau_lim_full
+
+    # Swing target: smoothstep horizontal + bell-curve vertical (v=0 at touchdown)
+    # 기존 cycloid (h*4*t*(1-t)) 는 sw_t=1 에서 dz/dt=-h*4 = -1.28 m/s 로 충격 유발 →
+    # x/y 는 smoothstep s(t)=t²(3-2t) (v=0 at endpoints), z 는 16t²(1-t)² (v=0 at endpoints)
     def _cycloid(p_start, p_end, sw_t, h):
-        p = p_start + sw_t * (p_end - p_start)
-        p[2] = p_start[2] + h * 4.0 * sw_t * (1.0 - sw_t)
+        s_xy = sw_t * sw_t * (3.0 - 2.0 * sw_t)
+        p = p_start + s_xy * (p_end - p_start)
+        p[2] = p_start[2] + h * 16.0 * sw_t * sw_t * (1.0 - sw_t) * (1.0 - sw_t)
         return p
 
     # Gait phase (trot 가정, swing_ratio=0.5; 추후 다른 gait 확장)
@@ -2044,6 +2072,34 @@ def _solve_nmpc_trot():
             _crocoddyl.CostModelResidual(cstate,
                 _crocoddyl.ResidualModelControl(cstate, cactuation.nu)),
             NMPC_W_CTRL_REG)
+        # Friction cone soft barrier — stance leg only (contact 추가 후)
+        for leg in stance:
+            fc = _crocoddyl.FrictionCone(np.eye(3), MU_FRICTION, NMPC_FRIC_NF,
+                                         False, 0.0, NMPC_FRIC_FZ_MAX)
+            fc_act = _crocoddyl.ActivationModelQuadraticBarrier(
+                _crocoddyl.ActivationBounds(fc.lb, fc.ub))
+            fc_res = _crocoddyl.ResidualModelContactFrictionCone(
+                cstate, foot_frames_pin[leg], fc, cactuation.nu, True)
+            cost.addCost(f'fric_{leg}',
+                _crocoddyl.CostModelResidual(cstate, fc_act, fc_res),
+                NMPC_W_FRICTION)
+        # Contact force regularization (||F||² → 0, xy 더 강하게)
+        for leg in stance:
+            fref = pin.Force(np.zeros(6))
+            f_act = _crocoddyl.ActivationModelWeightedQuad(
+                np.array([NMPC_W_FORCE_XY, NMPC_W_FORCE_XY, NMPC_W_FORCE_Z]))
+            f_res = _crocoddyl.ResidualModelContactForce(
+                cstate, foot_frames_pin[leg], fref, 3, cactuation.nu, True)
+            cost.addCost(f'freg_{leg}',
+                _crocoddyl.CostModelResidual(cstate, f_act, f_res),
+                NMPC_W_FORCE_REG)
+        # Joint torque limit barrier
+        tau_act = _crocoddyl.ActivationModelQuadraticBarrier(
+            _crocoddyl.ActivationBounds(tau_lim_lb, tau_lim_ub))
+        tau_res = _crocoddyl.ResidualModelControl(cstate, cactuation.nu)
+        cost.addCost('tau_lim',
+            _crocoddyl.CostModelResidual(cstate, tau_act, tau_res),
+            NMPC_W_TAU_LIM)
         for leg in swing:
             ps = foot_home_pin[leg].copy()
             ps[0] += V * t_phase_start - STEP_LENGTH/2
@@ -2056,6 +2112,17 @@ def _solve_nmpc_trot():
                 np.array([NMPC_W_TRACK_XY, NMPC_W_TRACK_XY, NMPC_W_TRACK_Z]))
             cost.addCost(f'foot_{leg}',
                 _crocoddyl.CostModelResidual(cstate, act, res), 1.0)
+            # Pre-touchdown velocity penalty: swing 마지막 N step에서 v → 0
+            if k_in_phase >= N_PER_PHASE - NMPC_TOUCHDOWN_LAST_N:
+                v_ref = pin.Motion(np.zeros(6))
+                v_res = _crocoddyl.ResidualModelFrameVelocity(
+                    cstate, foot_frames_pin[leg], v_ref,
+                    pin.LOCAL_WORLD_ALIGNED, cactuation.nu)
+                v_act = _crocoddyl.ActivationModelWeightedQuad(
+                    np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0]))   # linear only
+                cost.addCost(f'tdv_{leg}',
+                    _crocoddyl.CostModelResidual(cstate, v_act, v_res),
+                    NMPC_W_TOUCHDOWN_V)
         diff = _crocoddyl.DifferentialActionModelContactFwdDynamics(
             cstate, cactuation, cm_contact, cost, 0.0, True)
         actions.append(_crocoddyl.IntegratedActionModelEuler(diff, DT_NMPC))
@@ -2141,9 +2208,20 @@ def _solve_nmpc_trot_receding():
     foot_home_pin = {leg: pin_data.oMf[foot_frames_pin[leg]].translation.copy()
                      for leg in ['FR','FL','HR','HL']}
 
+    # Joint torque limit array (cactuation.nu 차원, idx_vs 매핑 반영)
+    tau_lim_full = np.zeros(cactuation.nu)
+    for leg in ['FR','FL','HR','HL']:
+        for i in range(5):
+            u_idx = pin_model.idx_vs[pin_model.getJointId(f'leg_{leg}_j{i+1}')] - 6
+            tau_lim_full[u_idx] = JOINT_TORQUE_LIMIT[i]
+    tau_lim_lb = -tau_lim_full
+    tau_lim_ub = +tau_lim_full
+
+    # Swing target: smoothstep horizontal + bell-curve vertical (v=0 at touchdown)
     def _cycloid(p_start, p_end, sw_t, h):
-        p = p_start + sw_t * (p_end - p_start)
-        p[2] = p_start[2] + h * 4.0 * sw_t * (1.0 - sw_t)
+        s_xy = sw_t * sw_t * (3.0 - 2.0 * sw_t)
+        p = p_start + s_xy * (p_end - p_start)
+        p[2] = p_start[2] + h * 16.0 * sw_t * sw_t * (1.0 - sw_t) * (1.0 - sw_t)
         return p
 
     if GAIT_TYPE != 'trot':
@@ -2186,6 +2264,34 @@ def _solve_nmpc_trot_receding():
             _crocoddyl.CostModelResidual(cstate,
                 _crocoddyl.ResidualModelControl(cstate, cactuation.nu)),
             NMPC_W_CTRL_REG)
+        # Friction cone soft barrier — stance leg only (contact 추가 후)
+        for leg in stance:
+            fc = _crocoddyl.FrictionCone(np.eye(3), MU_FRICTION, NMPC_FRIC_NF,
+                                         False, 0.0, NMPC_FRIC_FZ_MAX)
+            fc_act = _crocoddyl.ActivationModelQuadraticBarrier(
+                _crocoddyl.ActivationBounds(fc.lb, fc.ub))
+            fc_res = _crocoddyl.ResidualModelContactFrictionCone(
+                cstate, foot_frames_pin[leg], fc, cactuation.nu, True)
+            cost.addCost(f'fric_{leg}',
+                _crocoddyl.CostModelResidual(cstate, fc_act, fc_res),
+                NMPC_W_FRICTION)
+        # Contact force regularization (||F||² → 0, xy 더 강하게)
+        for leg in stance:
+            fref = pin.Force(np.zeros(6))
+            f_act = _crocoddyl.ActivationModelWeightedQuad(
+                np.array([NMPC_W_FORCE_XY, NMPC_W_FORCE_XY, NMPC_W_FORCE_Z]))
+            f_res = _crocoddyl.ResidualModelContactForce(
+                cstate, foot_frames_pin[leg], fref, 3, cactuation.nu, True)
+            cost.addCost(f'freg_{leg}',
+                _crocoddyl.CostModelResidual(cstate, f_act, f_res),
+                NMPC_W_FORCE_REG)
+        # Joint torque limit barrier
+        tau_act = _crocoddyl.ActivationModelQuadraticBarrier(
+            _crocoddyl.ActivationBounds(tau_lim_lb, tau_lim_ub))
+        tau_res = _crocoddyl.ResidualModelControl(cstate, cactuation.nu)
+        cost.addCost('tau_lim',
+            _crocoddyl.CostModelResidual(cstate, tau_act, tau_res),
+            NMPC_W_TAU_LIM)
         for leg in swing:
             ps = foot_home_pin[leg].copy()
             ps[0] += V * t_phase_start - STEP_LENGTH/2
@@ -2198,6 +2304,17 @@ def _solve_nmpc_trot_receding():
                 np.array([NMPC_W_TRACK_XY, NMPC_W_TRACK_XY, NMPC_W_TRACK_Z]))
             cost.addCost(f'foot_{leg}',
                 _crocoddyl.CostModelResidual(cstate, act, res), 1.0)
+            # Pre-touchdown velocity penalty: swing 마지막 N step에서 v → 0
+            if k_in_phase >= N_PER_PHASE - NMPC_TOUCHDOWN_LAST_N:
+                v_ref = pin.Motion(np.zeros(6))
+                v_res = _crocoddyl.ResidualModelFrameVelocity(
+                    cstate, foot_frames_pin[leg], v_ref,
+                    pin.LOCAL_WORLD_ALIGNED, cactuation.nu)
+                v_act = _crocoddyl.ActivationModelWeightedQuad(
+                    np.array([1.0, 1.0, 1.0, 0.0, 0.0, 0.0]))   # linear only
+                cost.addCost(f'tdv_{leg}',
+                    _crocoddyl.CostModelResidual(cstate, v_act, v_res),
+                    NMPC_W_TOUCHDOWN_V)
         diff = _crocoddyl.DifferentialActionModelContactFwdDynamics(
             cstate, cactuation, cm_contact, cost, 0.0, True)
         return _crocoddyl.IntegratedActionModelEuler(diff, DT_NMPC)
@@ -2381,6 +2498,32 @@ def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
             pts_dh = forward_kinematics(q_leg, dh=LEG_DH[leg_idx])
             foot_local_sim = _dh_to_sim(pts_dh[-1], front_leg=(leg_idx < 2))
             foot_hist[fi, leg_idx] = LEG_HIP_OFFSETS[leg_idx] + foot_local_sim
+
+    # tau_grf / tau_dyn 후처리 (fig3/fig4 시각화용 분해)
+    # tau_grf = -Jᵀ × R_body^T × λ_world  (body-local force)
+    # tau_dyn = compute_gravity_torque_sim (정적 중력 보상 — NMPC는 PD 분리 안 됨)
+    # tau_pd  = 0 (NMPC는 feedforward only)
+    # tau_imp = tau_cmd - tau_dyn - tau_grf  (잔차)
+    for fi in range(N_FRAMES):
+        R_b = body_R_hist[fi]
+        for leg_idx in range(4):
+            nj   = N_JOINTS_PER_LEG[leg_idx]
+            q_leg = joint_hist[fi, leg_idx, :nj]
+            front = (leg_idx < 2)
+            dh    = LEG_DH[leg_idx]
+            lm    = LINK_MASS_PER_LEG[leg_idx]
+            J     = compute_jacobian_sim(q_leg, dh, front)   # 3×nj
+            lam_world  = wbc_lam_des[fi, leg_idx]
+            lam_local  = R_b.T @ lam_world
+            wbc_tau_grf[fi, leg_idx, :nj] = -(J.T @ lam_local)
+            wbc_tau_dyn[fi, leg_idx, :nj] = compute_gravity_torque_sim(q_leg, dh, lm, front)
+            # PD = 0 (NMPC), imp = remaining
+            wbc_tau_pd[fi, leg_idx, :nj]  = 0.0
+            wbc_tau_imp[fi, leg_idx, :nj] = (wbc_tau_cmd[fi, leg_idx, :nj]
+                                              - wbc_tau_dyn[fi, leg_idx, :nj]
+                                              - wbc_tau_grf[fi, leg_idx, :nj])
+            # lam_calc = lam_des (NMPC는 QP 분리 안 됨)
+            wbc_lam_calc[fi, leg_idx] = wbc_lam_des[fi, leg_idx]
 
 
 _USE_NMPC_ACTIVE = False
@@ -3321,6 +3464,83 @@ fig4.suptitle(
     f'FR / HL tau decompose th1~th4  |  {GAIT_TYPE.upper()}  |  '
     f'v={V}m/s  T={T}s  D={D}  '
     f'{"MPC QP (N=" + str(N_MPC) + ")" if USE_MPC else "QP GRF"}',
+    color='white', fontsize=10)
+
+# ══════════════════════════════════════════════════════════════
+# 9. Figure 5: body state vs cmd (reference) tracking
+#    pos x/y/z, vel x/y/z, orientation (roll/pitch/yaw), angular vel
+# ══════════════════════════════════════════════════════════════
+fig5 = plt.figure(figsize=(12, 13))
+fig5.patch.set_facecolor('#1a1a2e')
+gs5 = gridspec.GridSpec(4, 2, figure=fig5, wspace=0.30, hspace=0.60,
+                        left=0.07, right=0.97, top=0.93, bottom=0.05)
+
+def _style_ax5(ax, title, xlabel='Frame', ylabel=''):
+    ax.set_facecolor('#16213e')
+    ax.set_title(title, color='white', fontsize=9)
+    ax.set_xlabel(xlabel, color='white', fontsize=8)
+    ax.set_ylabel(ylabel, color='white', fontsize=8)
+    ax.tick_params(colors='gray')
+    ax.grid(True, alpha=0.25, color='gray')
+    for sp in ax.spines.values():
+        sp.set_edgecolor('gray')
+
+_roll_deg  = np.degrees(np.arctan2(body_R_hist[:, 2, 1], body_R_hist[:, 2, 2]))
+_pitch_deg = np.degrees(np.arcsin(np.clip(-body_R_hist[:, 2, 0], -1, 1)))
+_yaw_deg   = np.degrees(np.arctan2(body_R_hist[:, 1, 0], body_R_hist[:, 0, 0]))
+
+_axis_names = ['x', 'y', 'z']
+for ri in range(3):
+    err_p = body_pos_hist[:, ri] - body_pos_ref_hist[:, ri]
+    rms_p = float(np.sqrt(np.mean(err_p**2)))
+    max_p = float(np.max(np.abs(err_p)))
+    ax_p = fig5.add_subplot(gs5[ri, 0])
+    _style_ax5(ax_p, f'body pos {_axis_names[ri]} [m]   '
+                     f'(err: rms={rms_p*1e3:.1f}mm, max={max_p*1e3:.1f}mm)', ylabel='[m]')
+    ax_p.set_xlim(0, N_FRAMES)
+    ax_p.plot(_fr, body_pos_ref_hist[:, ri], lw=1.4, color='#ff6b6b', ls='--', label='cmd')
+    ax_p.plot(_fr, body_pos_hist[:, ri],     lw=1.6, color='#00d4ff',          label='actual')
+    ax_p.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
+
+    err_v = body_v_hist[:, ri] - body_v_ref_hist[:, ri]
+    rms_v = float(np.sqrt(np.mean(err_v**2)))
+    max_v = float(np.max(np.abs(err_v)))
+    ax_v = fig5.add_subplot(gs5[ri, 1])
+    _style_ax5(ax_v, f'body vel {_axis_names[ri]} [m/s]   '
+                     f'(err: rms={rms_v:.3f}, max={max_v:.3f})', ylabel='[m/s]')
+    ax_v.set_xlim(0, N_FRAMES)
+    ax_v.plot(_fr, body_v_ref_hist[:, ri], lw=1.4, color='#ff6b6b', ls='--', label='cmd')
+    ax_v.plot(_fr, body_v_hist[:, ri],     lw=1.6, color='#00d4ff',          label='actual')
+    ax_v.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
+
+ax_or = fig5.add_subplot(gs5[3, 0])
+_or_max = max(np.max(np.abs(_roll_deg)), np.max(np.abs(_pitch_deg)), np.max(np.abs(_yaw_deg)))
+_style_ax5(ax_or, f'body orientation [deg]  cmd=0  '
+                  f'(|err|max: roll={np.max(np.abs(_roll_deg)):.2f}°, '
+                  f'pitch={np.max(np.abs(_pitch_deg)):.2f}°, yaw={np.max(np.abs(_yaw_deg)):.2f}°)',
+           ylabel='[deg]')
+ax_or.set_xlim(0, N_FRAMES)
+ax_or.plot(_fr, _roll_deg,  lw=1.4, color='#ff6b6b', label='roll')
+ax_or.plot(_fr, _pitch_deg, lw=1.4, color='#ffd166', label='pitch')
+ax_or.plot(_fr, _yaw_deg,   lw=1.4, color='#06d6a0', label='yaw')
+ax_or.axhline(0, color='white', lw=0.6, ls='--', alpha=0.4)
+ax_or.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=3)
+
+ax_om = fig5.add_subplot(gs5[3, 1])
+_om_max = float(np.max(np.abs(body_omega_hist)))
+_style_ax5(ax_om, f'body angular vel [rad/s]  cmd=0  (|err|max={_om_max:.2f})',
+           ylabel='[rad/s]')
+ax_om.set_xlim(0, N_FRAMES)
+ax_om.plot(_fr, body_omega_hist[:, 0], lw=1.4, color='#ff6b6b', label='omega_x')
+ax_om.plot(_fr, body_omega_hist[:, 1], lw=1.4, color='#ffd166', label='omega_y')
+ax_om.plot(_fr, body_omega_hist[:, 2], lw=1.4, color='#06d6a0', label='omega_z')
+ax_om.axhline(0, color='white', lw=0.6, ls='--', alpha=0.4)
+ax_om.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=3)
+
+fig5.suptitle(
+    f'Body State vs Cmd  |  {GAIT_TYPE.upper()}  |  '
+    f'v={V}m/s  T={T}s  D={D}  '
+    f'{"NMPC (FDDP)" if _USE_NMPC_ACTIVE else "MPC + WBIC"}',
     color='white', fontsize=10)
 
 plt.figure(fig.number)
