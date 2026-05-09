@@ -1497,6 +1497,8 @@ joint_hist = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 foot_hist  = np.zeros((N_FRAMES, 4, 3))
 phase_hist = np.zeros((N_FRAMES, 4))
 swing_flag = np.zeros((N_FRAMES, 4), dtype=bool)
+foot_target_world_hist = np.full((N_FRAMES, 4, 3), np.nan)   # NMPC swing target (world)
+foot_actual_world_hist = np.zeros((N_FRAMES, 4, 3))            # actual foot world pos
 frame_calc_time = np.zeros(N_FRAMES, dtype=float)
 
 JOINT_VEL_LIMIT_RAD_S   = np.array([14.66, 15.91, 15.91, 14.66, 14.66], dtype=float)
@@ -2498,6 +2500,36 @@ def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
             pts_dh = forward_kinematics(q_leg, dh=LEG_DH[leg_idx])
             foot_local_sim = _dh_to_sim(pts_dh[-1], front_leg=(leg_idx < 2))
             foot_hist[fi, leg_idx] = LEG_HIP_OFFSETS[leg_idx] + foot_local_sim
+
+    # foot world pos (actual) + swing target (cmd) — fig6 용
+    leg_to_idx = {'FR':0, 'FL':1, 'HR':2, 'HL':3}
+    for fi in range(N_FRAMES):
+        body_p = body_pos_hist[fi]
+        R_b    = body_R_hist[fi]
+        for leg_idx in range(4):
+            foot_actual_world_hist[fi, leg_idx] = body_p + R_b @ foot_hist[fi, leg_idx]
+    # swing target (smoothstep + bell, world frame)
+    for fi in range(N_FRAMES):
+        t = fi * DT
+        in_cycle_t = t % T
+        in_phase_A = in_cycle_t < (T / 2)
+        if in_phase_A:
+            swing_legs = ['FR','HL']; t_in_phase = in_cycle_t
+            phase_start_t = (t // T) * T
+        else:
+            swing_legs = ['FL','HR']; t_in_phase = in_cycle_t - T/2
+            phase_start_t = (t // T) * T + T/2
+        sw_t = max(0.0, min(1.0, t_in_phase / (T/2)))
+        for leg in swing_legs:
+            li = leg_to_idx[leg]
+            ps = foot_actual_world_hist[0, li].copy()
+            ps[0] += V * phase_start_t - STEP_LENGTH/2
+            pe = foot_actual_world_hist[0, li].copy()
+            pe[0] += V * (phase_start_t + T/2) + STEP_LENGTH/2
+            s_xy = sw_t * sw_t * (3.0 - 2.0 * sw_t)
+            tgt  = ps + s_xy * (pe - ps)
+            tgt[2] = ps[2] + STEP_HEIGHT * 16.0 * sw_t * sw_t * (1-sw_t) * (1-sw_t)
+            foot_target_world_hist[fi, li] = tgt
 
     # tau_grf / tau_dyn 후처리 (fig3/fig4 시각화용 분해)
     # tau_grf = -Jᵀ × R_body^T × λ_world  (body-local force)
@@ -3540,6 +3572,251 @@ ax_om.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gra
 fig5.suptitle(
     f'Body State vs Cmd  |  {GAIT_TYPE.upper()}  |  '
     f'v={V}m/s  T={T}s  D={D}  '
+    f'{"NMPC (FDDP)" if _USE_NMPC_ACTIVE else "MPC + WBIC"}',
+    color='white', fontsize=10)
+
+# ══════════════════════════════════════════════════════════════
+# 10. Figure 6: foot trajectory cmd vs actual (world frame)
+#    3 rows (x, y, z) × 4 cols (FR, FL, HR, HL)
+#    cmd shown only during swing (NaN during stance), actual continuous
+# ══════════════════════════════════════════════════════════════
+fig6 = plt.figure(figsize=(15, 9))
+fig6.patch.set_facecolor('#1a1a2e')
+gs6 = gridspec.GridSpec(3, 4, figure=fig6, wspace=0.32, hspace=0.55,
+                        left=0.05, right=0.98, top=0.92, bottom=0.06)
+
+def _style_ax6(ax, title, xlabel='Frame', ylabel=''):
+    ax.set_facecolor('#16213e')
+    ax.set_title(title, color='white', fontsize=8)
+    ax.set_xlabel(xlabel, color='white', fontsize=7)
+    ax.set_ylabel(ylabel, color='white', fontsize=7)
+    ax.tick_params(colors='gray', labelsize=7)
+    ax.grid(True, alpha=0.25, color='gray')
+    for sp in ax.spines.values():
+        sp.set_edgecolor('gray')
+
+_axis_lbl = ['x [m]', 'y [m]', 'z [m]']
+_leg_color = ['#ff6b6b', '#ffd166', '#06d6a0', '#4cc9f0']
+for li in range(4):
+    for ai in range(3):
+        ax_f = fig6.add_subplot(gs6[ai, li])
+        _style_ax6(ax_f, f'{LEG_NAMES[li]}  foot {_axis_lbl[ai].split()[0]}',
+                   ylabel=_axis_lbl[ai])
+        ax_f.set_xlim(0, N_FRAMES)
+        actual = foot_actual_world_hist[:, li, ai]
+        target = foot_target_world_hist[:, li, ai]
+        ax_f.plot(_fr, target, lw=1.6, color='#ff6b6b', ls='--', label='cmd (swing)')
+        ax_f.plot(_fr, actual, lw=1.4, color='#00d4ff',          label='actual')
+        # swing-end error (excluding NaN)
+        err = actual - target
+        valid = ~np.isnan(target)
+        if valid.sum() > 0:
+            err_max = float(np.max(np.abs(err[valid])))
+            err_rms = float(np.sqrt(np.mean(err[valid]**2)))
+            ax_f.set_title(
+                f'{LEG_NAMES[li]} {_axis_lbl[ai].split()[0]}  '
+                f'(swing err: rms={err_rms*1e3:.1f}mm max={err_max*1e3:.1f}mm)',
+                color='white', fontsize=8)
+        if ai == 0 and li == 0:
+            ax_f.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                        edgecolor='gray', loc='upper left')
+
+fig6.suptitle(
+    f'Foot Trajectory Cmd vs Actual (world frame)  |  {GAIT_TYPE.upper()}  |  '
+    f'v={V}m/s  T={T}s  step_h={STEP_HEIGHT*1e3:.0f}mm  step_l={STEP_LENGTH*1e3:.0f}mm  '
+    f'{"NMPC" if _USE_NMPC_ACTIVE else "MPC + WBIC"}',
+    color='white', fontsize=10)
+
+# ══════════════════════════════════════════════════════════════
+# 11. Figure 7: Gait diagram (Hildebrand-style stance chart)
+#    4 horizontal bars (legs) × time. 색칠 = stance, 비움 = swing.
+#    Fz 색상 진하기로 contact force 강도 시각화.
+# ══════════════════════════════════════════════════════════════
+fig7 = plt.figure(figsize=(13, 5))
+fig7.patch.set_facecolor('#1a1a2e')
+gs7 = gridspec.GridSpec(2, 1, figure=fig7, hspace=0.42,
+                        left=0.07, right=0.98, top=0.86, bottom=0.10,
+                        height_ratios=[3, 2])
+
+# Stance/swing 행렬 (fi×4)
+_stance_mat = np.zeros((N_FRAMES, 4), dtype=bool)
+for fi in range(N_FRAMES):
+    t = fi * DT
+    in_cycle_t = t % T
+    in_phase_A = in_cycle_t < (T / 2)
+    if in_phase_A:
+        _stance_mat[fi, 1] = True   # FL stance
+        _stance_mat[fi, 2] = True   # HR stance
+    else:
+        _stance_mat[fi, 0] = True   # FR stance
+        _stance_mat[fi, 3] = True   # HL stance
+
+# Top: gait diagram with Fz heatmap
+ax_g = fig7.add_subplot(gs7[0, 0])
+ax_g.set_facecolor('#16213e')
+ax_g.set_title(f'Gait Diagram  |  {GAIT_TYPE.upper()}  |  T={T}s  D={D}  '
+               f'(filled = stance, color depth = Fz [N])',
+               color='white', fontsize=9)
+ax_g.set_xlim(0, N_FRAMES)
+ax_g.set_ylim(-0.5, 3.5)
+ax_g.set_yticks([0, 1, 2, 3])
+ax_g.set_yticklabels(['FR', 'FL', 'HR', 'HL'], color='white')
+ax_g.set_xlabel('Frame', color='white', fontsize=8)
+ax_g.tick_params(colors='gray')
+ax_g.grid(True, alpha=0.2, axis='x', color='gray')
+for sp in ax_g.spines.values():
+    sp.set_edgecolor('gray')
+
+_fz_max = max(1.0, float(np.max(wbc_lam_des[:, :, 2])))
+for li in range(4):
+    fz = wbc_lam_des[:, li, 2]
+    # 인접 stance 구간 묶어서 그리기
+    in_stance = False
+    seg_start = 0
+    for fi in range(N_FRAMES + 1):
+        is_stance = _stance_mat[fi, li] if fi < N_FRAMES else False
+        if is_stance and not in_stance:
+            seg_start = fi
+            in_stance = True
+        elif not is_stance and in_stance:
+            seg_fz_avg = float(np.mean(fz[seg_start:fi]))
+            alpha = 0.25 + 0.7 * min(1.0, seg_fz_avg / _fz_max)
+            ax_g.fill_between([seg_start, fi], li - 0.35, li + 0.35,
+                              color='#06d6a0', alpha=alpha, edgecolor='none')
+            in_stance = False
+
+# Bottom: contact force Fz over time per leg (작은 line plot)
+ax_fz_all = fig7.add_subplot(gs7[1, 0])
+ax_fz_all.set_facecolor('#16213e')
+ax_fz_all.set_title('Contact Force Fz [N] per leg',
+                    color='white', fontsize=9)
+ax_fz_all.set_xlim(0, N_FRAMES)
+ax_fz_all.set_xlabel('Frame', color='white', fontsize=8)
+ax_fz_all.set_ylabel('Fz [N]', color='white', fontsize=8)
+ax_fz_all.tick_params(colors='gray')
+ax_fz_all.grid(True, alpha=0.25, color='gray')
+for sp in ax_fz_all.spines.values():
+    sp.set_edgecolor('gray')
+for li, (lname, lc) in enumerate(zip(LEG_NAMES, _leg_color)):
+    ax_fz_all.plot(_fr, wbc_lam_des[:, li, 2], lw=1.2, color=lc, label=lname)
+ax_fz_all.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                 edgecolor='gray', ncol=4)
+
+fig7.suptitle(
+    f'Gait Diagram  |  {GAIT_TYPE.upper()}  |  '
+    f'{"NMPC (FDDP)" if _USE_NMPC_ACTIVE else "MPC + WBIC"}',
+    color='white', fontsize=10)
+
+# ══════════════════════════════════════════════════════════════
+# 12. Figure 8: Diagnostic — friction cone 사용률 + CoT + slip + τ margin
+# ══════════════════════════════════════════════════════════════
+fig8 = plt.figure(figsize=(13, 9))
+fig8.patch.set_facecolor('#1a1a2e')
+gs8 = gridspec.GridSpec(2, 2, figure=fig8, wspace=0.32, hspace=0.50,
+                        left=0.07, right=0.97, top=0.92, bottom=0.07)
+
+def _style_ax8(ax, title, xlabel='Frame', ylabel=''):
+    ax.set_facecolor('#16213e')
+    ax.set_title(title, color='white', fontsize=9)
+    ax.set_xlabel(xlabel, color='white', fontsize=8)
+    ax.set_ylabel(ylabel, color='white', fontsize=8)
+    ax.tick_params(colors='gray')
+    ax.grid(True, alpha=0.25, color='gray')
+    for sp in ax.spines.values():
+        sp.set_edgecolor('gray')
+
+# (1) Friction cone usage ratio: |F_xy| / (μ·F_z) per leg per frame (stance only)
+ax_fc = fig8.add_subplot(gs8[0, 0])
+fc_ratio = np.zeros((N_FRAMES, 4))
+for li in range(4):
+    fxy = np.linalg.norm(wbc_lam_des[:, li, :2], axis=1)
+    fz  = wbc_lam_des[:, li, 2]
+    safe = fz > 1.0
+    fc_ratio[safe, li] = fxy[safe] / (MU_FRICTION * fz[safe])
+    fc_ratio[~safe, li] = np.nan
+fc_max_per_leg = [float(np.nanmax(fc_ratio[:, li])) for li in range(4)]
+fc_p95_per_leg = [float(np.nanpercentile(fc_ratio[:, li], 95)) for li in range(4)]
+_style_ax8(ax_fc,
+    f'Friction Cone Usage  |F_xy|/(μ·F_z)  μ={MU_FRICTION}  '
+    f'(>1 = slip)\n'
+    f'peak: FR={fc_max_per_leg[0]:.2f} FL={fc_max_per_leg[1]:.2f} '
+    f'HR={fc_max_per_leg[2]:.2f} HL={fc_max_per_leg[3]:.2f}',
+    ylabel='ratio')
+ax_fc.set_xlim(0, N_FRAMES)
+for li, (lname, lc) in enumerate(zip(LEG_NAMES, _leg_color)):
+    ax_fc.plot(_fr, fc_ratio[:, li], lw=1.2, color=lc, label=lname)
+ax_fc.axhline(1.0, color='red', lw=1.0, ls='--', alpha=0.6, label='slip threshold')
+ax_fc.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+             edgecolor='gray', ncol=5)
+
+# (2) Mechanical power + Cost-of-Transport
+ax_pw = fig8.add_subplot(gs8[0, 1])
+# dq from numerical gradient of joint_hist, then power = Σ |τ × dq|
+dq_num = np.gradient(joint_hist, axis=0) / DT   # (N_FRAMES, 4, N_JOINTS_MAX)
+power_per_leg = np.sum(np.abs(wbc_tau_cmd * dq_num), axis=2)   # (N_FRAMES, 4)
+power_total   = np.sum(power_per_leg, axis=1)                  # (N_FRAMES,)
+v_actual = np.linalg.norm(body_v_hist, axis=1)                 # speed
+cot_inst = power_total / np.maximum(TOTAL_MASS * G_ACC * np.maximum(v_actual, 0.05), 1e-3)
+power_avg = float(np.mean(power_total))
+cot_avg   = float(np.mean(cot_inst))
+_style_ax8(ax_pw,
+    f'Mechanical Power [W]  +  CoT (right axis)\n'
+    f'P_avg={power_avg:.1f}W  P_peak={float(np.max(power_total)):.1f}W  '
+    f'CoT_avg={cot_avg:.2f}  (lower = more efficient)',
+    ylabel='Power [W]')
+ax_pw.set_xlim(0, N_FRAMES)
+ax_pw.plot(_fr, power_total, lw=1.4, color='#06d6a0', label='Σ |τ·dq|')
+ax_pw.axhline(power_avg, color='#06d6a0', lw=0.8, ls='--', alpha=0.5)
+ax_pw_r = ax_pw.twinx()
+ax_pw_r.plot(_fr, cot_inst, lw=1.0, color='#ffd166', alpha=0.7, label='CoT')
+ax_pw_r.set_ylabel('CoT (-)', color='#ffd166', fontsize=8)
+ax_pw_r.tick_params(axis='y', colors='#ffd166')
+ax_pw.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+             edgecolor='gray', loc='upper left')
+ax_pw_r.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+               edgecolor='gray', loc='upper right')
+
+# (3) Stance foot slip velocity (foot world-frame ‖v‖, stance only)
+ax_sl = fig8.add_subplot(gs8[1, 0])
+v_foot_world = np.gradient(foot_actual_world_hist, axis=0) / DT   # (N_FRAMES, 4, 3)
+slip_speed = np.linalg.norm(v_foot_world, axis=2)                  # (N_FRAMES, 4)
+slip_stance = np.where(_stance_mat, slip_speed, np.nan)
+slip_max_per_leg = [float(np.nanmax(slip_stance[:, li])) for li in range(4)]
+_style_ax8(ax_sl,
+    f'Stance Foot Slip Velocity ‖v_foot‖ [m/s]  (ideal: 0)\n'
+    f'peak: FR={slip_max_per_leg[0]:.2f} FL={slip_max_per_leg[1]:.2f} '
+    f'HR={slip_max_per_leg[2]:.2f} HL={slip_max_per_leg[3]:.2f}',
+    ylabel='|v| [m/s]')
+ax_sl.set_xlim(0, N_FRAMES)
+for li, (lname, lc) in enumerate(zip(LEG_NAMES, _leg_color)):
+    ax_sl.plot(_fr, slip_stance[:, li], lw=1.2, color=lc, label=lname)
+ax_sl.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+             edgecolor='gray', ncol=4)
+
+# (4) Torque saturation margin: |τ| / τ_limit (per joint per leg, max across joints)
+ax_tm = fig8.add_subplot(gs8[1, 1])
+# 가장 위험한 joint = 가장 큰 |τ|/limit ratio per frame
+tau_ratio = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
+for j in range(N_JOINTS_MAX):
+    if j < len(JOINT_TORQUE_LIMIT) and JOINT_TORQUE_LIMIT[j] > 0:
+        tau_ratio[:, :, j] = np.abs(wbc_tau_cmd[:, :, j]) / JOINT_TORQUE_LIMIT[j]
+tau_ratio_worst = np.max(tau_ratio, axis=2)   # (N_FRAMES, 4)
+tau_max_per_leg = [float(np.max(tau_ratio_worst[:, li])) for li in range(4)]
+_style_ax8(ax_tm,
+    f'Torque Saturation: max_j |τ_j|/τ_limit_j per leg  (>1 = saturate)\n'
+    f'peak: FR={tau_max_per_leg[0]:.2f} FL={tau_max_per_leg[1]:.2f} '
+    f'HR={tau_max_per_leg[2]:.2f} HL={tau_max_per_leg[3]:.2f}',
+    ylabel='|τ|/τ_max')
+ax_tm.set_xlim(0, N_FRAMES)
+for li, (lname, lc) in enumerate(zip(LEG_NAMES, _leg_color)):
+    ax_tm.plot(_fr, tau_ratio_worst[:, li], lw=1.2, color=lc, label=lname)
+ax_tm.axhline(1.0, color='red', lw=1.0, ls='--', alpha=0.6, label='saturation')
+ax_tm.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+             edgecolor='gray', ncol=5)
+
+fig8.suptitle(
+    f'Diagnostic  |  {GAIT_TYPE.upper()}  |  '
+    f'v={V}m/s  T={T}s  μ={MU_FRICTION}  '
     f'{"NMPC (FDDP)" if _USE_NMPC_ACTIVE else "MPC + WBIC"}',
     color='white', fontsize=10)
 
