@@ -59,6 +59,7 @@ import os
 import sys
 import pickle
 import time
+from dataclasses import dataclass, field
 import numpy as np
 import qpsolvers
 
@@ -96,11 +97,119 @@ mpl.rcParams['font.sans-serif'] = ['DejaVu Sans', 'NanumGothic', 'Arial Unicode 
 mpl.rcParams['axes.unicode_minus'] = False
 
 # ══════════════════════════════════════════════════════════════
-# 0. 파라미터
+# 0. 파라미터 — GaitConfig dataclass (모든 user-tunable 파라미터 통합)
 # ══════════════════════════════════════════════════════════════
-GAIT_TYPE   = 'trot'   # 'walk', 'amble', 'pace', 'trot', 'canter', 'gallop'
-DT          = 0.002 # s (시뮬레이터 타임스텝, WBC 제어 주기) 0.002s 이상이어야 함 (QP GRF fallback 고려)
-N_CYCLES    = 4 # 사이클 수 (1사이클 = 1주기 = T초 동안의 발 움직임 패턴)
+# 사용:
+#   - 기본 동작: 아래 필드 default 값을 직접 수정하고 재실행
+#   - 임시 실험: 파일 끝에서 CFG = GaitConfig(use_nmpc=False, ...) 로 재생성
+#     (단, 모듈 globals(GAIT_TYPE 등)는 아래 alias 라인에서 한 번만 평가되므로
+#      runtime 변경 시 alias 도 다시 할당 필요)
+#   - 카테고리 별 설명은 README 또는 v12.4 commit message 참조
+# ──────────────────────────────────────────────────────────────
+@dataclass
+class GaitConfig:
+    """v12 NMPC + WBIC + MPC + IK 통합 설정. 섹션별로 묶음."""
+    # ─────────── Gait pattern ───────────
+    gait_type: str = 'trot'       # 'walk' / 'amble' / 'pace' / 'trot' / 'canter' / 'gallop'
+    dt: float = 0.002             # 시뮬 타임스텝 [s] (WBC 제어 주기)
+    n_cycles: int = 4             # 사이클 수
+    tau_land: float = 1.0         # swing phase 내 착지 비율 (0~1)
+    # ─────────── Robot geometry ───────────
+    body_fwd_f: float = 0.250     # 앞다리 hip x [m]
+    body_fwd_h: float = -0.250    # 뒷다리 hip x [m]
+    body_lat: float = 0.050       # 좌우 hip y [m]
+    body_z_h: float = -0.050      # 뒷다리 hip z 오프셋 [m]
+    hip_y_bias: float = 0.0075    # ⚠ DH d2 비대칭 (= +y 시프트, body y drift 원인)
+    # ─────────── Robot mass / inertia ───────────
+    body_mass: float = 15.0       # body 질량 [kg]
+    g_acc: float = 9.81           # [m/s²]
+    link_mass: np.ndarray = field(default_factory=lambda: np.array([3., 2., 1., 0.2, 0.1]))
+    link_radius: float = 0.015    # 링크 단면 반경 [m] (RNEA 원통 관성용)
+    body_inertia: np.ndarray = field(default_factory=lambda: np.diag([0.07, 0.26, 0.26]))
+    # ─────────── Joint motor limits ───────────
+    joint_vel_limit_rad_s: np.ndarray = field(
+        default_factory=lambda: np.array([14.66, 15.91, 15.91, 14.66, 14.66]))
+    joint_torque_limit: np.ndarray = field(
+        default_factory=lambda: np.array([60., 120., 120., 60., 60.]))
+    vel_limit_margin: float = 999
+    # ─────────── Joint PD / impedance ───────────
+    kp_pd: np.ndarray = field(default_factory=lambda: np.array([30., 80., 80., 60., 20.]))
+    kd_pd: np.ndarray = field(default_factory=lambda: np.array([3., 8., 8., 6., 2.]))
+    kp_imp: np.ndarray = field(default_factory=lambda: np.array([400., 400., 400.]))
+    kd_imp: np.ndarray = field(default_factory=lambda: np.array([20., 20., 20.]))
+    # ─────────── Friction / actuator dynamics ───────────
+    mu_friction: float = 0.6      # 마찰 계수 (friction cone)
+    mu_damp: float = 1e-3         # joint damping
+    tau_lag: float = 0.03         # actuator 1st-order lag [s]
+    init_err_rad: float = math.radians(1.0)
+    grf_ramp_ratio: float = 0.10  # stance 시작/끝 GRF ramp 구간 비율
+    stance_delta: float = 0.005
+    # ─────────── Optimization-based IK ───────────
+    lambda_q_opt: float = 1.0     # smoothness weight
+    lambda_tau_opt: float = 0.01  # torque minimize weight
+    opt_ik_maxiter: int = 100
+    opt_ik_use_vel_limit: bool = True
+    opt_ik_use_tau_limit: bool = True
+    use_swing_qref_blend: bool = True
+    max_traj_opt_iters: int = 6
+    # ─────────── Linear MPC (body trajectory) ───────────
+    use_mpc: bool = True
+    use_mpc_closed_loop: bool = True
+    n_mpc: int = 10               # horizon length
+    # ─────────── WBIC ───────────
+    use_wbic: bool = True
+    use_wbic_fb: bool = True
+    use_body_dynamics: bool = True
+    use_stance_foot_constraint: bool = False
+    wbic_w_ddq: float = 1.0
+    wbic_w_tau: float = 0.01
+    wbic_w_lam: float = 0.001
+    wbic_lamz_min: float = 1.0    # stance 발 최소 법선력 [N]
+    wbic_w_fb: float = 0.1        # body fb weight
+    # ─────────── NMPC: solver ───────────
+    use_nmpc: bool = True
+    use_nmpc_receding: bool = True
+    nmpc_maxiter: int = 200
+    nmpc_init_reg: float = 1.0
+    nmpc_rh_n_horizon: int = 24   # 0.5s @ DT_MPC=0.02
+    nmpc_rh_n_resolve: int = 12   # half cycle re-solve
+    nmpc_rh_maxiter: int = 50
+    # ─────────── NMPC: cost weights ───────────
+    nmpc_w_track_xy: float = 100.0
+    nmpc_w_track_z: float = 10000.0
+    nmpc_baumgarte_kp: float = 0.0
+    nmpc_baumgarte_kd: float = 20.0
+    nmpc_w_state_reg: float = 1.0
+    nmpc_w_ctrl_reg: float = 1e-3
+    nmpc_w_terminal: float = 1e2
+    nmpc_w_friction: float = 1.0
+    nmpc_fric_nf: int = 4         # pyramid sides (4 / 8)
+    nmpc_fric_fz_max: float = 1e4 # 최대 normal force [N]
+    nmpc_w_force_reg: float = 1e-4
+    nmpc_w_force_xy: float = 5.0
+    nmpc_w_force_z: float = 1.0
+    nmpc_w_tau_lim: float = 1e-2
+    nmpc_w_touchdown_v: float = 1e1
+    nmpc_touchdown_last_n: int = 2
+    nmpc_w_stance_pos_xy: float = 1e2
+    nmpc_w_stance_pos_z: float = 2.0
+    # ─────────── Perturbation test ───────────
+    use_perturbation: bool = False
+    perturb_time: float = 1.0     # [s]
+    perturb_vel_lin: np.ndarray = field(default_factory=lambda: np.array([0., 0.5, 0.]))
+    perturb_vel_ang: np.ndarray = field(default_factory=lambda: np.array([0., 0., 0.]))
+    # ─────────── Pinocchio backend ───────────
+    use_pinocchio: bool = False
+    use_pinocchio_full_m: bool = False
+    # ─────────── Visualization ───────────
+    viz_body_mode: str = 'world'  # 'static' / 'world' / 'body_follow'
+
+CFG = GaitConfig()
+
+# ── 모듈 globals: CFG 필드 alias (기존 v11/v12 코드 호환) ────────
+GAIT_TYPE   = CFG.gait_type
+DT          = CFG.dt
+N_CYCLES    = CFG.n_cycles
 
 # ── Gait 프리셋 (V/T/D/STEP_HEIGHT/offsets 통합) ────────────────
 # offsets: phase=0이 swing 시작인 컨벤션, 순서 [FR, FL, HR, HL]
@@ -123,7 +232,7 @@ V           = _preset['V']            # m/s (전진 속도)
 T           = _preset['T']            # s (사이클 주기)
 D           = _preset['D']            # swing 비율 (T_SW/T)
 STEP_HEIGHT = _preset['STEP_HEIGHT']  # m (발 들리는 높이)
-TAU_LAND    = 1.0 # (swing phase 내 착지까지의 비율, 0~1) 1.0이면 선형 보간
+TAU_LAND    = CFG.tau_land
 
 T_SW = T * D
 T_ST = T * (1.0 - D)
@@ -133,12 +242,12 @@ STRIDE_D     = V * T + 2.0 * V * T_SW
 assert STRIDE_D >= STRIDE_D_MIN, f"STRIDE_D({STRIDE_D:.3f}m) < MIN({STRIDE_D_MIN:.3f}m)"
 
 STEP_LENGTH = STRIDE_D / 2.0 - V * T_SW
-STANCE_DELTA = 0.005
+STANCE_DELTA = CFG.stance_delta
 
-BODY_FWD_F =  0.250
-BODY_FWD_H = -0.250
-BODY_LAT   =  0.050
-BODY_Z_H   = -0.050  # 앞다리보다 아래쪽으로 뒷다리 힙의 수직(Z) 오프셋 [m]
+BODY_FWD_F = CFG.body_fwd_f
+BODY_FWD_H = CFG.body_fwd_h
+BODY_LAT   = CFG.body_lat
+BODY_Z_H   = CFG.body_z_h
 
 # ── DH 파라미터 ──────────────────────────────────────────────
 DH_FRONT = [
@@ -193,7 +302,7 @@ N_JOINTS_MAX     = 5
 # DH의 D2 오프셋(=0.0075)으로 인한 좌우 비대칭 보정:
 # foot_local_y = -0.0075 (모든 다리 동일) → hip_y에 +0.0075 적용 시
 # foot_world_y = ±BODY_LAT 정확히 대칭 (CoM 기준 roll moment ≈ 0)
-_HIP_Y_BIAS = 0.0075   # ≡ DH dh[1][2] (= D2_F = D2_H)
+_HIP_Y_BIAS = CFG.hip_y_bias   # ≡ DH dh[1][2] (= D2_F = D2_H)
 LEG_HIP_OFFSETS = np.array([
     [+BODY_FWD_F, -BODY_LAT + _HIP_Y_BIAS, 0.0     ],
     [+BODY_FWD_F, +BODY_LAT + _HIP_Y_BIAS, 0.0     ],
@@ -204,33 +313,32 @@ LEG_HIP_OFFSETS = np.array([
 PHASE_OFFSETS = {name: cfg['offsets'] for name, cfg in GAIT_PRESETS.items()}
 
 # ── WBC 파라미터 ─────────────────────────────────────────────
-BODY_MASS = 15.0 # kg (몸무게)
-G_ACC     = 9.81
+BODY_MASS = CFG.body_mass
+G_ACC     = CFG.g_acc
 
 #LINK_MASS         = np.array([3.34, 0.8, 0.2, 0.2, 0.05])  # link1~5 질량 [kg]
 #LINK_MASS         = np.array([4.125, 1.795, 0.78, 0.78, 0.05])  # link1~5 질량 [kg] 
-LINK_MASS         = np.array([3, 2, 1, 0.2, 0.1])  # link1~5 질량 [kg] 
+LINK_MASS         = CFG.link_mass
 # 80형번 0.915kg, 90형번 1.605kg
 LINK_MASS_PER_LEG = [LINK_MASS] * 4
 TOTAL_MASS        = BODY_MASS + float(np.sum(LINK_MASS)) * 4.0
-LINK_RADIUS       = 0.015   # [m] 링크 단면 반경 근사 (RNEA 원통 관성 텐서용)
+LINK_RADIUS       = CFG.link_radius
 
-KP_PD = np.array([30.0, 80.0, 80.0, 60.0, 20.0])
-KD_PD = np.array([ 3.0,  8.0,  8.0,  6.0,  2.0])
-KP_IMP = np.array([400.0, 400.0, 400.0])
-KD_IMP = np.array([ 20.0,  20.0,  20.0])
+KP_PD  = CFG.kp_pd
+KD_PD  = CFG.kd_pd
+KP_IMP = CFG.kp_imp
+KD_IMP = CFG.kd_imp
 
-MU_DAMP      = 1e-3
-TAU_LAG      = 0.03
-INIT_ERR_RAD = math.radians(1.0)
+MU_DAMP      = CFG.mu_damp
+TAU_LAG      = CFG.tau_lag
+INIT_ERR_RAD = CFG.init_err_rad
 
 # ── MPC / QP GRF 파라미터 ────────────────────────────────────
-MU_FRICTION  = 0.6       # 마찰 계수
+MU_FRICTION  = CFG.mu_friction
 
-# 본체 관성 텐서 (직육면체 근사, 0.5×0.1×0.1m, 15kg) [kg·m²]
-BODY_INERTIA = np.diag([0.07, 0.26, 0.26])   # Ixx, Iyy, Izz
+BODY_INERTIA = CFG.body_inertia
 
-N_MPC  = 10              # MPC 예측 구간 [스텝]
+N_MPC  = CFG.n_mpc
 DT_MPC = DT * 10         # MPC 샘플링 주기 [s]  (= 0.02s)
 
 # MPC 상태 가중치: x=[roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
@@ -244,11 +352,11 @@ _Q_DIAG = np.array([
 MPC_Q = np.diag(_Q_DIAG)
 MPC_R = 1e-6 * np.eye(3)   # GRF 가중치 (per foot, 3×3)
 
-USE_MPC = True   # False → QP GRF (단일 스텝 fallback) 사용
+USE_MPC = CFG.use_mpc
 
 # Contact GRF ramp: stance 시작/끝 N% 구간에서 λ_des를 smoothstep으로 ramp.
 # swing↔stance 경계의 cmd torque step jump 완화 (논문 임피던스 흡수 효과).
-GRF_RAMP_RATIO = 0.10
+GRF_RAMP_RATIO = CFG.grf_ramp_ratio
 
 # ══════════════════════════════════════════════════════════════
 # 1. 기구학
@@ -1501,41 +1609,41 @@ foot_target_world_hist = np.full((N_FRAMES, 4, 3), np.nan)   # NMPC swing target
 foot_actual_world_hist = np.zeros((N_FRAMES, 4, 3))            # actual foot world pos
 frame_calc_time = np.zeros(N_FRAMES, dtype=float)
 
-JOINT_VEL_LIMIT_RAD_S   = np.array([14.66, 15.91, 15.91, 14.66, 14.66], dtype=float)
-JOINT_TORQUE_LIMIT      = np.array([60.0, 120.0, 120.0, 60.0, 60.0])   # [N·m]
-VEL_LIMIT_MARGIN  = 999
+JOINT_VEL_LIMIT_RAD_S   = CFG.joint_vel_limit_rad_s.astype(float)
+JOINT_TORQUE_LIMIT      = CFG.joint_torque_limit
+VEL_LIMIT_MARGIN  = CFG.vel_limit_margin
 
 # ── Phase 4: Optimization-based IK 파라미터 ──────────────────
-LAMBDA_Q_OPT   = 1.0    # smoothness 가중치 (||q - q_init||², warm-start 변화량 최소화)
-LAMBDA_TAU_OPT = 0.01   # 토크 minimize 가중치 (||τ_grav(q)||², redundancy를 토크 작은 자세로 자동 활용)
-OPT_IK_MAXITER = 100
+LAMBDA_Q_OPT   = CFG.lambda_q_opt
+LAMBDA_TAU_OPT = CFG.lambda_tau_opt
+OPT_IK_MAXITER = CFG.opt_ik_maxiter
 
 # 제약 ON/OFF — True/False 한 줄로 켜고 끔
-OPT_IK_USE_VEL_LIMIT = True   # 각속도 제약: |Δq/DT| ≤ JOINT_VEL_LIMIT_RAD_S (bounds 동적 수축)
-OPT_IK_USE_TAU_LIMIT = True   # 토크 제약: |τ_grav(q)| ≤ JOINT_TORQUE_LIMIT  (근사, 속도 영향)
+OPT_IK_USE_VEL_LIMIT = CFG.opt_ik_use_vel_limit
+OPT_IK_USE_TAU_LIMIT = CFG.opt_ik_use_tau_limit
 
 # ── Phase 5: WBIC QP 파라미터 ────────────────────────────────
-USE_WBIC      = True     # False면 v8 동작 (RNEA τ_ff 직접 사용 + clip)
-WBIC_W_DDQ    = 1.0      # ‖Δq̈‖² 가중치 (가속도 추종)
-WBIC_W_TAU    = 0.01     # ‖Δτ‖² 가중치 (τ_ff 변경 최소화)
-WBIC_W_LAM    = 0.001    # ‖Δλ‖² 가중치 (λ_des 변경 최소화)
-WBIC_LAMZ_MIN = 1.0      # stance 발 최소 법선력 [N]
+USE_WBIC      = CFG.use_wbic
+WBIC_W_DDQ    = CFG.wbic_w_ddq
+WBIC_W_TAU    = CFG.wbic_w_tau
+WBIC_W_LAM    = CFG.wbic_w_lam
+WBIC_LAMZ_MIN = CFG.wbic_lamz_min
 
 # ── v11 Phase 7: Floating-base 동역학 + WBIC FB 파라미터 ─────
-USE_BODY_DYNAMICS = True  # True: GRF 기반 body 6-DoF 적분 (v11, 진단 목적), False: V·t kinematic
+USE_BODY_DYNAMICS = CFG.use_body_dynamics
 # v11 Phase 7: Pinocchio dynamics 백엔드 (URDF 우회, DH→pinocchio.Model 직접 빌드)
 # True : pin_helpers.py의 rnea/compute_mh_leg/compute_jacobian_sim 사용 (검증된 정확)
 # False: v11 native 함수 사용 (이전 동작)
-USE_PINOCCHIO = False
+USE_PINOCCHIO = CFG.use_pinocchio
 # 실험적: USE_PINOCCHIO + USE_WBIC_FB일 때 Full M(q) (26×26 floating base 결합) 사용
 # 현재 90% solver fail (per-leg τ_ff와 full M 모델 inconsistency).
 # False면 pinocchio per-leg M(5×5) 사용 (block-diagonal, 안정).
-USE_PINOCCHIO_FULL_M = False
+USE_PINOCCHIO_FULL_M = CFG.use_pinocchio_full_m
 # v11 ANYmal-style: stance foot acceleration = 0 제약 (soft cost term)
 # 코드는 wbic_qp_full에 통합되어 있지만 효과 검증 결과 본질 해결 X.
 # 원인: body 발산은 MPC linearization 한계라서 WBIC 제약 추가로는 못 잡음.
 # 실험용 토글 (default False).
-USE_STANCE_FOOT_CONSTRAINT = False
+USE_STANCE_FOOT_CONSTRAINT = CFG.use_stance_foot_constraint
 # v11 토글 조합:
 #   (CL=False, FB=False) ← 기본. v10 호환 동작 + body state 진단 추적
 #                          body는 발산 가능 (open-loop). 시각화는 VIZ='static' 권장
@@ -1543,56 +1651,43 @@ USE_STANCE_FOOT_CONSTRAINT = False
 #                          여전히 80°+ 까지 발산 (선형 MPC 한계). VIZ='world' 가능
 #   (CL=True,  FB=False) — 위험: 선형 MPC가 큰 보정 시도→발산. 사용 권장X
 #   (CL=False, FB=True)  — body 평형 강제, MPC는 idealized
-USE_WBIC_FB         = True
-USE_MPC_CLOSED_LOOP = True
-WBIC_W_FB           = 0.1   # ‖Δv̇_fb‖² 가중치 (body acc 보정 최소화)
+USE_WBIC_FB         = CFG.use_wbic_fb
+USE_MPC_CLOSED_LOOP = CFG.use_mpc_closed_loop
+WBIC_W_FB           = CFG.wbic_w_fb
 
 # v12: crocoddyl NMPC 토글
 # True : 시뮬 시작 시 한번 NMPC 풀이 → trajectory 사용 (MPC+WBIC 우회)
 # False: v11 동작 유지 (MPC + WBIC)
 # 권장 N_CYCLES ≤ 2 (one-shot FDDP 한계, multi-cycle은 receding horizon 필요)
-USE_NMPC = True
-USE_NMPC_RECEDING = True       # True: receding horizon (multi-cycle 안정), False: one-shot
-NMPC_W_TRACK_XY = 100.0       # foot tracking xy weight (튜닝 결과)
-NMPC_W_TRACK_Z  = 10000.0     # foot tracking z weight (swing peak 정확)
-NMPC_BAUMGARTE_KP = 0.0       # contact baumgarte (Kp>0 시도해봤으나 explicit Euler에서 발산 경향, future tuning)
-NMPC_BAUMGARTE_KD = 20.0      # contact baumgarte (velocity damping)
-NMPC_W_STATE_REG  = 1e0       # state regularization
-NMPC_W_CTRL_REG   = 1e-3      # control regularization
-NMPC_W_TERMINAL   = 1e2       # terminal state cost
-NMPC_MAXITER      = 200
-NMPC_INIT_REG     = 1.0
-# Receding horizon: 매 N_RESOLVE step마다 N_HORIZON 길이의 NMPC 풀이 (warm-start)
-NMPC_RH_N_HORIZON = 24         # horizon length (steps) — 1 cycle for trot
-NMPC_RH_N_RESOLVE = 12         # re-solve every N steps (half cycle)
-NMPC_RH_MAXITER   = 50         # warm-start로 적은 iter
-# Friction cone barrier (stance leg마다 |Fxy| ≤ μ·Fz, Fz ≥ 0 soft constraint)
-# weight 너무 크면 수렴 어려움 / 너무 작으면 효과 없음 → 1e-2 ~ 1e+1 사이 튜닝
-NMPC_W_FRICTION    = 1e0       # quadratic barrier weight on cone violation
-NMPC_FRIC_NF       = 4         # pyramid sides (4-side / 8-side)
-NMPC_FRIC_FZ_MAX   = 1e4       # 최대 normal force [N] (over-spike 억제)
-# Contact force regularization (target=0, weight Fxy>Fz로 lateral spike 억제)
-# 너무 크면 stance leg 가 정지 마찰력 못 만들어 미끄러짐 → 1e-5 ~ 1e-3 권장
-NMPC_W_FORCE_REG   = 1e-4
-NMPC_W_FORCE_XY    = 5.0        # x,y 성분 가중 (z 대비)
-NMPC_W_FORCE_Z     = 1.0        # z 성분 가중
-# Joint torque limit barrier (|u_i| ≤ JOINT_TORQUE_LIMIT[i], soft penalty)
-NMPC_W_TAU_LIM     = 1e-2
-# Pre-touchdown velocity penalty: swing 마지막 N step에서 발 v_world → 0
-# 충격 감쇄 (impact spike 직접 억제)
-NMPC_W_TOUCHDOWN_V    = 1e1   # weight on |v_foot|² (linear part)
-NMPC_TOUCHDOWN_LAST_N = 2     # 마지막 몇 step에 적용
-# Stance leg foot 위치 잠금 (slip 방지)
-# Baumgarte Kp=0 으로 인한 mid-stance drift (~40mm/stance) 보완
-# Position residual + weighted activation, xy 강 / z 약 (z는 contact constraint으로 충분)
-NMPC_W_STANCE_POS_XY = 1e2    # foot xy 위치 유지 weight
-NMPC_W_STANCE_POS_Z  = 2e0    # foot z 는 contact가 잡으니 약하게
-# Perturbation test: receding horizon 도중 body state에 외란 주입
-# (NMPC re-solve로 회복하는지 검증)
-USE_PERTURBATION   = False
-PERTURB_TIME       = 1.0       # [s] (cycle 2 phase A 중간)
-PERTURB_VEL_LIN    = np.array([0.0, 0.5, 0.0])    # body linear velocity 추가 [m/s]
-PERTURB_VEL_ANG    = np.array([0.0, 0.0, 0.0])    # body angular velocity 추가 [rad/s]
+USE_NMPC          = CFG.use_nmpc
+USE_NMPC_RECEDING = CFG.use_nmpc_receding
+NMPC_W_TRACK_XY   = CFG.nmpc_w_track_xy
+NMPC_W_TRACK_Z    = CFG.nmpc_w_track_z
+NMPC_BAUMGARTE_KP = CFG.nmpc_baumgarte_kp
+NMPC_BAUMGARTE_KD = CFG.nmpc_baumgarte_kd
+NMPC_W_STATE_REG  = CFG.nmpc_w_state_reg
+NMPC_W_CTRL_REG   = CFG.nmpc_w_ctrl_reg
+NMPC_W_TERMINAL   = CFG.nmpc_w_terminal
+NMPC_MAXITER      = CFG.nmpc_maxiter
+NMPC_INIT_REG     = CFG.nmpc_init_reg
+NMPC_RH_N_HORIZON = CFG.nmpc_rh_n_horizon
+NMPC_RH_N_RESOLVE = CFG.nmpc_rh_n_resolve
+NMPC_RH_MAXITER   = CFG.nmpc_rh_maxiter
+NMPC_W_FRICTION   = CFG.nmpc_w_friction
+NMPC_FRIC_NF      = CFG.nmpc_fric_nf
+NMPC_FRIC_FZ_MAX  = CFG.nmpc_fric_fz_max
+NMPC_W_FORCE_REG  = CFG.nmpc_w_force_reg
+NMPC_W_FORCE_XY   = CFG.nmpc_w_force_xy
+NMPC_W_FORCE_Z    = CFG.nmpc_w_force_z
+NMPC_W_TAU_LIM    = CFG.nmpc_w_tau_lim
+NMPC_W_TOUCHDOWN_V    = CFG.nmpc_w_touchdown_v
+NMPC_TOUCHDOWN_LAST_N = CFG.nmpc_touchdown_last_n
+NMPC_W_STANCE_POS_XY  = CFG.nmpc_w_stance_pos_xy
+NMPC_W_STANCE_POS_Z   = CFG.nmpc_w_stance_pos_z
+USE_PERTURBATION  = CFG.use_perturbation
+PERTURB_TIME      = CFG.perturb_time
+PERTURB_VEL_LIN   = CFG.perturb_vel_lin
+PERTURB_VEL_ANG   = CFG.perturb_vel_ang
 # 단순 body 궤적 (steady ref): upright + V 직진 + z=0
 # 형식: [roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
 # px/py weight=0이라 자유, pz=0 추종, vx=V 추종, 자세는 0(평탄) 추종
@@ -1610,8 +1705,8 @@ BODY_REF_STEP = np.array([
 #   'body_follow' : 카메라가 body_pos 따라감, R 회전만 적용 (자세 진단용)
 # ※ trot+open-loop+FB=False 조합에선 body roll 179°까지 발산 → 'world' 모드에서
 #   다리가 거의 수평으로 누워보임. body_dyn 보고 싶으면 closed-loop+FB 둘 다 ON 권장.
-VIZ_BODY_MODE = 'world' 
-USE_SWING_QREF_BLEND = True   # True: swing1/swing2 → Q_SWING_FRONT blend / False: home 고정
+VIZ_BODY_MODE = CFG.viz_body_mode
+USE_SWING_QREF_BLEND = CFG.use_swing_qref_blend
 # ↑ 권장: trot/pace = True (발 들기 효과), walk/amble = False (jerk 폭주 방지) or 속도한계완화
 
 # 앞다리 관절 위치 한계 [rad]  — home: [0, 157.5, 22.5, 30.66, 59.34] deg
@@ -1631,7 +1726,7 @@ HIND_Q_LIM = [
 
     (-math.radians(90),   math.radians(120)), # th5: 발끝
 ]
-MAX_TRAJ_OPT_ITERS = 6
+MAX_TRAJ_OPT_ITERS = CFG.max_traj_opt_iters
 
 print("─" * 55)
 print(f"궤적 계산 중...  [{GAIT_TYPE}]  {N_CYCLES}사이클  {N_FRAMES}프레임")
