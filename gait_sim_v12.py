@@ -1966,7 +1966,7 @@ def _solve_nmpc_trot():
     import pinocchio as pin
     if not _CROCODDYL_AVAILABLE:
         print("  ⚠ crocoddyl 미설치 — USE_NMPC 비활성")
-        return None, None, False, None, None
+        return None, None, None, False, None, None
 
     # pinocchio Model 빌드 (build_pin_model의 quadruped)
     pin_model = _bm.build_model()
@@ -2005,7 +2005,7 @@ def _solve_nmpc_trot():
     # Gait phase (trot 가정, swing_ratio=0.5; 추후 다른 gait 확장)
     if GAIT_TYPE != 'trot':
         print(f"  ⚠ NMPC는 현재 trot만 지원 (현재 GAIT_TYPE={GAIT_TYPE})")
-        return None, None, False
+        return None, None, None, False, None, None
     N_PER_PHASE = int((T / 2) / DT_MPC)   # T/2 / DT_MPC
     DT_NMPC = T / 2 / N_PER_PHASE   # 정확히 T/2 = N_PER_PHASE × DT_NMPC
     N_TOTAL = N_PER_PHASE * 2 * N_CYCLES
@@ -2088,7 +2088,21 @@ def _solve_nmpc_trot():
                         is_feasible=False, init_reg=NMPC_INIT_REG)
     elapsed = time.time() - t_solve
     print(f"  NMPC: done={done}, iters={solver.iter}, time={elapsed*1e3:.0f}ms, cost={solver.cost:.2e}")
-    return np.array(solver.xs), np.array(solver.us), done, pin_model, pin_data
+    # Contact forces 추출 (각 step의 GRF, world frame)
+    forces = []
+    for k in range(N_TOTAL):
+        f_step = {leg: np.zeros(3) for leg in ['FR','FL','HR','HL']}
+        try:
+            ad_k = solver.problem.runningDatas[k]
+            contacts = ad_k.differential.multibody.contacts.contacts.todict()
+            for name, cdata in contacts.items():
+                leg = name.replace('c_', '')
+                if leg in f_step:
+                    f_step[leg] = np.array(cdata.f.linear).copy()
+        except Exception:
+            pass
+        forces.append(f_step)
+    return np.array(solver.xs), np.array(solver.us), forces, done, pin_model, pin_data
 
 
 def _solve_nmpc_trot_receding():
@@ -2099,7 +2113,7 @@ def _solve_nmpc_trot_receding():
     import math as _m
     import pinocchio as pin
     if not _CROCODDYL_AVAILABLE:
-        return None, None, False, None, None
+        return None, None, None, False, None, None
 
     pin_model = _bm.build_model()
     pin_data  = pin_model.createData()
@@ -2134,7 +2148,7 @@ def _solve_nmpc_trot_receding():
 
     if GAIT_TYPE != 'trot':
         print(f"  ⚠ NMPC는 현재 trot만 지원")
-        return None, None, False, None, None
+        return None, None, None, False, None, None
     N_PER_PHASE = int((T / 2) / DT_MPC)
     DT_NMPC = T / 2 / N_PER_PHASE
     N_TOTAL = N_PER_PHASE * 2 * N_CYCLES   # 전체 simulation step 수
@@ -2213,6 +2227,7 @@ def _solve_nmpc_trot_receding():
 
     xs_full = [x0.copy()]   # 모든 step state
     us_full = []             # 모든 step control
+    forces_full = []         # 각 step의 GRF dict (per-leg world-frame Fxyz)
     x_current = x0.copy()
     xs_warm = None           # 이전 풀이의 xs (warm-start용)
     us_warm = None
@@ -2258,6 +2273,20 @@ def _solve_nmpc_trot_receding():
         for k in range(n_apply):
             xs_full.append(np.array(solver.xs[k+1]))
             us_full.append(np.array(solver.us[k]))
+            # Contact forces 추출 (각 발의 GRF, world frame)
+            f_step = {leg: np.zeros(3) for leg in ['FR','FL','HR','HL']}
+            try:
+                ad_k = solver.problem.runningDatas[k]
+                contacts = ad_k.differential.multibody.contacts.contacts.todict()
+                for name, cdata in contacts.items():
+                    # name = 'c_FR', 'c_FL' etc.
+                    leg = name.replace('c_', '')
+                    if leg in f_step:
+                        # ContactModel3D: f is pin.Force (linear + angular)
+                        f_step[leg] = np.array(cdata.f.linear).copy()
+            except Exception:
+                pass   # contacts 추출 실패해도 진행 (0으로)
+            forces_full.append(f_step)
         x_current = np.array(solver.xs[n_apply])
         xs_warm = np.array(solver.xs)
         us_warm = np.array(solver.us)
@@ -2273,11 +2302,11 @@ def _solve_nmpc_trot_receding():
     if n_failures > 0:
         print(f"    [INFO] {n_failures}/{n_solves} solves failed line search but partial "
               f"trajectories used (FDDP enforces dynamics).")
-    return np.array(xs_full), np.array(us_full), success, pin_model, pin_data
+    return np.array(xs_full), np.array(us_full), forces_full, success, pin_model, pin_data
 
 
 
-def _populate_arrays_from_nmpc(xs, us, pin_model, pin_data):
+def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
     """NMPC xs/us → v11 arrays 채움.
     DT_NMPC × N_NMPC = 시뮬 총 시간이지만 v11 N_FRAMES은 DT 기반.
     NMPC trajectory를 v11 frame rate에 맞게 보간해서 채움.
@@ -2336,6 +2365,14 @@ def _populate_arrays_from_nmpc(xs, us, pin_model, pin_data):
                 u_idx = leg_v_idx_pin[leg][j] - 6
                 wbc_tau_cmd[fi, leg_idx, j] = u[u_idx]
 
+        # GRF per leg (zero-order hold, NMPC step k = us index)
+        if forces is not None and len(forces) > 0:
+            k_force = min(int(t_v11 / DT_NMPC), len(forces) - 1)
+            f_dict = forces[k_force]
+            for leg_idx, leg in enumerate(['FR', 'FL', 'HR', 'HL']):
+                wbc_lam_des[fi, leg_idx]   = f_dict[leg]
+                wbic_lam_used[fi, leg_idx] = f_dict[leg]
+
     # foot_hist 재계산 (joint_hist 기반 forward kinematics)
     for fi in range(N_FRAMES):
         for leg_idx in range(4):
@@ -2351,12 +2388,12 @@ if USE_NMPC and _CROCODDYL_AVAILABLE:
     print("─" * 55)
     if USE_NMPC_RECEDING:
         print(f"v12: NMPC (receding horizon FDDP) 풀이 시작...")
-        _xs_nmpc, _us_nmpc, _done_nmpc, _pin_model_nmpc, _pin_data_nmpc = _solve_nmpc_trot_receding()
+        _xs_nmpc, _us_nmpc, _forces_nmpc, _done_nmpc, _pin_model_nmpc, _pin_data_nmpc = _solve_nmpc_trot_receding()
     else:
         print(f"v12: NMPC (one-shot FDDP) 풀이 시작...")
-        _xs_nmpc, _us_nmpc, _done_nmpc, _pin_model_nmpc, _pin_data_nmpc = _solve_nmpc_trot()
+        _xs_nmpc, _us_nmpc, _forces_nmpc, _done_nmpc, _pin_model_nmpc, _pin_data_nmpc = _solve_nmpc_trot()
     if _done_nmpc:
-        _populate_arrays_from_nmpc(_xs_nmpc, _us_nmpc, _pin_model_nmpc, _pin_data_nmpc)
+        _populate_arrays_from_nmpc(_xs_nmpc, _us_nmpc, _forces_nmpc, _pin_model_nmpc, _pin_data_nmpc)
         _USE_NMPC_ACTIVE = True
         print(f"  v11 arrays NMPC 결과로 채움. WBC + MPC 메인 루프 SKIP.")
     else:
