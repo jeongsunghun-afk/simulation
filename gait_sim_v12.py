@@ -110,7 +110,7 @@ mpl.rcParams['axes.unicode_minus'] = False
 class GaitConfig:
     """v12 NMPC + WBIC + MPC + IK 통합 설정. 섹션별로 묶음."""
     # ─────────── Gait pattern ───────────
-    gait_type: str = 'trot'       # 'walk' / 'amble' / 'pace' / 'trot' / 'canter' / 'gallop'
+    gait_type: str = 'walk'       # 'walk' / 'amble' / 'pace' / 'trot' / 'canter' / 'gallop'
     dt: float = 0.002             # 시뮬 타임스텝 [s] (WBC 제어 주기)
     n_cycles: int = 4             # 사이클 수
     tau_land: float = 1.0         # swing phase 내 착지 비율 (0~1)
@@ -167,7 +167,7 @@ class GaitConfig:
     wbic_lamz_min: float = 1.0    # stance 발 최소 법선력 [N]
     wbic_w_fb: float = 0.1        # body fb weight
     # ─────────── NMPC: solver ───────────
-    use_nmpc: bool = True
+    use_nmpc: bool = False
     use_nmpc_receding: bool = True
     nmpc_maxiter: int = 200
     nmpc_init_reg: float = 1.0
@@ -337,6 +337,29 @@ INIT_ERR_RAD = CFG.init_err_rad
 MU_FRICTION  = CFG.mu_friction
 
 BODY_INERTIA = CFG.body_inertia
+
+# v12.7: pinocchio CRBA 로 *다리 포함* composite body inertia 계산 (home pose 근사).
+# 기존 diag([0.07, 0.26, 0.26]) 는 body link 만 → 다리 무게 무시 → v11 standalone trot 발산.
+# CRBA M[3:6, 3:6] = body frame angular inertia (legs at home).
+if _CROCODDYL_AVAILABLE:
+    try:
+        import pinocchio as _pin_init
+        _m_init = _bm.build_model()
+        _d_init = _m_init.createData()
+        _q0_init = _pin_init.neutral(_m_init)
+        _Q_HOME_LEGS = {'FR': Q_HOME_FRONT, 'FL': Q_HOME_FRONT,
+                        'HR': Q_HOME_HIND,  'HL': Q_HOME_HIND}
+        for _leg_name, _qh in _Q_HOME_LEGS.items():
+            for _i, _qi in enumerate(_qh):
+                _q0_init[_m_init.idx_qs[_m_init.getJointId(f'leg_{_leg_name}_j{_i+1}')]] = _qi
+        _M_full = _pin_init.crba(_m_init, _d_init, _q0_init)
+        BODY_INERTIA = np.array(_M_full[3:6, 3:6])
+        print(f"  [v12.7] BODY_INERTIA upgraded (CRBA composite, home pose): "
+              f"diag=[{BODY_INERTIA[0,0]:.3f}, {BODY_INERTIA[1,1]:.3f}, {BODY_INERTIA[2,2]:.3f}] "
+              f"(vs base-link only [0.07, 0.26, 0.26])")
+        del _m_init, _d_init, _q0_init, _M_full
+    except Exception as _e:
+        print(f"  [v12.7] BODY_INERTIA CRBA upgrade failed: {_e}")
 
 N_MPC  = CFG.n_mpc
 DT_MPC = DT * 10         # MPC 샘플링 주기 [s]  (= 0.02s)
