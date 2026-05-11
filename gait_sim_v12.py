@@ -2138,30 +2138,27 @@ def _solve_nmpc_trot():
         p[2] = p_start[2] + h * 16.0 * sw_t * sw_t * (1.0 - sw_t) * (1.0 - sw_t)
         return p
 
-    # Gait phase (trot 가정, swing_ratio=0.5; 추후 다른 gait 확장)
-    if GAIT_TYPE != 'trot':
-        print(f"  ⚠ NMPC는 현재 trot만 지원 (현재 GAIT_TYPE={GAIT_TYPE})")
-        return None, None, None, False, None, None
-    N_PER_PHASE = int((T / 2) / DT_MPC)   # T/2 / DT_MPC
-    DT_NMPC = T / 2 / N_PER_PHASE   # 정확히 T/2 = N_PER_PHASE × DT_NMPC
-    N_TOTAL = N_PER_PHASE * 2 * N_CYCLES
+    # v12.6: 모든 gait 일반 지원 — sched 시간 기반 dispatch
+    N_PER_CYCLE = max(2, round(T / DT_MPC))
+    DT_NMPC = T / N_PER_CYCLE
+    N_TOTAL = N_PER_CYCLE * N_CYCLES
 
+    _LEGS_OS = ['FR', 'FL', 'HR', 'HL']
     actions = []
     for k in range(N_TOTAL):
-        cycle_idx = k // (N_PER_PHASE * 2)
-        in_cycle_k = k % (N_PER_PHASE * 2)
-        in_phase_A = in_cycle_k < N_PER_PHASE
-        if in_phase_A:
-            stance, swing = ['FL','HR'], ['FR','HL']
-            k_in_phase = in_cycle_k
-            phase_start_k = cycle_idx * N_PER_PHASE * 2
-        else:
-            stance, swing = ['FR','HL'], ['FL','HR']
-            k_in_phase = in_cycle_k - N_PER_PHASE
-            phase_start_k = cycle_idx * N_PER_PHASE * 2 + N_PER_PHASE
-        sw_t = k_in_phase / max(N_PER_PHASE - 1, 1)
-        t_phase_start = phase_start_k * DT_NMPC
-        t_phase_end   = t_phase_start + N_PER_PHASE * DT_NMPC
+        t = k * DT_NMPC
+        stance, swing = [], []
+        swing_info = {}
+        for leg_idx, leg in enumerate(_LEGS_OS):
+            ph = sched.phase(leg_idx, t)
+            if ph < sched.swing_ratio:
+                sw_t_i = ph / sched.swing_ratio
+                t_sw_start = t - ph * T
+                t_sw_end   = t_sw_start + T_SW
+                swing.append(leg)
+                swing_info[leg] = (sw_t_i, t_sw_start, t_sw_end)
+            else:
+                stance.append(leg)
 
         # Build action model
         cm_contact = _crocoddyl.ContactModelMultiple(cstate, cactuation.nu)
@@ -2209,10 +2206,11 @@ def _solve_nmpc_trot():
             _crocoddyl.CostModelResidual(cstate, tau_act, tau_res),
             NMPC_W_TAU_LIM)
         for leg in swing:
+            sw_t, t_sw_start, t_sw_end = swing_info[leg]
             ps = foot_home_pin[leg].copy()
-            ps[0] += V * t_phase_start - STEP_LENGTH/2
+            ps[0] += V * t_sw_start - STEP_LENGTH/2
             pe = foot_home_pin[leg].copy()
-            pe[0] += V * t_phase_end + STEP_LENGTH/2
+            pe[0] += V * t_sw_end + STEP_LENGTH/2
             tgt = _cycloid(ps, pe, sw_t, STEP_HEIGHT)
             res = _crocoddyl.ResidualModelFrameTranslation(
                 cstate, foot_frames_pin[leg], tgt, cactuation.nu)
@@ -2220,8 +2218,8 @@ def _solve_nmpc_trot():
                 np.array([NMPC_W_TRACK_XY, NMPC_W_TRACK_XY, NMPC_W_TRACK_Z]))
             cost.addCost(f'foot_{leg}',
                 _crocoddyl.CostModelResidual(cstate, act, res), 1.0)
-            # Pre-touchdown velocity penalty: swing 마지막 N step에서 v → 0
-            if k_in_phase >= N_PER_PHASE - NMPC_TOUCHDOWN_LAST_N:
+            # Pre-touchdown velocity penalty: swing 마지막 N_step × DT 시간 동안 v → 0
+            if sw_t >= max(0.0, 1.0 - NMPC_TOUCHDOWN_LAST_N * DT_NMPC / max(T_SW, 1e-6)):
                 v_ref = pin.Motion(np.zeros(6))
                 v_res = _crocoddyl.ResidualModelFrameVelocity(
                     cstate, foot_frames_pin[leg], v_ref,
@@ -2345,29 +2343,36 @@ def _solve_nmpc_trot_receding():
         p[2] = p_start[2] + h * 16.0 * sw_t * sw_t * (1.0 - sw_t) * (1.0 - sw_t)
         return p
 
-    if GAIT_TYPE != 'trot':
-        print(f"  ⚠ NMPC는 현재 trot만 지원")
-        return None, None, None, False, None, None
-    N_PER_PHASE = int((T / 2) / DT_MPC)
-    DT_NMPC = T / 2 / N_PER_PHASE
-    N_TOTAL = N_PER_PHASE * 2 * N_CYCLES   # 전체 simulation step 수
+    # v12.6: 모든 gait 일반 지원 (walk, amble, pace, trot, canter, gallop)
+    # 각 leg phase 는 GaitScheduler 가 결정 — 시간 기반 dispatching
+    N_PER_CYCLE = max(2, round(T / DT_MPC))
+    DT_NMPC = T / N_PER_CYCLE
+    N_TOTAL = N_PER_CYCLE * N_CYCLES
+
+    _LEGS = ['FR', 'FL', 'HR', 'HL']
+
+    def _gait_legs_at(t):
+        """At time t: return (stance_list, swing_list, swing_info_dict).
+        swing_info[leg] = (sw_t, t_sw_start, t_sw_end). 각 leg 독립 swing window.
+        """
+        stance, swing = [], []
+        swing_info = {}
+        for leg_idx, leg in enumerate(_LEGS):
+            ph = sched.phase(leg_idx, t)
+            if ph < sched.swing_ratio:
+                sw_t = ph / sched.swing_ratio
+                t_sw_start = t - ph * T
+                t_sw_end   = t_sw_start + T_SW
+                swing.append(leg)
+                swing_info[leg] = (sw_t, t_sw_start, t_sw_end)
+            else:
+                stance.append(leg)
+        return stance, swing, swing_info
 
     def _build_action_at_step(global_k):
-        """전역 step index → action model (gait phase에 맞는 contact + cost)."""
-        in_cycle_k = global_k % (N_PER_PHASE * 2)
-        in_phase_A = in_cycle_k < N_PER_PHASE
-        cycle_idx = global_k // (N_PER_PHASE * 2)
-        if in_phase_A:
-            stance, swing = ['FL','HR'], ['FR','HL']
-            k_in_phase = in_cycle_k
-            phase_start_k = cycle_idx * N_PER_PHASE * 2
-        else:
-            stance, swing = ['FR','HL'], ['FL','HR']
-            k_in_phase = in_cycle_k - N_PER_PHASE
-            phase_start_k = cycle_idx * N_PER_PHASE * 2 + N_PER_PHASE
-        sw_t = k_in_phase / max(N_PER_PHASE - 1, 1)
-        t_phase_start = phase_start_k * DT_NMPC
-        t_phase_end   = t_phase_start + N_PER_PHASE * DT_NMPC
+        """전역 step index → action model. 시간 기반 gait dispatch (any gait 지원)."""
+        t = global_k * DT_NMPC
+        stance, swing, swing_info = _gait_legs_at(t)
 
         cm_contact = _crocoddyl.ContactModelMultiple(cstate, cactuation.nu)
         for leg in stance:
@@ -2414,10 +2419,11 @@ def _solve_nmpc_trot_receding():
             _crocoddyl.CostModelResidual(cstate, tau_act, tau_res),
             NMPC_W_TAU_LIM)
         for leg in swing:
+            sw_t, t_sw_start, t_sw_end = swing_info[leg]
             ps = foot_home_pin[leg].copy()
-            ps[0] += V * t_phase_start - STEP_LENGTH/2
+            ps[0] += V * t_sw_start - STEP_LENGTH/2
             pe = foot_home_pin[leg].copy()
-            pe[0] += V * t_phase_end + STEP_LENGTH/2
+            pe[0] += V * t_sw_end + STEP_LENGTH/2
             tgt = _cycloid(ps, pe, sw_t, STEP_HEIGHT)
             res = _crocoddyl.ResidualModelFrameTranslation(
                 cstate, foot_frames_pin[leg], tgt, cactuation.nu)
@@ -2425,8 +2431,8 @@ def _solve_nmpc_trot_receding():
                 np.array([NMPC_W_TRACK_XY, NMPC_W_TRACK_XY, NMPC_W_TRACK_Z]))
             cost.addCost(f'foot_{leg}',
                 _crocoddyl.CostModelResidual(cstate, act, res), 1.0)
-            # Pre-touchdown velocity penalty: swing 마지막 N step에서 v → 0
-            if k_in_phase >= N_PER_PHASE - NMPC_TOUCHDOWN_LAST_N:
+            # Pre-touchdown velocity penalty: swing 마지막 N_step × DT 시간 동안 v → 0
+            if sw_t >= max(0.0, 1.0 - NMPC_TOUCHDOWN_LAST_N * DT_NMPC / max(T_SW, 1e-6)):
                 v_ref = pin.Motion(np.zeros(6))
                 v_res = _crocoddyl.ResidualModelFrameVelocity(
                     cstate, foot_frames_pin[leg], v_ref,
