@@ -10,7 +10,7 @@
 
 ---
 
-## Phase 1 — MPC QP (Body-level 힘 계획)
+## Phase 1 — MPC QP (Body-level 힘 계획) — **v8 완료**
 
 MPC는 미래 N스텝 body 궤적을 예측하여 각 발의 목표 GRF(λ_des)를 결정한다.
 WBIC/WBC는 이 λ_des를 받아 joint torque로 변환한다.
@@ -20,74 +20,62 @@ WBIC/WBC는 이 λ_des를 받아 joint torque로 변환한다.
 ```
 
 ### 1-1. 선형화된 부유 베이스 동역학 모델
-- [ ] body 상태벡터: x = [roll, pitch, yaw, px, py, pz, ω, v] (13dim)
-- [ ] 연속 동역학: ẋ = A(Ψ)·x + B(r_i, R)·λ + g
-      - A(Ψ): body 자세(오일러각) 의존 상태 행렬
+- [x] body 상태벡터: x = [roll, pitch, yaw, px, py, pz, ω, v, g] (13dim)
+- [x] 연속 동역학: ẋ = A(Ψ)·x + B(r_i, R)·λ + g
+      - A(Ψ): body 자세 의존 상태 행렬
       - B(r_i, R): stance foot 위치 의존 입력 행렬
-      - λ: 각 발의 GRF [Fx, Fy, Fz]
-- [ ] Euler 이산화: x_{k+1} = Ac·x_k + Bc·u_k  (dt = DT)
+- [x] Euler 이산화: x_{k+1} = Ac·x_k + Bc·u_k  (dt = DT_MPC = 0.02s)
 
 ### 1-2. Receding Horizon QP 구성
-- [ ] 예측 구간: N_MPC = 10~20 스텝 설정
-- [ ] 상태 스택: X = [x_1, ..., x_N],  U = [λ_1, ..., λ_N]
-- [ ] 비용 함수:
-      min  Σ ||x_k - x_ref_k||²_Q  +  Σ ||λ_k||²_R
-      Q: body pose/vel 추종 가중치
-      R: GRF 크기 최소화 가중치
-- [ ] 구속 조건:
-      X = Aq·x_0 + Bq·U           (동역학 등식)
-      |λ_x,k|, |λ_y,k| ≤ μ_f·λ_z,k  (마찰 추)
-      λ_z,k ≥ 0                    (법선력 양수)
-      λ_z,k = 0  (swing foot)      (공중 발 제거)
-- [ ] solver: qpsolvers[quadprog] 또는 osqp 사용
+- [x] 예측 구간: `N_MPC = 10` 스텝
+- [x] 상태/입력 스택: X = [x_1, ..., x_N],  U = [λ_1, ..., λ_N]
+- [x] 비용함수: min Σ||x_k - x_ref||²_Q + Σ||λ_k||²_R  (`MPC_Q`, `MPC_R`)
+- [x] 구속: 동역학 등식 + 마찰 추 + λ_z ≥ 0 + swing λ=0
+- [x] solver: `qpsolvers[quadprog]`
 
 ### 1-3. contact schedule 연동
-- [ ] swing_flag[fi] → MPC horizon 내 contact pattern 행렬 생성
-- [ ] horizon 내 gait phase 예측 (현재 trot phase 기준)
+- [x] swing_flag → MPC horizon 내 contact pattern 행렬 생성
+- [x] horizon 내 gait phase 예측
 
 ### 1-4. MPC 출력 → WBC 입력 연동
-- [ ] λ_des = MPC 첫 번째 스텝 출력 (receding horizon)
-- [ ] 현재 v7의 균등 배분 λ_des 교체
+- [x] λ_des = MPC 첫 번째 스텝 출력 (receding horizon)
+- [x] v7의 균등 배분 교체 (`mpc_qp_plan()` 사용)
 
 ---
 
-## Phase 2 — QP GRF (단일 스텝 힘 배분, MPC 경량 대안)
+## Phase 2 — QP GRF (단일 스텝 힘 배분, MPC 경량 대안) — **v8 완료**
 
 MPC 없이 현재 스텝에서만 힘 평형 + 마찰 추 만족하도록 QP로 배분.
-MPC보다 단순하나 미래 예측 없음. Phase 1 전 중간 단계로 구현 가능.
+`USE_MPC = False` 시 fallback 으로 사용 (`qp_grf_distribute()`).
 
-- [ ] 비용함수: min Σ||λ_i||²  (최소 힘)
-- [ ] 등식 구속: Σλ_i = [0, 0, M·g],  Σ(r_i × λ_i) = [0,0,0]
-- [ ] 부등식 구속: 마찰 추, λ_z ≥ 0
-- [ ] r_i: body COM 기준 각 발 위치 (LEG_HIP_OFFSETS + foot_local)
-- [ ] Figure 3 GRF subplot에 Fx, Fy 마찰 추 한계 표시 추가
+- [x] 비용함수: min Σ||λ_i||²
+- [x] 등식: Σλ_i = [0, 0, M·g], Σ(r_i × λ_i) = [0,0,0]
+- [x] 부등식: 마찰 추, λ_z ≥ 0
+- [x] r_i: body COM 기준 각 발 위치
+- [x] Figure 3 GRF subplot 에 Fx/Fy 마찰 추 한계 표시 (fill_between)
 
 ---
 
-## Phase 3 — RNEA (관절 공간 완전 동역학)
+## Phase 3 — RNEA (관절 공간 완전 동역학) — **v8 완료**
 
 MPC/QP GRF가 λ_des를 주면, 이를 joint torque로 변환할 때
-현재 quasi-static 대신 완전 강체 동역학 사용.
+완전 강체 동역학 사용 (`rnea()` 함수, pinocchio 백엔드도 선택 가능).
 
 ### 3-1. RNEA Forward Pass
-- [ ] 각 링크 각속도/각가속도 재귀 전파: ω_i, α_i
-- [ ] 각 링크 COM 선가속도 전파: a_c_i
-- [ ] 입력: q, q̇, q̈ (수치 미분), 루트 body 가속도
+- [x] 각 링크 각속도/각가속도 재귀 전파: ω_i, α_i
+- [x] 각 링크 COM 선가속도 전파: a_c_i
+- [x] 입력: q, q̇, q̈ (수치 미분), 루트 body 가속도
 
 ### 3-2. RNEA Backward Pass
-- [ ] 링크별 힘/모멘트 역전파
-      f_i = m_i·a_c_i + ω_i × (I_i·ω_i)
-      n_i = I_i·α_i + ω_i × (I_i·ω_i) + r_c_i × f_i
-- [ ] τ_i = n_i · z_i  (조인트 축 성분)
+- [x] 링크별 힘/모멘트 역전파 (f_i, n_i)
+- [x] τ_i = n_i · z_i (조인트 축 성분)
 
 ### 3-3. τ_ff 업데이트
-- [ ] 기존: τ_ff = τ_grav - Jᵀ·λ_des
-- [ ] 변경: τ_ff = RNEA(q, q̇, q̈) - Jᵀ·λ_des
-            (M(q)·q̈ + C(q,q̇)·q̇ + g(q) 전부 포함)
+- [x] τ_ff = RNEA(q, q̇, q̈) - Jᵀ·λ_des (full M·q̈ + C·q̇ + g 포함)
 
 ### 3-4. 링크 관성 텐서 정의
-- [ ] 각 링크 I_i (원통/막대 근사 또는 CAD 값)
-- [ ] LINK_INERTIA 파라미터 섹션 추가
+- [x] 원통 근사 (`_rod_inertia_local()`, `LINK_RADIUS`)
+- [x] `LINK_MASS` 파라미터 정의 (현재 GaitConfig.link_mass)
 
 ---
 
