@@ -1,10 +1,12 @@
-# gait_sim_v8 구현 로드맵
+# gait_sim 구현 로드맵 (v8 → v12)
 
-현재 상태 (v7): quasi-static WBC (g(q) + GRF 피드포워드 + Impedance + PD), 균등 GRF 배분
+현재 상태 (v12.4.1): NMPC (crocoddyl FDDP receding horizon) + sim2real cost 보강 + GaitConfig dataclass
 
 완전 운동방정식 목표:
   M(q)·q̈ + C(q,q̇)·q̇ + g(q) = τ + Jᵀ·λ
-  현재(v7):              g(q) = τ + Jᵀ·λ  ← quasi-static
+  v7: g(q) = τ + Jᵀ·λ  ← quasi-static
+  v11: 부유 베이스 통합 동역학 + WBIC FB QP
+  v12: NMPC (crocoddyl FDDP) — single optimization 으로 trajectory + control 동시 풀이
 
 ---
 
@@ -118,12 +120,11 @@ RNEA로 계산한 τ_ff를 초기값으로, joint limit/마찰 추 제약 하에
 
 ## Phase 6 — 검증 & pinocchio 연동
 
-- [ ] Σλ_z vs M·g 잔차 플롯 (힘 평형 검증)
-- [ ] τ 에너지 Σ|τ·q̇| 계산 및 Figure 추가
-- [ ] 관절 한계 위반 감지 + Figure 마킹
-- [ ] (장기) pinocchio 연동: URDF 확보 후 RNEA/Jacobian 대체
-      pip install pin
-      pinocchio.buildModelFromUrdf()
+- [x] Σλ_z vs M·g 잔차 플롯 (힘 평형 검증, fig3)
+- [x] τ 에너지 Σ|τ·q̇| 계산 및 Figure 추가 — **v12.2 fig8 Cost-of-Transport**
+- [x] 관절 한계 위반 감지 + Figure 마킹 — **v12.2 fig8 torque saturation**
+- [x] pinocchio 연동 (RNEA/Jacobian/M(q) 등) — **v11 USE_PINOCCHIO toggle**
+- [x] pinocchio Model 빌드 (build_pin_model.py) — **v12 crocoddyl 통합 필수**
 
 ---
 
@@ -158,11 +159,13 @@ RNEA로 계산한 τ_ff를 초기값으로, joint limit/마찰 추 제약 하에
 
 ### Tier 2 — 신호 정확도 개선
 
-- [ ] **Compliant 접촉 모델** (Hunt-Crossley)
+- [~] **Compliant 접촉 모델** (Hunt-Crossley) — **v12 prep 시도 후 보류**
       현재: 강체 접촉 (touchdown 충격력 계단)
       추가: F_z = K·δ + B·δ̇·δ, δ = penetration depth
       영향: 충격력 시계열 현실화 → 베어링/링크 피로 해석 가능
       파라미터: K (지면 강성, ~10^5 N/m), B (감쇠, ~10^3)
+      ※ explicit Euler + 6.3kg body 에서 numerical instability — 어떤 K/B 조합도 발산.
+        대안: v12 NMPC 의 friction cone + force reg + stance v=0 cost 로 spike 간접 완화.
 
 - [ ] **Self-collision 검사** (capsule-capsule)
       현재: 검사 없음 (다리-다리, 다리-body 충돌 가능)
@@ -212,6 +215,67 @@ Compliant contact (Tier 2.4)
 | 링크/베어링 강성/피로 | Tier 1.1 + 2.4 |
 | Gait robustness | Tier 1.2/1.3 + Tier 3 |
 | 에너지/주행시간 | Tier 3.9 + Tier 1.1 |
+
+---
+
+## Phase 8 — NMPC 통합 (crocoddyl FDDP) — v12
+
+v11 의 "MPC body→λ_des→WBIC→τ" pipeline 을 single optimization 으로 통합.
+미래 N step 에 대해 state x, control u, contact force λ 를 동시에 풀이.
+
+### 8-1. NMPC core 통합 — **v12.0**
+- [x] crocoddyl + pinocchio 통합 (`build_pin_model.py` — quadruped pin Model)
+- [x] `DifferentialActionModelContactFwdDynamics` (Baumgarte stab)
+- [x] `SolverFDDP` (one-shot 1-2 cycle 안정)
+- [x] Receding horizon 구현 (4+ cycle 안정: `NMPC_RH_N_HORIZON=24`, `_RESOLVE=12`)
+- [x] `USE_NMPC` / `USE_NMPC_RECEDING` toggle
+
+### 8-2. NMPC sim2real cost 보강 — **v12.1, v12.3**
+- [x] Friction cone barrier (`ResidualModelContactFrictionCone` + `ActivationModelQuadraticBarrier`)
+      `inner_appr=True` 채택 → friction usage peak 1.39 → 1.00
+- [x] Force regularization (`ResidualModelContactForce` target=0, xy>z weighting)
+      HL Fz peak 928 → 443N (-52%)
+- [x] Joint torque limit barrier (`|u_i| ≤ JOINT_TORQUE_LIMIT[i]` soft barrier)
+      τ peak 142 → 85 Nm (-40%)
+- [x] Swing trajectory: cycloid → smoothstep + bell (v=0 at touchdown)
+- [x] Pre-touchdown velocity penalty (`ResidualModelFrameVelocity`, 마지막 N step)
+- [x] Stance leg foot velocity=0 cost (slip drift 37mm → 3mm, -92%)
+- [ ] Body y drift (44mm/2s) — `_HIP_Y_BIAS = +7.5mm` 모델 비대칭 root cause.
+      NMPC cost shaping 으로는 해결 불가 (W=1~1000 모두 시도, vx tracking trade-off).
+      → 옵션: 모델 변경 / WBIC hybrid 의 CoP-balance constraint
+
+### 8-3. NMPC 후처리 + 시각화 — **v12.1, v12.2**
+- [x] tau_grf, tau_dyn, tau_imp 분해 (NMPC 모드에서 fig3/fig4 의미 회복)
+- [x] **fig5**: body state vs cmd (pos/vel/orientation/ω + RMS error)
+- [x] **fig6**: foot trajectory cmd vs actual (3×4 grid, swing only)
+- [x] **fig7**: gait diagram (Hildebrand-style stance chart + Fz timeline)
+- [x] **fig8**: diagnostic (friction usage / mechanical power+CoT / slip vel / τ saturation)
+
+### 8-4. Perturbation recovery — **v12.3**
+- [x] `USE_PERTURBATION` toggle (receding horizon 도중 body state 외란 주입)
+- [x] vy += 0.5 m/s @ t=1s 외란 → vy_end = 0.004 m/s 회복 검증
+- [ ] omega 외란, large vy(>1 m/s) 한계 시험
+- [ ] perturbation 시계열 figure (fig9 후보)
+
+### 8-5. Configuration 통합 — **v12.4**
+- [x] `@dataclass GaitConfig` (45+ user-tunable param 단일 위치)
+- [x] 카테고리: gait / robot / motor / friction / IK / MPC / WBIC / NMPC / perturb / viz
+- [x] 기존 module-level globals → `CFG.field` alias (v11/v12 코드 100% 호환)
+
+### 8-6. (검토 대기) Real-time NMPC + WBIC hybrid 모드
+- [ ] **옵션 A**: Step-by-step real-time NMPC (매 v11 frame 1-step solver 호출)
+      장점: 단순, NMPC 가 직접 τ 만듦. 단점: WBIC 안 씀 → friction/torque hard constraint 없음
+- [ ] **옵션 B**: NMPC trajectory + WBIC tracking (NMPC offline ref, WBIC 매 frame enforce)
+      장점: sim2real safer (WBIC 가 friction/torque limit hard constraint). 단점: NMPC ref 미세 violation 잘림
+- [ ] **옵션 C**: Hybrid (NMPC ~100ms re-solve + WBIC 매 2ms)
+      장점: 가장 robust. 단점: 가장 복잡
+- [ ] body y drift 해결 (WBIC CoP / lateral balance constraint 명시)
+
+### 8-7. (추후) Walk / multi-gait NMPC 지원
+- [ ] 현재 NMPC: trot only (`if GAIT_TYPE != 'trot': return None`)
+- [ ] phase pattern 일반화 (walk, amble, pace, canter, gallop — 각 4-leg phase offset)
+- [ ] gait switch test (steady trot → walk transition)
+- [ ] speed sweep (V=0.3, 0.5, 1.0, 1.5 m/s 안정성 비교)
 
 ---
 
