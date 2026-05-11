@@ -3123,14 +3123,14 @@ if USE_BODY_DYNAMICS and not _USE_NMPC_ACTIVE:
 _wbc_tau_cmd_no_grf = wbc_tau_cmd - wbc_tau_grf   # GRF feedforward 제외 (실 액추에이터 부담)
 for leg in [0, 3]:
     nj = N_JOINTS_PER_LEG[leg]
-    peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(_wbc_tau_cmd_no_grf[:, leg, j])):6.2f}"
+    peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
                       for j in range(nj))
     peaks_dq  = "  ".join(f"th{j+1}:{np.max(np.abs(joint_vel_hist[:, leg, j])):6.2f}"
                       for j in range(nj))
     fx_peak = np.max(np.abs(wbc_lam_des[:, leg, 0]))
     fy_peak = np.max(np.abs(wbc_lam_des[:, leg, 1]))
     fz_peak = np.max(np.abs(wbc_lam_des[:, leg, 2]))
-    print(f"  {LEG_NAMES[leg]} τ_cmd−τ_grf peak [N·m]: {peaks_cmd}")
+    print(f"  {LEG_NAMES[leg]} τ_cmd peak [N·m]: {peaks_cmd}")
     print(f"  {LEG_NAMES[leg]} dq    peak [rad/s]: {peaks_dq}")
     print(f"  {LEG_NAMES[leg]} λ (GRF) peak [N]:   Fx={fx_peak:6.2f}, Fy={fy_peak:6.2f}, Fz={fz_peak:6.2f}")
 print("─" * 55)
@@ -3451,13 +3451,13 @@ def animate(fi):
     grf_lines = []
     for leg in range(4):
         d  = deg[leg]
-        tc = wbc_tau_cmd[fi, leg] - wbc_tau_grf[fi, leg]   # GRF 성분 제외
+        tc = wbc_tau_cmd[fi, leg]   # 실제 motor τ_cmd (NMPC 출력 또는 v11 WBIC 출력)
         lm = wbc_lam_des[fi, leg]
         jnt_lines.append(f"{LEG_NAMES[leg]} "
                          f"th1={d[0]:+5.1f}d th2={d[1]:+6.1f}d th3={d[2]:+6.1f}d "
                          f"th4={d[3]:+5.1f}d th5={d[4]:+5.1f}d")
         tau_lines.append(f"{LEG_NAMES[leg]} "
-                         f"tau_cmd−grf=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm")
+                         f"tau_cmd=[{tc[0]:+5.1f} {tc[1]:+5.1f} {tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm")
         grf_lines.append(f"{LEG_NAMES[leg]} "
                          f"lam=[{lm[0]:+5.1f} {lm[1]:+5.1f} {lm[2]:+5.1f}]N")
     info_text.set_text(
