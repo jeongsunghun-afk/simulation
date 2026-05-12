@@ -110,7 +110,7 @@ mpl.rcParams['axes.unicode_minus'] = False
 class GaitConfig:
     """v12 NMPC + WBIC + MPC + IK 통합 설정. 섹션별로 묶음."""
     # ─────────── Gait pattern ───────────
-    gait_type: str = 'walk'       # 'walk' / 'amble' / 'pace' / 'trot' / 'canter' / 'gallop'
+    gait_type: str = 'trot'       # 'walk' / 'amble' / 'pace' / 'trot' / 'canter' / 'gallop'
     dt: float = 0.002             # 시뮬 타임스텝 [s] (WBC 제어 주기)
     n_cycles: int = 4             # 사이클 수
     tau_land: float = 1.0         # swing phase 내 착지 비율 (0~1)
@@ -3070,6 +3070,35 @@ for fi in range(N_FRAMES):
     # Reference (kinematic V·t)
     body_pos_ref_hist[fi] = np.array([V * t_cur, 0.0, 0.0])
     body_v_ref_hist[fi]   = np.array([V, 0.0, 0.0])
+
+# fig6 용 foot_actual / foot_target — NMPC populate 외에서도 채움 (v11 standalone 포함)
+# sched 기반 일반 gait (walk/pace/trot/...) 지원
+_LEGS_FIG6 = ['FR', 'FL', 'HR', 'HL']
+_FOOT_HOME_WORLD = np.zeros((4, 3))
+for _li in range(4):
+    foot_actual_world_hist[0, _li] = body_pos_hist[0] + body_R_hist[0] @ foot_hist[0, _li]
+    _FOOT_HOME_WORLD[_li] = foot_actual_world_hist[0, _li]
+for _fi in range(N_FRAMES):
+    body_p = body_pos_hist[_fi]; R_b = body_R_hist[_fi]
+    for _li in range(4):
+        foot_actual_world_hist[_fi, _li] = body_p + R_b @ foot_hist[_fi, _li]
+    t_now = _fi * DT
+    for _li, _leg_name in enumerate(_LEGS_FIG6):
+        ph = sched.phase(_li, t_now)
+        if ph < sched.swing_ratio:
+            sw_t = ph / sched.swing_ratio
+            t_sw_start = t_now - ph * T
+            t_sw_end   = t_sw_start + T_SW
+            ps = _FOOT_HOME_WORLD[_li].copy()
+            ps[0] += V * t_sw_start - STEP_LENGTH/2
+            pe = _FOOT_HOME_WORLD[_li].copy()
+            pe[0] += V * t_sw_end + STEP_LENGTH/2
+            s_xy = sw_t * sw_t * (3.0 - 2.0 * sw_t)
+            tgt  = ps + s_xy * (pe - ps)
+            tgt[2] = ps[2] + STEP_HEIGHT * 16.0 * sw_t * sw_t * (1-sw_t) * (1-sw_t)
+            foot_target_world_hist[_fi, _li] = tgt
+        else:
+            foot_target_world_hist[_fi, _li] = np.nan   # swing 외 frame = NaN
 
 wbc_dur = time.perf_counter() - wbc_t0
 mode_str = f"MPC(N={N_MPC},dt={DT_MPC*1e3:.0f}ms)" if USE_MPC else "QP GRF"
