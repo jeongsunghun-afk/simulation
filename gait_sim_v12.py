@@ -2082,14 +2082,16 @@ body_pos_ref_hist = np.zeros((N_FRAMES, 3))
 body_v_ref_hist   = np.zeros((N_FRAMES, 3))
 
 # 초기 body 상태 (steady-state stance posture)
+# foot 가 ground (z=0) 에 닿도록 body z 조정 (NMPC convention 과 일치)
+_foot_z_home = float(foot_hist[0, 0, 2])    # FR foot z @ home, body-local frame (≈ -0.465m)
 body_state = {
-    'pos':   np.array([0.0, 0.0, 0.0]),     # initial CoM at origin
+    'pos':   np.array([0.0, 0.0, -_foot_z_home]),  # body z = +0.465 → foot world z = 0
     'R':     np.eye(3),
-    'v':     np.array([V, 0.0, 0.0]),       # 정상 보행 속도로 시작
+    'v':     np.array([V, 0.0, 0.0]),              # 정상 보행 속도로 시작
     'omega': np.zeros(3),
     'a_lin': np.zeros(3),
     'a_ang': np.zeros(3),
-    '_diverged': False,                     # 발산 시 integrate_body_state가 set
+    '_diverged': False,                            # 발산 시 integrate_body_state가 set
 }
 
 # WBIC FB 진단
@@ -2776,6 +2778,7 @@ for fi in range(N_FRAMES):
             ])
             # x_ref: 단순 steady 궤적 (upright + vx=V + z=0)
             x_ref_step = BODY_REF_STEP.copy()
+            x_ref_step[5]  = -_foot_z_home   # body z 목표 = home (≈ +0.465m, foot at ground)
             x_ref_step[9]  = V       # vx 추종
             x_ref_step[12] = -G_ACC
         else:
