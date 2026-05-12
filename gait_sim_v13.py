@@ -3236,6 +3236,70 @@ if _USE_NMPC_ACTIVE:
 else:
     print(f"WBC 완료 [{mode_str}, {wbic_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
 
+# ══════════════════════════════════════════════════════════════
+# v13 좌우 mirror 진단 — 잔여 y drift 원인 추적용
+# 6가지 후보를 자동 측정. 진짜 mirror 정합 시 모든 값 ≈ 0 또는 평균 ≈ 0.
+# ══════════════════════════════════════════════════════════════
+if not _USE_NMPC_ACTIVE:
+    print("─" * 60)
+    print("[v13 좌우 mirror 진단]")
+
+    # 1) opt-IK 좌우 q 미러 일치: q_FR 과 q_FL 이 정확히 같아야 함 (Q_HOME 동일)
+    q_diff_front = joint_hist[:, 0, :5] - joint_hist[:, 1, :5]   # FR - FL
+    q_diff_hind  = joint_hist[:, 2, :5] - joint_hist[:, 3, :5]   # HR - HL
+    print(f"  (1) opt-IK 좌우 q 차이 RMS [rad]:")
+    print(f"      FR-FL: q1={np.sqrt(np.mean(q_diff_front[:,0]**2)):.2e}  "
+          f"q2={np.sqrt(np.mean(q_diff_front[:,1]**2)):.2e}  "
+          f"q3={np.sqrt(np.mean(q_diff_front[:,2]**2)):.2e}  "
+          f"q4={np.sqrt(np.mean(q_diff_front[:,3]**2)):.2e}")
+    print(f"      HR-HL: q1={np.sqrt(np.mean(q_diff_hind[:,0]**2)):.2e}  "
+          f"q2={np.sqrt(np.mean(q_diff_hind[:,1]**2)):.2e}  "
+          f"q3={np.sqrt(np.mean(q_diff_hind[:,2]**2)):.2e}  "
+          f"q4={np.sqrt(np.mean(q_diff_hind[:,3]**2)):.2e}")
+
+    # 2) MPC GRF y 시간 평균 — 대칭 시 0
+    grf_y_mean_per_leg = wbc_lam_des[:, :, 1].mean(axis=0)
+    print(f"  (2) MPC GRF λ_y 시간평균 [N]:")
+    print(f"      FR={grf_y_mean_per_leg[0]:+.3f}  FL={grf_y_mean_per_leg[1]:+.3f}  "
+          f"HR={grf_y_mean_per_leg[2]:+.3f}  HL={grf_y_mean_per_leg[3]:+.3f}")
+    print(f"      4-leg sum (lateral net force) = {grf_y_mean_per_leg.sum():+.4f} N  "
+          f"(대칭이면 0)")
+
+    # 3) GRF 좌우 짝 합 (FR+HR=우측, FL+HL=좌측)
+    grf_y_right = wbc_lam_des[:, [0,2], 1].sum(axis=1).mean()    # FR + HR
+    grf_y_left  = wbc_lam_des[:, [1,3], 1].sum(axis=1).mean()    # FL + HL
+    print(f"  (3) GRF y 좌우 합:  우측(FR+HR) avg={grf_y_right:+.4f}N  "
+          f"좌측(FL+HL) avg={grf_y_left:+.4f}N  "
+          f"합={grf_y_right+grf_y_left:+.4f}N")
+
+    # 4) body 좌표축별 정상상태 offset (settle 후 후반 25% 평균)
+    _settle_idx = slice(int(0.75*N_FRAMES), N_FRAMES)
+    bp_steady = body_pos_hist[_settle_idx].mean(axis=0)
+    bv_steady = body_v_hist[_settle_idx].mean(axis=0)
+    print(f"  (4) body 정상상태 (후반 25% 평균):")
+    print(f"      pos: x={bp_steady[0]*1e3:+.1f}mm  y={bp_steady[1]*1e3:+.2f}mm  "
+          f"z={bp_steady[2]*1e3:+.1f}mm")
+    print(f"      vel: vx={bv_steady[0]:+.4f}m/s  vy={bv_steady[1]:+.4f}m/s  "
+          f"vz={bv_steady[2]:+.4f}m/s")
+
+    # 5) WBIC fb residual y 성분 평균 (body 6-DoF QP 잔차)
+    if USE_WBIC_FB and wbic_fb_status_hist.any():
+        fb_res_mean = wbic_fb_residual_hist[wbic_fb_status_hist].mean()
+        dvfb_mean = wbic_fb_dvfb_hist[wbic_fb_status_hist].mean(axis=0)
+        print(f"  (5) WBIC FB residual avg={fb_res_mean:.2e}  "
+              f"Δv̇_fb mean=({dvfb_mean[0]:+.3e},{dvfb_mean[1]:+.3e},{dvfb_mean[2]:+.3e}) "
+              f"(lin) ({dvfb_mean[3]:+.3e},{dvfb_mean[4]:+.3e},{dvfb_mean[5]:+.3e}) (ang)")
+
+    # 6) WBIC dtau / dlam 좌우 비교
+    if USE_WBIC:
+        dtau_y_rms_fr = np.sqrt(np.mean(wbic_dtau_hist[:, 0, :]**2))
+        dtau_y_rms_fl = np.sqrt(np.mean(wbic_dtau_hist[:, 1, :]**2))
+        dtau_y_rms_hr = np.sqrt(np.mean(wbic_dtau_hist[:, 2, :]**2))
+        dtau_y_rms_hl = np.sqrt(np.mean(wbic_dtau_hist[:, 3, :]**2))
+        print(f"  (6) WBIC Δτ RMS [Nm] per leg: FR={dtau_y_rms_fr:.4f}  FL={dtau_y_rms_fl:.4f}  "
+              f"HR={dtau_y_rms_hr:.4f}  HL={dtau_y_rms_hl:.4f}  (대칭이면 FR≈FL, HR≈HL)")
+    print("─" * 60)
+
 # GRF 합산 검증 (λ_des = MPC/QP 출력, λ_used = WBIC 보정 후)
 if not _USE_NMPC_ACTIVE:
     fz_sum_des  = np.sum(wbc_lam_des[:, :, 2], axis=1)
