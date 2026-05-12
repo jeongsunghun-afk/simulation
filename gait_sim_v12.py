@@ -79,7 +79,7 @@ except ImportError:
     _CROCODDYL_AVAILABLE = False
 
 # 비교 모드: HIND_VARIANT={'orig','ext'}, COMPARE_MODE=1이면 figure 생략 후 metrics 덤프
-_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'orig')
+_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'ext')  # 'orig' (원본) vs 'ext' (뒷발 -50mm 확장)
 _COMPARE_MODE = os.environ.get('COMPARE_MODE', '0') == '1'
 assert _HIND_VARIANT in ('orig', 'ext'), f"HIND_VARIANT={_HIND_VARIANT} (expected 'orig' or 'ext')"
 import matplotlib as mpl
@@ -2645,7 +2645,7 @@ def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
         body_R_hist[fi]     = pin.Quaternion(qw, qx, qy, qz).toRotationMatrix()
         body_v_hist[fi]     = x[pin_model.nq:pin_model.nq+3]
         body_omega_hist[fi] = x[pin_model.nq+3:pin_model.nq+6]
-        body_pos_ref_hist[fi] = np.array([V * t_v11, 0.0, 0.0])
+        body_pos_ref_hist[fi] = np.array([V * t_v11, 0.0, -_foot_z_home])
         body_v_ref_hist[fi]   = np.array([V, 0.0, 0.0])
 
         # Control (per-leg, 5 dim each)
@@ -3071,7 +3071,7 @@ for fi in range(N_FRAMES):
     body_alin_hist[fi]  = body_state.get('a_lin', np.zeros(3))
     body_aang_hist[fi]  = body_state.get('a_ang', np.zeros(3))
     # Reference (kinematic V·t)
-    body_pos_ref_hist[fi] = np.array([V * t_cur, 0.0, 0.0])
+    body_pos_ref_hist[fi] = np.array([V * t_cur, 0.0, -_foot_z_home])
     body_v_ref_hist[fi]   = np.array([V, 0.0, 0.0])
 
 # fig6 용 foot_actual / foot_target — NMPC populate 외에서도 채움 (v11 standalone 포함)
@@ -3691,6 +3691,7 @@ for col, leg in enumerate([0, 3]):   # FR=0, HL=3
         ax_td.plot(_fr, wbc_tau_dyn [:, leg, ji], lw=1.4, color='#00d4ff',           label='tau_dyn')
         ax_td.plot(_fr, wbc_tau_pd  [:, leg, ji], lw=1.4, color='#ff6b35',           label='tau_pd')
         ax_td.plot(_fr, wbc_tau_imp [:, leg, ji], lw=1.4, color='#00ff99',           label='tau_imp')
+        ax_td.plot(_fr, wbc_tau_grf [:, leg, ji], lw=1.4, color='#ffd166',           label='tau_grf')
         ax_td.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
         ax_td.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=2)
 
