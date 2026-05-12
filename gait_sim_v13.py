@@ -11,6 +11,10 @@ v12 대비 핵심 변경:
     · analytical_ik_front / opt_ik_front / opt_ik_hind 모두 `dh` 파라미터 받도록 refactor
         - 기존 module-level _D2_F / DH_FRONT / DH_HIND 사용을 명시적 dh 인자로 전환
     · v12 smoothness 패치 (DT_MPC=DT*5, wbic_w_dtau, CubicSpline q̇/q̈) 그대로 이식
+      → v13.1 에서 정량 측정 결과 net negative (NMPC τ peak +4988%, jerk peak +1454%
+        ; v11 jerk 소폭 ↑) → 모두 OFF default 로 비활성화.
+        Toggle: GaitConfig.wbic_w_dtau (=0.0), GaitConfig.use_spline_diff (=False),
+                DT_MPC = DT*10 (원래 값)
 
 기대 효과:
     · foot world 위치 좌우 대칭 (±0.0575) → 정적 roll moment ≈ 0
@@ -191,14 +195,15 @@ class GaitConfig:
     wbic_w_lam: float = 0.001
     wbic_lamz_min: float = 1.0    # stance 발 최소 법선력 [N]
     wbic_w_fb: float = 0.1        # body fb weight
-    wbic_w_dtau: float = 0.001    # τ smoothness: w_dtau·‖τ−τ_prev‖²  (0=off)
+    wbic_w_dtau: float = 0.0      # τ smoothness: w_dtau·‖τ−τ_prev‖²  (v13.1: 정량 측정 결과 net negative → OFF default)
+    use_spline_diff: bool = False # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: 정량 측정 결과 net negative → OFF default)
     # ─────────── NMPC: solver ───────────
     use_nmpc: bool = False
     use_nmpc_receding: bool = True
     nmpc_maxiter: int = 200
     nmpc_init_reg: float = 1.0
-    nmpc_rh_n_horizon: int = 50   # 0.5s @ DT_NMPC=0.01 (v12 smoothness 패치 후 DT_MPC=0.01)
-    nmpc_rh_n_resolve: int = 25   # 0.25s half cycle re-solve @ DT_NMPC=0.01
+    nmpc_rh_n_horizon: int = 24   # 0.5s @ DT_NMPC=0.02 (v13.1: DT_MPC 원복으로 환원)
+    nmpc_rh_n_resolve: int = 12   # half cycle re-solve
     nmpc_rh_maxiter: int = 50
     # ─────────── NMPC: cost weights ───────────
     nmpc_w_track_xy: float = 100.0
@@ -414,7 +419,7 @@ if _CROCODDYL_AVAILABLE:
         print(f"  [v12.7] BODY_INERTIA CRBA upgrade failed: {_e}")
 
 N_MPC  = CFG.n_mpc
-DT_MPC = DT * 5          # MPC 샘플링 주기 [s]  (= 0.01s)  v12 smoothness 패치
+DT_MPC = DT * 10         # MPC 샘플링 주기 [s]  (= 0.02s)  v13.1: v12 smoothness 패치 원복
 
 # MPC 상태 가중치: x=[roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
 # v13: py/vy 가중치 활성화 — MPC closed-loop 으로 y drift 보정.
@@ -1769,7 +1774,8 @@ USE_STANCE_FOOT_CONSTRAINT = CFG.use_stance_foot_constraint
 USE_WBIC_FB         = CFG.use_wbic_fb
 USE_MPC_CLOSED_LOOP = CFG.use_mpc_closed_loop
 WBIC_W_FB           = CFG.wbic_w_fb
-WBIC_W_DTAU         = CFG.wbic_w_dtau    # τ smoothness penalty weight
+WBIC_W_DTAU         = CFG.wbic_w_dtau    # τ smoothness penalty weight (v13.1: 0.0 OFF default)
+USE_SPLINE_DIFF     = CFG.use_spline_diff  # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: OFF default)
 
 # v12: crocoddyl NMPC 토글
 # True : 시뮬 시작 시 한번 NMPC 풀이 → trajectory 사용 (MPC+WBIC 우회)
@@ -2039,11 +2045,15 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     calc_total = time.perf_counter() - calc_start
 
     joint_hist_unwrapped = np.unwrap(joint_hist, axis=0)
-    # v12 smoothness 패치: np.gradient 이중 차분 → CubicSpline 해석미분
-    # (q[k]에서 q̇, q̈ 노이즈 ≈ 40000× 폭증 차단 → WBIC ddq_des 정합 ↑)
-    _t_grid_jh = np.arange(joint_hist_unwrapped.shape[0]) * DT
-    _jh_spline = _CubicSpline(_t_grid_jh, joint_hist_unwrapped, axis=0, bc_type='natural')
-    joint_vel_hist = _jh_spline(_t_grid_jh, 1)
+    # v13.1: USE_SPLINE_DIFF 토글로 CubicSpline (smoothness 패치) vs np.gradient (원래) 선택.
+    # 정량 측정 결과 spline 이 τ peak / jerk peak 폭주 유발 → default False.
+    if USE_SPLINE_DIFF:
+        _t_grid_jh = np.arange(joint_hist_unwrapped.shape[0]) * DT
+        _jh_spline = _CubicSpline(_t_grid_jh, joint_hist_unwrapped, axis=0, bc_type='natural')
+        joint_vel_hist = _jh_spline(_t_grid_jh, 1)
+    else:
+        # np.gradient: boundary는 forward/backward 차분 → 첫 frame spike 제거
+        joint_vel_hist = np.gradient(joint_hist_unwrapped, DT, axis=0)
 
     peak_per_joint  = np.max(np.abs(joint_vel_hist), axis=(0, 1))
     ratio_per_joint = peak_per_joint / JOINT_VEL_LIMIT_RAD_S
@@ -2114,14 +2124,18 @@ for _col, _leg, _sw_mask, _fb, _q_home, _lim_lo, _lim_hi, _leg_name, _lim_name i
         print(f"  [INFO]    {_leg_name} home 이탈 평균 {_home_dev:.4f}rad > 1.0rad — "
               f"swing 궤적이 home 자세와 크게 다름. T({T}s)↑ or V({V}m/s)↓ 시 완화됨.")
 
-# v12 smoothness 패치: 최종 joint_hist 에 CubicSpline 한 번 fitting →
-# q̇, q̈, q⃛ 를 모두 해석미분으로 통일 (np.gradient 이중차분 제거).
+# v13.1: USE_SPLINE_DIFF 토글로 미분 방식 선택 (CubicSpline vs np.gradient).
 _t_grid_final = np.arange(N_FRAMES) * DT
 _jh_unwrap_final = np.unwrap(joint_hist, axis=0)
-_jh_spline_final = _CubicSpline(_t_grid_final, _jh_unwrap_final, axis=0, bc_type='natural')
-joint_vel_hist = _jh_spline_final(_t_grid_final, 1)
-joint_acc_hist = _jh_spline_final(_t_grid_final, 2)
-_joint_jrk_hist = _jh_spline_final(_t_grid_final, 3)   # 3rd derivative (visualization)
+if USE_SPLINE_DIFF:
+    _jh_spline_final = _CubicSpline(_t_grid_final, _jh_unwrap_final, axis=0, bc_type='natural')
+    joint_vel_hist  = _jh_spline_final(_t_grid_final, 1)
+    joint_acc_hist  = _jh_spline_final(_t_grid_final, 2)
+    _joint_jrk_hist = _jh_spline_final(_t_grid_final, 3)
+else:
+    joint_vel_hist = np.gradient(_jh_unwrap_final, DT, axis=0)
+    joint_acc_hist = np.gradient(joint_vel_hist, DT, axis=0)
+    _joint_jrk_hist = np.gradient(joint_acc_hist, DT, axis=0)
 
 joint_vel_FR = joint_vel_hist[:, 0, :]
 joint_acc_FR = joint_acc_hist[:, 0, :]
@@ -2155,10 +2169,13 @@ for leg in range(4):
         prev   = theta_a_hist[fi-1, leg, :nj]
         target = joint_hist[fi-1, leg, :nj]
         theta_a_hist[fi, leg, :nj] = prev + (DT / TAU_LAG) * (target - prev)
-    # v12 smoothness: theta_a (1st-order lag of joint_hist) 도 spline 해석미분 통일
-    _cs_ta = _CubicSpline(_t_grid_final, theta_a_hist[:, leg, :nj],
-                          axis=0, bc_type='natural')
-    dtheta_a_hist[:, leg, :nj] = _cs_ta(_t_grid_final, 1)
+    # v13.1: USE_SPLINE_DIFF 토글
+    if USE_SPLINE_DIFF:
+        _cs_ta = _CubicSpline(_t_grid_final, theta_a_hist[:, leg, :nj],
+                              axis=0, bc_type='natural')
+        dtheta_a_hist[:, leg, :nj] = _cs_ta(_t_grid_final, 1)
+    else:
+        dtheta_a_hist[:, leg, :nj] = np.gradient(theta_a_hist[:, leg, :nj], DT, axis=0)
 
 wbc_tau_ff   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_dyn  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))  # M·q̈+C·q̇+g(q) (RNEA, 중력 포함)
