@@ -1,4 +1,28 @@
 """
+gait_sim_v13.py  —  v12 + DH d2 부호 미러링 (좌우 mirror 정합)
+
+v12 대비 핵심 변경:
+    · DH d2 부호 좌우 분리: 좌측 다리 (FL, HL) 는 d2 = -0.0075 (우측 +0.0075 의 거울상)
+        - 같은 Q_HOME 으로 *수치적 거울 대칭* foot 위치 산출 (검증 완료)
+        - foot leg-local sim: 우측 (-0.0568, -0.0075, -0.4650), 좌측 (-0.0568, +0.0075, -0.4650)
+    · hip_y_bias = 0  (v12 의 "부분 보정" kludge 제거 — 더 이상 불필요)
+    · LEG_HIP_OFFSETS = ±BODY_LAT  (깔끔한 좌우 대칭 hip translation)
+    · LEG_DH = [DH_FRONT_R, DH_FRONT_L, DH_HIND_R, DH_HIND_L]  (4벌)
+    · analytical_ik_front / opt_ik_front / opt_ik_hind 모두 `dh` 파라미터 받도록 refactor
+        - 기존 module-level _D2_F / DH_FRONT / DH_HIND 사용을 명시적 dh 인자로 전환
+    · v12 smoothness 패치 (DT_MPC=DT*5, wbic_w_dtau, CubicSpline q̇/q̈) 그대로 이식
+
+기대 효과:
+    · foot world 위치 좌우 대칭 (±0.0575) → 정적 roll moment ≈ 0
+    · 다리 mass distribution 좌우 거울 대칭 → dynamic drift 차단
+    · body y drift 근본 해결 (v12 의 ~수십 mm 잔존 drift → ≈ 0)
+
+URDF / Pinocchio 미러링은 별도 작업 (v13 의 USE_PINOCCHIO=False 일 때 정합).
+
+──────────────────────────────────────────────────────────────────
+이하 v12 변경 사항 기록 (참고용)
+──────────────────────────────────────────────────────────────────
+
 gait_sim_v12.py  —  v11 + crocoddyl NMPC 통합 (USE_NMPC 토글)
 
 v11 대비 추가:
@@ -88,6 +112,7 @@ import matplotlib.gridspec as gridspec
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.animation import FuncAnimation
 from scipy.optimize import minimize as _sp_minimize
+from scipy.interpolate import CubicSpline as _CubicSpline
 
 for key in mpl.rcParams:
     if key.startswith("keymap."):
@@ -119,7 +144,7 @@ class GaitConfig:
     body_fwd_h: float = -0.250    # 뒷다리 hip x [m]
     body_lat: float = 0.050       # 좌우 hip y [m]
     body_z_h: float = -0.050      # 뒷다리 hip z 오프셋 [m]
-    hip_y_bias: float = 0.0075    # ⚠ DH d2 비대칭 (= +y 시프트, body y drift 원인)
+    hip_y_bias: float = 0.0       # v13: DH d2 미러링으로 근본 해결. v12 의 부분 보정 제거.
     # ─────────── Robot mass / inertia ───────────
     body_mass: float = 15.0       # body 질량 [kg]
     g_acc: float = 9.81           # [m/s²]
@@ -166,13 +191,14 @@ class GaitConfig:
     wbic_w_lam: float = 0.001
     wbic_lamz_min: float = 1.0    # stance 발 최소 법선력 [N]
     wbic_w_fb: float = 0.1        # body fb weight
+    wbic_w_dtau: float = 0.001    # τ smoothness: w_dtau·‖τ−τ_prev‖²  (0=off)
     # ─────────── NMPC: solver ───────────
     use_nmpc: bool = False
     use_nmpc_receding: bool = True
     nmpc_maxiter: int = 200
     nmpc_init_reg: float = 1.0
-    nmpc_rh_n_horizon: int = 24   # 0.5s @ DT_MPC=0.02
-    nmpc_rh_n_resolve: int = 12   # half cycle re-solve
+    nmpc_rh_n_horizon: int = 50   # 0.5s @ DT_NMPC=0.01 (v12 smoothness 패치 후 DT_MPC=0.01)
+    nmpc_rh_n_resolve: int = 25   # 0.25s half cycle re-solve @ DT_NMPC=0.01
     nmpc_rh_maxiter: int = 50
     # ─────────── NMPC: cost weights ───────────
     nmpc_w_track_xy: float = 100.0
@@ -249,21 +275,43 @@ BODY_FWD_H = CFG.body_fwd_h
 BODY_LAT   = CFG.body_lat
 BODY_Z_H   = CFG.body_z_h
 
-# ── DH 파라미터 ──────────────────────────────────────────────
-DH_FRONT = [
-    (+math.pi/2, 0.0,   0.0,   ),
-    (0.0,        0.21,  0.0075,),
-    (0.0,        0.235, 0.0,   ),
-    (0.0,        0.1,   0.0,   ),
-    (0.0,        0.045, 0.0,   ),
+# ── DH 파라미터 (v13: 좌우 d2 부호 분리 — 거울 대칭 다리) ─────────
+# Right legs (FR, HR): d2 = +0.0075   (외측으로 +y abduction)
+# Left  legs (FL, HL): d2 = -0.0075   (외측으로 -y abduction → body frame +y 발 위치)
+# 같은 Q_HOME 으로 FK 시 leg-local sim foot y 부호만 반전 → 좌우 거울 대칭.
+DH_FRONT_R = [
+    (+math.pi/2, 0.0,   0.0,    ),
+    (0.0,        0.21,  +0.0075,),    # ← d2 = +0.0075
+    (0.0,        0.235, 0.0,    ),
+    (0.0,        0.1,   0.0,    ),
+    (0.0,        0.045, 0.0,    ),
 ]
-DH_HIND = [
-    (-math.pi/2, 0.0,   0.0,   ),
-    (0.0,        0.21,  0.0075,),
-    (0.0,        0.21,  0.0,   ),
-    (0.0,        0.148, 0.0,   ),
-    (0.0,        0.045, 0.0,   ),
+DH_FRONT_L = [
+    (+math.pi/2, 0.0,   0.0,    ),
+    (0.0,        0.21,  -0.0075,),    # ← d2 = -0.0075  (좌측 미러)
+    (0.0,        0.235, 0.0,    ),
+    (0.0,        0.1,   0.0,    ),
+    (0.0,        0.045, 0.0,    ),
 ]
+DH_HIND_R = [
+    (-math.pi/2, 0.0,   0.0,    ),
+    (0.0,        0.21,  +0.0075,),
+    (0.0,        0.21,  0.0,    ),
+    (0.0,        0.148, 0.0,    ),
+    (0.0,        0.045, 0.0,    ),
+]
+DH_HIND_L = [
+    (-math.pi/2, 0.0,   0.0,    ),
+    (0.0,        0.21,  -0.0075,),    # ← d2 = -0.0075  (좌측 미러)
+    (0.0,        0.21,  0.0,    ),
+    (0.0,        0.148, 0.0,    ),
+    (0.0,        0.045, 0.0,    ),
+]
+
+# 호환용 alias — v12 코드에서 DH_FRONT/DH_HIND 단일 참조하던 곳은 우측 (R) 로 매핑.
+# 좌측 IK 호출 시 LEG_DH[leg] 로 적절한 dh 전달.
+DH_FRONT = DH_FRONT_R
+DH_HIND  = DH_HIND_R
 
 _A2_F = 0.21; _A3_F = 0.235; _A4_F = 0.1; _A5_F = 0.045; _D2_F = 0.0075
 
@@ -295,7 +343,7 @@ TRAJ_PT_IDX_PER_LEG = [4, 4, 4, 4]
 
 LEG_NAMES        = ['FR', 'FL', 'HR', 'HL']
 LEG_COLORS       = ['#00d4ff', '#ff6b35', '#00ff99', '#c264ff']
-LEG_DH           = [DH_FRONT, DH_FRONT, DH_HIND, DH_HIND]
+LEG_DH           = [DH_FRONT_R, DH_FRONT_L, DH_HIND_R, DH_HIND_L]   # v13: 좌우 d2 미러
 N_JOINTS_PER_LEG = [5, 5, 5, 5]
 N_JOINTS_MAX     = 5
 
@@ -357,19 +405,26 @@ if _CROCODDYL_AVAILABLE:
         print(f"  [v12.7] BODY_INERTIA upgraded (CRBA composite, home pose): "
               f"diag=[{BODY_INERTIA[0,0]:.3f}, {BODY_INERTIA[1,1]:.3f}, {BODY_INERTIA[2,2]:.3f}] "
               f"(vs base-link only [0.07, 0.26, 0.26])")
+        # v13: CRBA off-diagonal 좌우 대칭 검증용 출력
+        print(f"  [v13]  BODY_INERTIA off-diag: Ixy={BODY_INERTIA[0,1]:+.5f}, "
+              f"Ixz={BODY_INERTIA[0,2]:+.5f}, Iyz={BODY_INERTIA[1,2]:+.5f}  "
+              f"(좌우 대칭이면 Ixy≈Iyz≈0)")
         del _m_init, _d_init, _q0_init, _M_full
     except Exception as _e:
         print(f"  [v12.7] BODY_INERTIA CRBA upgrade failed: {_e}")
 
 N_MPC  = CFG.n_mpc
-DT_MPC = DT * 10         # MPC 샘플링 주기 [s]  (= 0.02s)
+DT_MPC = DT * 5          # MPC 샘플링 주기 [s]  (= 0.01s)  v12 smoothness 패치
 
 # MPC 상태 가중치: x=[roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
+# v13: py/vy 가중치 활성화 — MPC closed-loop 으로 y drift 보정.
+# (v12 에서는 _HIP_Y_BIAS 부분 보정 + 다리 비대칭 의 우연한 상쇄로 drift 작았으나,
+#  v13 DH 미러 완벽 → 잔여 y momentum 을 MPC 가 직접 잡아야 함.)
 _Q_DIAG = np.array([
     200, 200, 100,   # roll, pitch, yaw
-      0,   0, 200,   # px, py, pz (높이 추종)
+      0, 100, 200,   # px, py, pz  (v13: py 활성화)
       0,   0,   0,   # ωx, ωy, ωz
-     10,   0,   0,   # vx (전진속도 추종), vy, vz
+     10,  10,   0,   # vx, vy, vz  (v13: vy 활성화)
       0,           # g (상수, 추종 불필요)
 ], dtype=float)
 MPC_Q = np.diag(_Q_DIAG)
@@ -431,21 +486,28 @@ _HIND_J4_TO_J5_SIM = _dh_to_sim(_HIND_J4_TO_J5_DH, front_leg=False)
 J4_TO_J5_SIM_PER_LEG = [_FRONT_J4_TO_J5_SIM, _FRONT_J4_TO_J5_SIM,
                           _HIND_J4_TO_J5_SIM,  _HIND_J4_TO_J5_SIM]
 
-def analytical_ik_front(Px, Py, Pz, phi, theta5_target):
-    D2 = Px**2 + Py**2 - _D2_F**2
+def analytical_ik_front(Px, Py, Pz, phi, theta5_target, dh=None):
+    """v13: dh 인자로 좌우 (DH_FRONT_R / DH_FRONT_L) 모두 처리.
+       dh=None 이면 후방호환 — _D2_F (=DH_FRONT_R[1][2]) 사용.
+    """
+    if dh is None:
+        d2 = _D2_F; a2 = _A2_F; a3 = _A3_F; a4 = _A4_F; a5 = _A5_F
+    else:
+        d2 = dh[1][2]; a2 = dh[1][1]; a3 = dh[2][1]; a4 = dh[3][1]; a5 = dh[4][1]
+    D2 = Px**2 + Py**2 - d2**2
     if D2 < 0:
         return None
     R = math.sqrt(D2)
-    theta1 = math.atan2(_D2_F, -R) - math.atan2(-Py, Px)
+    theta1 = math.atan2(d2, -R) - math.atan2(-Py, Px)
     c1, s1 = math.cos(theta1), math.sin(theta1)
     x_s = c1 * Px + s1 * Py
-    x3 = x_s - _A4_F * math.cos(phi) - _A5_F * math.cos(theta5_target)
-    z3 = Pz   - _A4_F * math.sin(phi) - _A5_F * math.sin(theta5_target)
-    cos_th3 = (x3**2 + z3**2 - _A2_F**2 - _A3_F**2) / (2.0 * _A2_F * _A3_F)
+    x3 = x_s - a4 * math.cos(phi) - a5 * math.cos(theta5_target)
+    z3 = Pz   - a4 * math.sin(phi) - a5 * math.sin(theta5_target)
+    cos_th3 = (x3**2 + z3**2 - a2**2 - a3**2) / (2.0 * a2 * a3)
     cos_th3 = max(-1.0, min(1.0, cos_th3))
     theta3  = math.acos(cos_th3)
     theta2 = (math.atan2(z3, x3)
-              - math.atan2(_A3_F * math.sin(theta3), _A2_F + _A3_F * math.cos(theta3)))
+              - math.atan2(a3 * math.sin(theta3), a2 + a3 * math.cos(theta3)))
     theta4 = phi - theta2 - theta3
     theta5 = theta5_target - (theta2 + theta3 + theta4)
     def wrap(a):
@@ -480,8 +542,8 @@ def analytical_ik_hind(Px, Py, Pz, phi, dh, theta5_target=None):
     return [wrap(theta1), wrap(theta2), wrap(theta3), wrap(theta4)]
 
 
-def opt_ik_front(p_target_dh, q_init, q_ref=None):
-    """SLSQP 최적화 IK — 앞다리.
+def opt_ik_front(p_target_dh, q_init, q_ref=None, dh=None):
+    """SLSQP 최적화 IK — 앞다리. v13: dh 인자로 좌우 (DH_FRONT_R/L) 분리.
 
     등식 제약 : FK_tip(q) = p_target          (위치 정확도 보장)
                 q[4] = Q_HOME_FRONT[4]        (toe 고정 — IK에서 제외)
@@ -491,6 +553,8 @@ def opt_ik_front(p_target_dh, q_init, q_ref=None):
                  - q_ref가 주어지면 그 자세 추종 (swing1/swing2 quintic blend)
                  - q_ref=None이면 q_init 사용 (smoothness only)
     """
+    if dh is None:
+        dh = DH_FRONT_R   # v13 후방호환 default (= 우측)
     p_t   = np.asarray(p_target_dh, dtype=float)
     q0    = np.asarray(q_init, dtype=float)
     q_tgt = q0 if q_ref is None else np.asarray(q_ref, dtype=float)
@@ -507,7 +571,7 @@ def opt_ik_front(p_target_dh, q_init, q_ref=None):
 
     # ── 등식 제약: 발끝 위치 ──────────────────────────────────────────────
     constraints = [{'type': 'eq',
-                    'fun': lambda q: np.array(forward_kinematics(q, DH_FRONT)[-1]) - p_t}]
+                    'fun': lambda q: np.array(forward_kinematics(q, dh)[-1]) - p_t}]
 
     # ── 등식 제약: q5(toe) 고정 — IK에서 제외 (analytical과 동일하게 home 값 유지) ─
     # th5는 가벼운 toe link이라 IK 자유도로 활용하지 않음.
@@ -519,7 +583,7 @@ def opt_ik_front(p_target_dh, q_init, q_ref=None):
     _lm_front = LINK_MASS_PER_LEG[0]
     if OPT_IK_USE_TAU_LIMIT:
         def _torque_ineq(q):
-            tau_g = compute_gravity_torque_sim(q, DH_FRONT, _lm_front, front_leg=True)
+            tau_g = compute_gravity_torque_sim(q, dh, _lm_front, front_leg=True)
             return JOINT_TORQUE_LIMIT[:len(tau_g)] - np.abs(tau_g)  # ≥ 0 이어야 통과
         constraints.append({'type': 'ineq', 'fun': _torque_ineq})
 
@@ -527,22 +591,22 @@ def opt_ik_front(p_target_dh, q_init, q_ref=None):
         # 참조 자세 추종 (q_ref=None이면 q_init = warm-start smoothness)
         c_qref = LAMBDA_Q_OPT * np.dot(q - q_tgt, q - q_tgt)
         # τ_grav minimize: redundancy를 토크 작은 자세로 자동 사용
-        tau_g  = compute_gravity_torque_sim(q, DH_FRONT, _lm_front, front_leg=True)
+        tau_g  = compute_gravity_torque_sim(q, dh, _lm_front, front_leg=True)
         c_tau  = LAMBDA_TAU_OPT * np.dot(tau_g, tau_g)
         return float(c_qref + c_tau)
 
     res = _sp_minimize(cost, q0, method='SLSQP', bounds=active_bounds,
                        constraints=constraints,
                        options={'ftol': 1e-8, 'maxiter': OPT_IK_MAXITER})
-    tip_final = np.array(forward_kinematics(res.x, DH_FRONT)[-1])
+    tip_final = np.array(forward_kinematics(res.x, dh)[-1])
     pos_err_sq = float(np.dot(tip_final - p_t, tip_final - p_t))
     if pos_err_sq < 1e-6:
         return list(res.x), res.nit, pos_err_sq
     return None, res.nit, pos_err_sq
 
 
-def opt_ik_hind(p_target_dh, q_init, q_ref=None):
-    """SLSQP 최적화 IK — 뒷다리. opt_ik_front와 구조 동일.
+def opt_ik_hind(p_target_dh, q_init, q_ref=None, dh=None):
+    """SLSQP 최적화 IK — 뒷다리. v13: dh 인자로 좌우 (DH_HIND_R/L) 분리.
 
     등식 제약 : FK_tip(q) = p_target          (위치 정확도 보장)
                 q[4] = Q_HOME_HIND[4]         (toe 고정)
@@ -550,6 +614,8 @@ def opt_ik_hind(p_target_dh, q_init, q_ref=None):
     bounds     : HIND_Q_LIM ∩ 각속도 한계      (OPT_IK_USE_VEL_LIMIT)
     비용       : LAMBDA_Q_OPT·||q - q_ref||² + LAMBDA_TAU_OPT·||τ_grav(q)||²
     """
+    if dh is None:
+        dh = DH_HIND_R   # v13 후방호환 default (= 우측)
     p_t   = np.asarray(p_target_dh, dtype=float)
     q0    = np.asarray(q_init, dtype=float)
     q_tgt = q0 if q_ref is None else np.asarray(q_ref, dtype=float)
@@ -564,27 +630,27 @@ def opt_ik_hind(p_target_dh, q_init, q_ref=None):
         active_bounds = HIND_Q_LIM
 
     constraints = [{'type': 'eq',
-                    'fun': lambda q: np.array(forward_kinematics(q, DH_HIND)[-1]) - p_t}]
+                    'fun': lambda q: np.array(forward_kinematics(q, dh)[-1]) - p_t}]
     constraints.append({'type': 'eq',
                         'fun': lambda q: q[4] - Q_HOME_HIND[4]})
 
     _lm_hind = LINK_MASS_PER_LEG[2]
     if OPT_IK_USE_TAU_LIMIT:
         def _torque_ineq(q):
-            tau_g = compute_gravity_torque_sim(q, DH_HIND, _lm_hind, front_leg=False)
+            tau_g = compute_gravity_torque_sim(q, dh, _lm_hind, front_leg=False)
             return JOINT_TORQUE_LIMIT[:len(tau_g)] - np.abs(tau_g)
         constraints.append({'type': 'ineq', 'fun': _torque_ineq})
 
     def cost(q):
         c_qref = LAMBDA_Q_OPT * np.dot(q - q_tgt, q - q_tgt)
-        tau_g  = compute_gravity_torque_sim(q, DH_HIND, _lm_hind, front_leg=False)
+        tau_g  = compute_gravity_torque_sim(q, dh, _lm_hind, front_leg=False)
         c_tau  = LAMBDA_TAU_OPT * np.dot(tau_g, tau_g)
         return float(c_qref + c_tau)
 
     res = _sp_minimize(cost, q0, method='SLSQP', bounds=active_bounds,
                        constraints=constraints,
                        options={'ftol': 1e-8, 'maxiter': OPT_IK_MAXITER})
-    tip_final = np.array(forward_kinematics(res.x, DH_HIND)[-1])
+    tip_final = np.array(forward_kinematics(res.x, dh)[-1])
     pos_err_sq = float(np.dot(tip_final - p_t, tip_final - p_t))
     if pos_err_sq < 1e-6:
         return list(res.x), res.nit, pos_err_sq
@@ -758,11 +824,13 @@ def compute_mh_leg(q, dq, dh, lm):
 
 
 def wbic_qp_leg(M, h, ddq_des, tau_ff, lam_des, J, contact, nj,
-                w_ddq, w_tau, w_lam, lamz_min, mu):
+                w_ddq, w_tau, w_lam, lamz_min, mu,
+                tau_prev=None, w_dtau=0.0):
     """Per-leg WBIC QP correction.
 
     변수 : x = [Δq̈ (nj); Δτ (nj); Δλ (3)]
     비용 : w_ddq‖Δq̈‖² + w_tau‖Δτ‖² + w_lam‖Δλ‖²
+           [+ w_dtau‖(tau_ff+Δτ) − tau_prev‖² if w_dtau>0 and tau_prev given]
     등식 : M·Δq̈ - Δτ - Jᵀ·Δλ = r,  r = tau_ff + Jᵀ·λ_des - M·ddq_des - h
     부등 : τ_min ≤ tau_ff+Δτ ≤ τ_max
            stance: λ_z+Δλ_z ≥ lamz_min,  |λ_x,y+Δλ_x,y| ≤ μ(λ_z+Δλ_z)
@@ -771,8 +839,17 @@ def wbic_qp_leg(M, h, ddq_des, tau_ff, lam_des, J, contact, nj,
     Returns (dq̈, dτ, dλ, success, residual_pre)
     """
     n_v = nj + nj + 3
-    P = np.diag([w_ddq]*nj + [w_tau]*nj + [w_lam]*3)
+    P = np.diag([w_ddq]*nj + [w_tau]*nj + [w_lam]*3).astype(float)
     qv = np.zeros(n_v)
+
+    # τ smoothness: ‖(tau_ff + Δτ) − tau_prev‖²
+    #   = ‖Δτ + c‖²  where c = tau_ff − tau_prev
+    #   → P[Δτ] += w_dtau·I,  qv[Δτ] += w_dtau·c
+    if (tau_prev is not None) and (w_dtau > 0.0):
+        c = tau_ff - tau_prev
+        sl_dt = slice(nj, 2*nj)
+        P[sl_dt, sl_dt] += w_dtau * np.eye(nj)
+        qv[sl_dt]       += w_dtau * c
 
     # 등식
     A_eq = np.hstack([M, -np.eye(nj), -J.T])
@@ -1043,7 +1120,8 @@ def wbic_qp_full(M_legs, h_legs, ddq_des_legs, tau_ff_legs, lam_des_all,
                  v_dot_des_fb,
                  M_total, I_body, omega_world,
                  w_ddq, w_tau, w_lam, w_fb, lamz_min, mu,
-                 stance_foot_J_v11=None):
+                 stance_foot_J_v11=None,
+                 tau_prev_legs=None, w_dtau=0.0):
     """
     v11 Phase 7 — WBIC 부유 베이스 통합 단일 QP.
 
@@ -1093,6 +1171,20 @@ def wbic_qp_full(M_legs, h_legs, ddq_des_legs, tau_ff_legs, lam_des_all,
     P[sl_tau, sl_tau] = w_tau * np.eye(n_tau)
     P[sl_lam, sl_lam] = w_lam * np.eye(n_lam)
     qv = np.zeros(n_v, dtype=float)
+
+    # τ smoothness penalty: w_dtau·‖(tau_ff + Δτ) − tau_prev‖²  per leg.
+    # Expansion: ‖Δτ + c‖² with c = tau_ff − tau_prev  →  P[Δτ]+=w·I, qv[Δτ]+=w·c
+    if (tau_prev_legs is not None) and (w_dtau > 0.0):
+        for i in range(n_legs):
+            nj = nj_per_leg[i]
+            tau_prev_i = tau_prev_legs[i]
+            if tau_prev_i is None:
+                continue
+            c_i = tau_ff_legs[i] - tau_prev_i
+            s_off = sl_tau.start + leg_off_tau[i]
+            sl_i  = slice(s_off, s_off + nj)
+            P[sl_i, sl_i] += w_dtau * np.eye(nj)
+            qv[sl_i]      += w_dtau * c_i
 
     # ── 등식 1: body 6-DoF ─────────────────────────────────────
     # M_fb·v̇_fb_des = F_des  (이 등식이 정확히 만족되면 RHS=0)
@@ -1677,6 +1769,7 @@ USE_STANCE_FOOT_CONSTRAINT = CFG.use_stance_foot_constraint
 USE_WBIC_FB         = CFG.use_wbic_fb
 USE_MPC_CLOSED_LOOP = CFG.use_mpc_closed_loop
 WBIC_W_FB           = CFG.wbic_w_fb
+WBIC_W_DTAU         = CFG.wbic_w_dtau    # τ smoothness penalty weight
 
 # v12: crocoddyl NMPC 토글
 # True : 시뮬 시작 시 한번 NMPC 풀이 → trajectory 사용 (MPC+WBIC 우회)
@@ -1799,19 +1892,20 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
             step_height=STEP_HEIGHT * height_scale,
             stance_dur=stance_dur,
         )
+        _dh_leg = LEG_DH[leg]   # v13: 좌우 분리 dh
         if front_l:
             _foot_dh0 = _sim_to_dh(_foot_loc0 + _FRONT_J4_TO_J5_SIM, front_leg=True)
             _q_a = analytical_ik_front(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
-                                       PHI_FRONT, THETA5_FRONT)
+                                       PHI_FRONT, THETA5_FRONT, dh=_dh_leg)
             _q_init0 = list(_q_a) if _q_a is not None else list(Q_HOME_FRONT)
-            _q_opt, _, _ = opt_ik_front(_foot_dh0, _q_init0, q_ref=list(Q_HOME_FRONT))
+            _q_opt, _, _ = opt_ik_front(_foot_dh0, _q_init0, q_ref=list(Q_HOME_FRONT), dh=_dh_leg)
             prev_q_per_leg.append(_q_opt if _q_opt is not None else _q_init0)
         else:
             _foot_dh0 = _sim_to_dh(_foot_loc0 + _HIND_J4_TO_J5_SIM, front_leg=False)
             _q_h = analytical_ik_hind(_foot_dh0[0], _foot_dh0[1], _foot_dh0[2],
-                                      PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
+                                      PHI_HIND, dh=_dh_leg, theta5_target=THETA5_HIND)
             _q_init0 = list(_q_h) + [Q_HOME_HIND[4]] if _q_h is not None else list(Q_HOME_HIND)
-            _q_opt, _, _ = opt_ik_hind(_foot_dh0, _q_init0, q_ref=list(Q_HOME_HIND))
+            _q_opt, _, _ = opt_ik_hind(_foot_dh0, _q_init0, q_ref=list(Q_HOME_HIND), dh=_dh_leg)
             prev_q_per_leg.append(_q_opt if _q_opt is not None else _q_init0)
     OPT_IK_USE_VEL_LIMIT = _saved_vel_limit
 
@@ -1880,7 +1974,7 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                 else:
                     _q_ref = list(Q_HOME_FRONT)
                 q_opt, nit, pos_err_sq = opt_ik_front(foot_dh, prev_q_per_leg[leg][:5],
-                                                      q_ref=_q_ref)
+                                                      q_ref=_q_ref, dh=LEG_DH[leg])   # v13
                 opt_ik_nit_hist[fi, col]     = nit
                 opt_ik_pos_err_hist[fi, col] = pos_err_sq
                 if q_opt is not None:
@@ -1889,7 +1983,7 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                     # bounds 내 해 없음 → analytical fallback
                     opt_ik_fallback_hist[fi, col] = True
                     q_ana = analytical_ik_front(foot_dh[0], foot_dh[1], foot_dh[2],
-                                                PHI_FRONT, THETA5_FRONT)
+                                                PHI_FRONT, THETA5_FRONT, dh=LEG_DH[leg])  # v13
                     q = q_ana if q_ana is not None else list(Q_HOME_FRONT)
 
                 pq = prev_q_per_leg[leg]
@@ -1909,7 +2003,7 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                 _q_ref_h = list(Q_HOME_HIND)
 
                 q_opt, nit, pos_err_sq = opt_ik_hind(foot_dh, prev_q_per_leg[leg][:5],
-                                                     q_ref=_q_ref_h)
+                                                     q_ref=_q_ref_h, dh=LEG_DH[leg])   # v13
                 opt_ik_nit_hist[fi, col]     = nit
                 opt_ik_pos_err_hist[fi, col] = pos_err_sq
                 if q_opt is not None:
@@ -1917,7 +2011,7 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
                 else:
                     opt_ik_fallback_hist[fi, col] = True
                     q_h = analytical_ik_hind(foot_dh[0], foot_dh[1], foot_dh[2],
-                                             PHI_HIND, dh=DH_HIND, theta5_target=THETA5_HIND)
+                                             PHI_HIND, dh=LEG_DH[leg], theta5_target=THETA5_HIND)  # v13
                     if q_h is None:
                         q = list(Q_HOME_HIND)
                     else:
@@ -1945,8 +2039,11 @@ for opt_iter in range(1, MAX_TRAJ_OPT_ITERS + 1):
     calc_total = time.perf_counter() - calc_start
 
     joint_hist_unwrapped = np.unwrap(joint_hist, axis=0)
-    # np.gradient: boundary는 forward/backward 차분 → 첫 frame spike 제거
-    joint_vel_hist = np.gradient(joint_hist_unwrapped, DT, axis=0)
+    # v12 smoothness 패치: np.gradient 이중 차분 → CubicSpline 해석미분
+    # (q[k]에서 q̇, q̈ 노이즈 ≈ 40000× 폭증 차단 → WBIC ddq_des 정합 ↑)
+    _t_grid_jh = np.arange(joint_hist_unwrapped.shape[0]) * DT
+    _jh_spline = _CubicSpline(_t_grid_jh, joint_hist_unwrapped, axis=0, bc_type='natural')
+    joint_vel_hist = _jh_spline(_t_grid_jh, 1)
 
     peak_per_joint  = np.max(np.abs(joint_vel_hist), axis=(0, 1))
     ratio_per_joint = peak_per_joint / JOINT_VEL_LIMIT_RAD_S
@@ -2017,20 +2114,26 @@ for _col, _leg, _sw_mask, _fb, _q_home, _lim_lo, _lim_hi, _leg_name, _lim_name i
         print(f"  [INFO]    {_leg_name} home 이탈 평균 {_home_dev:.4f}rad > 1.0rad — "
               f"swing 궤적이 home 자세와 크게 다름. T({T}s)↑ or V({V}m/s)↓ 시 완화됨.")
 
+# v12 smoothness 패치: 최종 joint_hist 에 CubicSpline 한 번 fitting →
+# q̇, q̈, q⃛ 를 모두 해석미분으로 통일 (np.gradient 이중차분 제거).
+_t_grid_final = np.arange(N_FRAMES) * DT
+_jh_unwrap_final = np.unwrap(joint_hist, axis=0)
+_jh_spline_final = _CubicSpline(_t_grid_final, _jh_unwrap_final, axis=0, bc_type='natural')
+joint_vel_hist = _jh_spline_final(_t_grid_final, 1)
+joint_acc_hist = _jh_spline_final(_t_grid_final, 2)
+_joint_jrk_hist = _jh_spline_final(_t_grid_final, 3)   # 3rd derivative (visualization)
+
 joint_vel_FR = joint_vel_hist[:, 0, :]
-joint_acc_FR = np.gradient(joint_vel_FR, DT, axis=0)
-joint_jrk_FR = np.gradient(joint_acc_FR, DT, axis=0)
+joint_acc_FR = joint_acc_hist[:, 0, :]
+joint_jrk_FR = _joint_jrk_hist[:, 0, :]
 
 joint_vel_HR = joint_vel_hist[:, 2, :]
-joint_acc_HR = np.gradient(joint_vel_HR, DT, axis=0)
-joint_jrk_HR = np.gradient(joint_acc_HR, DT, axis=0)
+joint_acc_HR = joint_acc_hist[:, 2, :]
+joint_jrk_HR = _joint_jrk_hist[:, 2, :]
 
 joint_vel_HL = joint_vel_hist[:, 3, :]
-joint_acc_HL = np.gradient(joint_vel_HL, DT, axis=0)
-joint_jrk_HL = np.gradient(joint_acc_HL, DT, axis=0)
-
-# 전 관절 가속도 (RNEA용, 4 legs × N_JOINTS_MAX)
-joint_acc_hist = np.gradient(joint_vel_hist, DT, axis=0)
+joint_acc_HL = joint_acc_hist[:, 3, :]
+joint_jrk_HL = _joint_jrk_hist[:, 3, :]
 
 foot_local = foot_hist - LEG_HIP_OFFSETS[np.newaxis, :, :]
 foot_vel_t = np.gradient(foot_local, DT, axis=0)
@@ -2052,7 +2155,10 @@ for leg in range(4):
         prev   = theta_a_hist[fi-1, leg, :nj]
         target = joint_hist[fi-1, leg, :nj]
         theta_a_hist[fi, leg, :nj] = prev + (DT / TAU_LAG) * (target - prev)
-    dtheta_a_hist[:, leg, :nj] = np.gradient(theta_a_hist[:, leg, :nj], DT, axis=0)
+    # v12 smoothness: theta_a (1st-order lag of joint_hist) 도 spline 해석미분 통일
+    _cs_ta = _CubicSpline(_t_grid_final, theta_a_hist[:, leg, :nj],
+                          axis=0, bc_type='natural')
+    dtheta_a_hist[:, leg, :nj] = _cs_ta(_t_grid_final, 1)
 
 wbc_tau_ff   = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))
 wbc_tau_dyn  = np.zeros((N_FRAMES, 4, N_JOINTS_MAX))  # M·q̈+C·q̇+g(q) (RNEA, 중력 포함)
@@ -2069,6 +2175,10 @@ wbic_dlam_hist     = np.zeros((N_FRAMES, 4, 3))
 wbic_residual_hist = np.zeros((N_FRAMES, 4))    # eq 잔차 norm (사실상 0이어야 함)
 wbic_status_hist   = np.zeros((N_FRAMES, 4), dtype=bool)  # solver 성공 여부
 wbic_lam_used      = np.zeros((N_FRAMES, 4, 3))   # 실제 사용된 λ = λ_des + Δλ
+
+# v12 smoothness 패치: WBIC τ 의 frame-간 차분 페널티용 이전 frame τ 상태.
+# tau_ff_corrected[leg] = leg_data[leg]['tau_ff'] after WBIC d_tau 적용. None = first frame.
+tau_ff_corrected_prev = [None] * 4
 
 # ── v11: Floating-base 동역학 진단 배열 ────────────────────
 body_pos_hist   = np.zeros((N_FRAMES, 3))           # CoM world position
@@ -3000,6 +3110,7 @@ for fi in range(N_FRAMES):
                 w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM, w_fb=WBIC_W_FB,
                 lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
                 stance_foot_J_v11=stance_foot_J,
+                tau_prev_legs=tau_ff_corrected_prev, w_dtau=WBIC_W_DTAU,
             )
             if fb_out is not None:
                 used_fb = True
@@ -3029,6 +3140,7 @@ for fi in range(N_FRAMES):
                 contact=contact_mask[leg], nj=nj,
                 w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM,
                 lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+                tau_prev=tau_ff_corrected_prev[leg], w_dtau=WBIC_W_DTAU,
             )
             wbic_residual_hist[fi, leg] = res
             wbic_status_hist[fi, leg]   = ok
@@ -3058,6 +3170,8 @@ for fi in range(N_FRAMES):
         wbc_tau_grf [fi, leg, :nj] = d['tau_grf']
         wbc_tau_cmd [fi, leg, :nj] = tau_cmd_leg
         wbc_lam_calc[fi, leg]      = lam_calc_leg
+        # v12 smoothness: 다음 frame WBIC 의 w_dtau 항을 위해 *post-correction* tau_ff 보관.
+        tau_ff_corrected_prev[leg] = d['tau_ff'].copy()
 
     # ── Pass 4: Floating-base body 6-DoF 적분 ──────────────
     if USE_BODY_DYNAMICS:
