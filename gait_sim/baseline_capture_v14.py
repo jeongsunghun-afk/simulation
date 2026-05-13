@@ -10,10 +10,10 @@ import os, sys, subprocess, json
 SRC_TAG = 'gait_sim.runner (v13.6+)'
 OUT_MD = '/home/jsh/simulation/gait_sim/BASELINE_v14.md'
 SCENARIOS = [
-    ('NMPC trot',  {'use_nmpc': True,  'gait_type': 'trot'}),
-    ('NMPC walk',  {'use_nmpc': True,  'gait_type': 'walk'}),
-    ('v11 trot',   {'use_nmpc': False, 'gait_type': 'trot'}),
-    ('v11 walk',   {'use_nmpc': False, 'gait_type': 'walk'}),
+    ('NMPC trot',     {'use_nmpc': True,  'gait_type': 'trot'}),
+    ('NMPC walk',     {'use_nmpc': True,  'gait_type': 'walk'}),
+    ('MPC+WBIC trot', {'use_nmpc': False, 'gait_type': 'trot'}),
+    ('MPC+WBIC walk', {'use_nmpc': False, 'gait_type': 'walk'}),
 ]
 
 WORKER = r'''
