@@ -1,13 +1,10 @@
 """gait_sim.viz.fig_legs — Joint / foot analysis figures (per-leg).
 
-v13.2 Phase 5-c: Figure 2 (FR/HL joint analysis) 추출.
+v13.2 Phase 5-c/e: Figure 2 (FR/HL joint analysis) + Figure 6 (foot trajectory) 추출.
 
 함수:
-  · plot_joint_analysis(R, meta)   — FR/HL pos/vel/acc/jerk + opt-IK 진단
-                                       (v13.py Figure 2 와 동일 layout)
-
-후속:
-  · plot_foot_trajectory(R, meta)  — Figure 6 (foot cmd vs actual world frame)
+  · plot_joint_analysis(R, meta)   — FR/HL pos/vel/acc/jerk + opt-IK 진단 (Figure 2)
+  · plot_foot_trajectory(R, meta)  — 4-leg world-frame foot cmd vs actual (Figure 6)
 """
 from typing import Optional
 
@@ -128,5 +125,72 @@ def plot_joint_analysis(R: SimState, meta: Optional[dict] = None) -> plt.Figure:
         f'v={V}m/s  T={T}s  D={D}  '
         f'step_h={step_h:.0f}mm  step_l={step_l:.0f}mm',
         color='white', fontsize=11)
+
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════
+# Figure 6 — Foot trajectory cmd vs actual (world frame, 4 legs)
+# ══════════════════════════════════════════════════════════════
+def plot_foot_trajectory(R: SimState, meta: Optional[dict] = None) -> plt.Figure:
+    """4-leg world-frame foot trajectory cmd vs actual (v13.py Figure 6).
+
+    Args:
+        R:    SimState — foot_target_world_hist / foot_actual_world_hist 사용
+        meta: dict — {gait_type, V, T, step_height, step_length, use_nmpc}
+
+    Returns: plt.Figure  (3 rows × 4 cols = 12 panels)
+    """
+    meta = meta or {}
+    N  = R.n_frames
+    fr = np.arange(N)
+
+    fig = plt.figure(figsize=(15, 9))
+    fig.patch.set_facecolor('#1a1a2e')
+    gs = gridspec.GridSpec(3, 4, figure=fig, wspace=0.32, hspace=0.55,
+                           left=0.05, right=0.98, top=0.92, bottom=0.06)
+
+    axis_lbl = ['x [m]', 'y [m]', 'z [m]']
+
+    for li in range(4):
+        for ai in range(3):
+            ax = fig.add_subplot(gs[ai, li])
+            actual = R.foot_actual_world_hist[:, li, ai]
+            target = R.foot_target_world_hist[:, li, ai]
+            err = actual - target
+            valid = ~np.isnan(target)
+            if valid.sum() > 0:
+                err_max = float(np.max(np.abs(err[valid])))
+                err_rms = float(np.sqrt(np.mean(err[valid]**2)))
+                title = (f'{["FR","FL","HR","HL"][li]} {axis_lbl[ai].split()[0]}  '
+                         f'(swing err: rms={err_rms*1e3:.1f}mm max={err_max*1e3:.1f}mm)')
+            else:
+                title = f'{["FR","FL","HR","HL"][li]}  foot {axis_lbl[ai].split()[0]}'
+
+            ax.set_facecolor('#16213e')
+            ax.set_title(title, color='white', fontsize=8)
+            ax.set_xlabel('Frame', color='white', fontsize=7)
+            ax.set_ylabel(axis_lbl[ai], color='white', fontsize=7)
+            ax.tick_params(colors='gray', labelsize=7)
+            ax.grid(True, alpha=0.25, color='gray')
+            for sp in ax.spines.values():
+                sp.set_edgecolor('gray')
+            ax.set_xlim(0, N)
+            ax.plot(fr, target, lw=1.6, color='#ff6b6b', ls='--', label='cmd (swing)')
+            ax.plot(fr, actual, lw=1.4, color='#00d4ff',          label='actual')
+            if ai == 0 and li == 0:
+                ax.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                          edgecolor='gray', loc='upper left')
+
+    gait    = meta.get('gait_type', '')
+    V       = meta.get('V', '?')
+    T       = meta.get('T', '?')
+    step_h  = meta.get('step_height', 0.0) * 1e3
+    step_l  = meta.get('step_length', 0.0) * 1e3
+    mode    = 'NMPC' if meta.get('use_nmpc') else 'MPC + WBIC'
+    fig.suptitle(
+        f'Foot Trajectory Cmd vs Actual (world frame)  |  {gait.upper()}  |  '
+        f'v={V}m/s  T={T}s  step_h={step_h:.0f}mm  step_l={step_l:.0f}mm  {mode}',
+        color='white', fontsize=10)
 
     return fig

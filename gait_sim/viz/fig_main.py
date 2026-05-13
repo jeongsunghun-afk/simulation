@@ -1,15 +1,13 @@
 """gait_sim.viz.fig_main — Main visualization figures.
 
-v13.2 Phase 5-b: fig5 (body state vs cmd) 부터 pilot 추출.
+v13.2 Phase 5-b/h: fig5 (body state) + fig1 static portion 추출.
 모든 figure 함수는 SimState 객체를 받아 plot.
 
 함수:
-  · plot_body_state(R: SimState, meta: dict) → plt.Figure
-        body pos/vel x/y/z + orientation + angular vel (vs cmd)
-        (v13.py Figure 5 와 동일 layout)
-
-후속:
-  · plot_anim(R, meta)       — Figure 1 (3D 애니메이션)
+  · plot_body_state(R, meta)    — Figure 5: body pos/vel x/y/z + orient + omega vs cmd
+  · plot_main_static(R, meta)   — Figure 1 static portion:
+                                    gait phase chart + foot Z/X/dZ/dX/d²Z/d²X (7 panels)
+                                    3D animation 은 별도 plot_anim() 으로 추후 분리.
 """
 from typing import Optional
 
@@ -138,5 +136,136 @@ def plot_body_state(R: SimState, meta: Optional[dict] = None) -> plt.Figure:
         f'Body State vs Cmd  |  {gait.upper()}  |  '
         f'v={V}m/s  T={T}s  D={D}  {mode}',
         color='white', fontsize=10)
+
+    return fig
+
+
+# ══════════════════════════════════════════════════════════════
+# Figure 1 — Main static portion (gait phase + foot kinematic profiles)
+# 3D animation 은 별도 plot_anim() 으로 분리 예정.
+# ══════════════════════════════════════════════════════════════
+LEG_NAMES   = ['FR', 'FL', 'HR', 'HL']
+LEG_COLORS  = ['#00d4ff', '#ff6b35', '#00ff99', '#c264ff']
+
+
+def plot_main_static(R: SimState, meta: Optional[dict] = None) -> plt.Figure:
+    """v13.py Figure 1 의 static 부분 (3D anim 제외) — 7 panels:
+        · Gait Phase chart (FR/FL/HR/HL, bright=swing)
+        · Step Z [m]          + Step X [m]
+        · Step dZ/dt [m/s]    + Step dX/dt [m/s]
+        · Step d²Z/dt² [m/s²] + Step d²X/dt² [m/s²]
+
+    Args:
+        R:    SimState — foot_local + foot_vel_t + foot_acc_t + phase_hist 사용
+        meta: dict — {gait_type, V, T, D, step_height, step_length, total_mass}
+
+    Returns: plt.Figure
+    """
+    meta = meta or {}
+    N  = R.n_frames
+    fr = np.arange(N)
+    D_swing = meta.get('D', 0.5)
+
+    fig = plt.figure(figsize=(16, 10))
+    fig.patch.set_facecolor('#1a1a2e')
+    gs = gridspec.GridSpec(4, 2, figure=fig, wspace=0.30, hspace=0.65,
+                           left=0.07, right=0.98, top=0.93, bottom=0.05)
+
+    # row 0: Gait Phase chart (full width)
+    ax_phase = fig.add_subplot(gs[0, :])
+    gait = meta.get('gait_type', '')
+    _style_ax(ax_phase, f'Gait Phase  [{gait}]  (Bright=Swing)', ylabel='Leg')
+    ax_phase.set_xlim(0, N)
+    ax_phase.set_ylim(-0.5, 3.5)
+    ax_phase.set_yticks([0, 1, 2, 3])
+    ax_phase.set_yticklabels(LEG_NAMES[::-1], color='white')
+    swing_flag = (R.phase_hist < D_swing)
+    for leg in range(4):
+        row = 3 - leg
+        in_sw = False
+        sw_start = 0
+        for fi in range(N):
+            if swing_flag[fi, leg] and not in_sw:
+                sw_start = fi
+                in_sw = True
+            elif not swing_flag[fi, leg] and in_sw:
+                ax_phase.barh(row, fi - sw_start, left=sw_start, height=0.7,
+                              color=LEG_COLORS[leg], alpha=0.85)
+                in_sw = False
+        if in_sw:
+            ax_phase.barh(row, N - sw_start, left=sw_start, height=0.7,
+                          color=LEG_COLORS[leg], alpha=0.85)
+
+    # row 1: Step Height Z + Step Length X
+    ax_z = fig.add_subplot(gs[1, 0])
+    _style_ax(ax_z, 'Step Height  Z [m]', ylabel='Z [m]')
+    ax_z.set_xlim(0, N)
+    for leg in range(4):
+        ax_z.plot(fr, R.foot_local[:, leg, 2], lw=1.6,
+                  color=LEG_COLORS[leg], label=LEG_NAMES[leg])
+    ax_z.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                edgecolor='gray', ncol=4)
+
+    ax_x = fig.add_subplot(gs[1, 1])
+    _style_ax(ax_x, 'Step Length  X [m]', ylabel='X [m]')
+    ax_x.set_xlim(0, N)
+    for leg in range(4):
+        ax_x.plot(fr, R.foot_local[:, leg, 0], lw=1.6,
+                  color=LEG_COLORS[leg], label=LEG_NAMES[leg])
+    ax_x.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                edgecolor='gray', ncol=4)
+
+    # row 2: Z velocity + X velocity
+    ax_zv = fig.add_subplot(gs[2, 0])
+    _style_ax(ax_zv, 'Step Height Velocity  dZ/dt [m/s]', ylabel='[m/s]')
+    ax_zv.set_xlim(0, N)
+    for leg in range(4):
+        ax_zv.plot(fr, R.foot_vel_t[:, leg, 2], lw=1.6,
+                   color=LEG_COLORS[leg],
+                   ls='--' if leg >= 2 else '-', label=LEG_NAMES[leg])
+    ax_zv.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                 edgecolor='gray', ncol=4)
+
+    ax_xv = fig.add_subplot(gs[2, 1])
+    _style_ax(ax_xv, 'Step Length Velocity  dX/dt [m/s]', ylabel='[m/s]')
+    ax_xv.set_xlim(0, N)
+    for leg in range(4):
+        ax_xv.plot(fr, R.foot_vel_t[:, leg, 0], lw=1.6,
+                   color=LEG_COLORS[leg],
+                   ls='--' if leg >= 2 else '-', label=LEG_NAMES[leg])
+    ax_xv.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                 edgecolor='gray', ncol=4)
+
+    # row 3: Z acceleration + X acceleration
+    ax_za = fig.add_subplot(gs[3, 0])
+    _style_ax(ax_za, 'Step Height Acceleration  d²Z/dt² [m/s²]', ylabel='[m/s²]')
+    ax_za.set_xlim(0, N)
+    for leg in range(4):
+        ax_za.plot(fr, R.foot_acc_t[:, leg, 2], lw=1.6,
+                   color=LEG_COLORS[leg],
+                   ls='--' if leg >= 2 else '-', label=LEG_NAMES[leg])
+    ax_za.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                 edgecolor='gray', ncol=4)
+
+    ax_xa = fig.add_subplot(gs[3, 1])
+    _style_ax(ax_xa, 'Step Length Acceleration  d²X/dt² [m/s²]', ylabel='[m/s²]')
+    ax_xa.set_xlim(0, N)
+    for leg in range(4):
+        ax_xa.plot(fr, R.foot_acc_t[:, leg, 0], lw=1.6,
+                   color=LEG_COLORS[leg],
+                   ls='--' if leg >= 2 else '-', label=LEG_NAMES[leg])
+    ax_xa.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
+                 edgecolor='gray', ncol=4)
+
+    V        = meta.get('V', '?')
+    T        = meta.get('T', '?')
+    step_h   = meta.get('step_height', 0.0) * 1e3
+    step_l   = meta.get('step_length', 0.0) * 1e3
+    total_m  = meta.get('total_mass', 0.0)
+    fig.suptitle(
+        f'Gait Main Static  |  {gait.upper()}  |  '
+        f'v={V}m/s  T={T}s  D={D_swing}  '
+        f'step_h={step_h:.0f}mm  step_l={step_l:.0f}mm  total_mass={total_m:.2f}kg',
+        color='white', fontsize=11)
 
     return fig
