@@ -4,7 +4,7 @@
 
 | Scenario | mode | x_final/target | y_final | z_range | vx mean/tgt | roll/pitch max | τ peak | Fz peak max | diverged |
 |---|---|---:|---:|---:|---:|---:|---:|---:|:---:|
-| NMPC trot | _USE_NMPC_ACTIVE=True | 1.581 / 2.000 | +8 mm | 465~526 mm | 0.821 / 1.00 | 1.63° / 1.63° | 62.1 Nm | 502 N | ✅ |
-| NMPC walk | _USE_NMPC_ACTIVE=True | 1.034 / 1.600 | -8 mm | 435~485 mm | 0.258 / 0.40 | 2.41° / 7.11° | 41.7 Nm | 340 N | ✅ |
-| v11 trot | _USE_NMPC_ACTIVE=False | 2.006 / 2.000 | +67 mm | 462~469 mm | 1.003 / 1.00 | 0.32° / 0.08° | 93.1 Nm | 481 N | ✅ |
-| v11 walk | _USE_NMPC_ACTIVE=False | 1.609 / 1.600 | -559 mm | 463~467 mm | 0.402 / 0.40 | 0.29° / 0.38° | 86.5 Nm | 247 N | ✅ |
+| NMPC trot | _USE_NMPC_ACTIVE=True | 1.683 / 2.000 | +39 mm | 465~498 mm | 0.842 / 1.00 | 2.69° / 1.13° | 92.6 Nm | 457 N | ✅ |
+| NMPC walk | _USE_NMPC_ACTIVE=True | 0.803 / 1.600 | -18 mm | 390~471 mm | 0.200 / 0.40 | 3.71° / 6.96° | 78.2 Nm | 342 N | ✅ |
+| v11 trot | _USE_NMPC_ACTIVE=False | 1.991 / 2.000 | +61 mm | 455~465 mm | 0.995 / 1.00 | 0.06° / 0.11° | 93.0 Nm | 455 N | ✅ |
+| v11 walk | _USE_NMPC_ACTIVE=False | 1.613 / 1.600 | -565 mm | 461~466 mm | 0.403 / 0.40 | 0.19° / 0.36° | 86.6 Nm | 233 N | ✅ |

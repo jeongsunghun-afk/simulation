@@ -292,7 +292,7 @@ pip install pin                   # Phase 6 (pinocchio)
 ---
 
 ## 참고 문헌
-
+#ANYmal
 - Kim et al., "Highly Dynamic Quadruped Locomotion via Whole-Body Impulse Control and Model Predictive Control", IROS 2019 (MIT Cheetah 3)
 - Di Carlo et al., "Dynamic Locomotion in the MIT Cheetah 3 Through Convex Model-Predictive Control", IROS 2018
 - Wensing & Orin, "Generation of Dynamic Humanoid Behaviors through Task-Space Control with Conic Optimization", ICRA 2013

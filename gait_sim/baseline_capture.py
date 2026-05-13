@@ -7,8 +7,8 @@ Usage: python3 gait_sim/baseline_capture.py
 """
 import sys, os, subprocess, json, re
 
-SRC = '/home/jsh/simulation/gait_sim_v12.py'
-OUT_MD = '/home/jsh/simulation/gait_sim/BASELINE.md'
+SRC = '/home/jsh/simulation/gait_sim_v13.py'
+OUT_MD = '/home/jsh/simulation/gait_sim/BASELINE_v13.md'
 SCENARIOS = [
     ('NMPC trot',  {'use_nmpc': True,  'gait_type': 'trot'}),
     ('NMPC walk',  {'use_nmpc': True,  'gait_type': 'walk'}),
@@ -76,7 +76,7 @@ def run_one(label, overrides):
     proc = subprocess.run(
         ['python3', '-c', WORKER, SRC, json.dumps(overrides)],
         capture_output=True, text=True, cwd='/home/jsh/simulation',
-        env={**os.environ, 'MPLBACKEND': 'Agg'}, timeout=240,
+        env={**os.environ, 'MPLBACKEND': 'Agg'}, timeout=600,
     )
     if proc.returncode != 0:
         return {'label': label, 'error': proc.stderr.splitlines()[-3:] if proc.stderr else 'unknown'}
