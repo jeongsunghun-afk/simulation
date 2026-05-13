@@ -24,6 +24,11 @@ import numpy as np
 # ── External dependencies (optional) ─────────────────────────
 try:
     import crocoddyl as _crocoddyl
+    # NMPC: legacy build_pin_model 유지 (NMPC cost reference 정합).
+    # gait_sim.pin_model (v13 DH mirror) 은 별도 URDF export 모듈.
+    # — 새 pin_model 사용 시 3/5 solver fails 발생: NMPC swing target / foot_home_pin
+    #   계산이 single-DH 가정으로 작성되어 R/L mirror 와 inconsistency. v14 에서 NMPC
+    #   cost refactor 필요.
     import build_pin_model as _bm
     _CROCODDYL_AVAILABLE = True
 except ImportError:
