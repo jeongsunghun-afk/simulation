@@ -16,7 +16,7 @@ import numpy as np
 
 import qpsolvers
 
-from gait_sim.config import G_ACC
+from gait_sim.config import CFG, G_ACC
 from gait_sim.model import JOINT_TORQUE_LIMIT
 from gait_sim.dynamics import _skew
 
@@ -83,7 +83,7 @@ def wbic_qp_leg(M, h, ddq_des, tau_ff, lam_des, J, contact, nj,
         ub[2*nj:2*nj+3] = -lam_des
 
     try:
-        sol = qpsolvers.solve_qp(P, qv, G, h_ineq, A_eq, b_eq, lb, ub, solver='quadprog')
+        sol = qpsolvers.solve_qp(P, qv, G, h_ineq, A_eq, b_eq, lb, ub, solver=CFG.qp_solver)
     except Exception:
         sol = None
     if sol is None:
@@ -258,7 +258,7 @@ def wbic_qp_full(M_legs, h_legs, ddq_des_legs, tau_ff_legs, lam_des_all,
     h_ineq = np.array(h_ineq_list) if h_ineq_list else None
 
     try:
-        sol = qpsolvers.solve_qp(P, qv, G_ineq, h_ineq, A_eq, b_eq, lb, ub, solver='quadprog')
+        sol = qpsolvers.solve_qp(P, qv, G_ineq, h_ineq, A_eq, b_eq, lb, ub, solver=CFG.qp_solver)
     except Exception:
         sol = None
 
@@ -366,7 +366,7 @@ def wbic_qp_full_pin(M_full, h_full, J_full,
     h_ineq = np.array(h_list) if h_list else None
 
     try:
-        sol = qpsolvers.solve_qp(P, qv, G_ineq, h_ineq, A_eq, b_eq, lb, ub, solver='quadprog')
+        sol = qpsolvers.solve_qp(P, qv, G_ineq, h_ineq, A_eq, b_eq, lb, ub, solver=CFG.qp_solver)
     except Exception:
         sol = None
 

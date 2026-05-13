@@ -79,6 +79,7 @@ class GaitConfig:
     wbic_w_fb: float = 0.1        # body fb weight
     wbic_w_dtau: float = 0.0      # τ smoothness: w_dtau·‖τ−τ_prev‖²  (v13.1: net negative → OFF default)
     use_spline_diff: bool = False # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: net negative → OFF default)
+    qp_solver: str = 'quadprog'   # v13.0a: 'quadprog' / 'osqp' / 'proxqp' — MPC + WBIC QP solver 선택
     # ─────────── NMPC: solver ───────────
     use_nmpc: bool = False
     use_nmpc_receding: bool = True

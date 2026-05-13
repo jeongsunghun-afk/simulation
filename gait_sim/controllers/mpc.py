@@ -94,7 +94,7 @@ def qp_grf_distribute(contact_mask, foot_pos_world):
         G[row+4, col+1] = -1.0;  G[row+4, col+2] = -mu
 
     try:
-        x_opt = qpsolvers.solve_qp(P, q, G, h, A_eq, b_eq, solver='quadprog')
+        x_opt = qpsolvers.solve_qp(P, q, G, h, A_eq, b_eq, solver=CFG.qp_solver)
     except Exception:
         x_opt = None
 
@@ -294,7 +294,7 @@ def mpc_qp_plan(x0, contact_schedule, foot_positions, x_ref_step=None, ltv=False
 
     try:
         u_opt = qpsolvers.solve_qp(
-            P=H, q=f, G=G_mpc, h=h_mpc, A=A_mpc, b=b_mpc, solver='quadprog'
+            P=H, q=f, G=G_mpc, h=h_mpc, A=A_mpc, b=b_mpc, solver=CFG.qp_solver
         )
     except Exception:
         u_opt = None
