@@ -1,13 +1,15 @@
 """gait_sim.viz.fig_main — Main visualization figures.
 
-v13.2 Phase 5-b/h: fig5 (body state) + fig1 static portion 추출.
+v13.2 Phase 5-b/h/7: fig5 (body state) + fig1 static portion + plot_anim 추출.
 모든 figure 함수는 SimState 객체를 받아 plot.
 
 함수:
   · plot_body_state(R, meta)    — Figure 5: body pos/vel x/y/z + orient + omega vs cmd
   · plot_main_static(R, meta)   — Figure 1 static portion:
                                     gait phase chart + foot Z/X/dZ/dX/d²Z/d²X (7 panels)
-                                    3D animation 은 별도 plot_anim() 으로 추후 분리.
+  · plot_anim(R, meta)          — Figure 1 3D animation (FuncAnimation):
+                                    leg links + COM markers + foot traces + info text
+                                    Returns (fig, anim) — anim 반드시 retain 필요 (GC 방지)
 """
 from typing import Optional
 
@@ -269,3 +271,260 @@ def plot_main_static(R: SimState, meta: Optional[dict] = None) -> plt.Figure:
         color='white', fontsize=11)
 
     return fig
+
+
+# ══════════════════════════════════════════════════════════════
+# Figure 1 — 3D Animation (FuncAnimation)
+# ══════════════════════════════════════════════════════════════
+import math
+from matplotlib.animation import FuncAnimation
+# mpl_toolkits.mplot3d 는 import 만 해도 projection='3d' 등록됨
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401
+
+from gait_sim.kinematics import (
+    forward_kinematics as _fwk, _dh_to_sim as _d2s, _dh_matrix as _dhM,
+)
+from gait_sim.model import (
+    LEG_DH as _LEG_DH, N_JOINTS_PER_LEG as _NJ, LINK_MASS_PER_LEG as _LM,
+    LEG_HIP_OFFSETS,
+)
+
+_AX_COLORS = ['#ff4444', '#44ff44', '#4444ff']
+
+
+def plot_anim(R: SimState, meta: dict = None,
+              viz_body_mode: str = 'world',
+              interval_ms: int = None,
+              trace_cycle: bool = True) -> tuple:
+    """3D animation of quadruped over time (v13.py Figure 1 anim portion).
+
+    Args:
+        R:    SimState — joint_hist, foot_hist, body_pos/R_hist, wbc_tau_cmd, wbc_lam_des
+        meta: dict — {gait_type, V, T, D, step_height, step_length, total_mass}
+        viz_body_mode: 'world' / 'body_follow' / 'static'
+            - 'world': camera 고정, robot 이동 + 회전 (default)
+            - 'body_follow': camera body 따라감, R 회전만
+            - 'static': body_pos/R 무시 (robot 원점 고정)
+        interval_ms: FuncAnimation interval (None 이면 R.dt*1000)
+        trace_cycle: 발 trace 길이 = T/DT (1 cycle) 이면 True
+
+    Returns:
+        (fig, anim) — anim 객체는 caller 가 retain 해야 GC 안 됨.
+    """
+    meta = meta or {}
+    N = R.n_frames
+    DT_R = R.dt
+    T_meta = meta.get('T', 0.5)
+    D_meta = meta.get('D', 0.5)
+    swing_flag = (R.phase_hist < D_meta)
+
+    fig = plt.figure(figsize=(11, 9))
+    fig.patch.set_facecolor('#1a1a2e')
+    ax3d = fig.add_subplot(111, projection='3d')
+    ax3d.set_facecolor('#16213e')
+
+    # Viewport
+    reach = 0.65
+    ax3d.set_xlim(-reach, reach)
+    ax3d.set_ylim(-0.5, 0.5)
+    ax3d.set_zlim(-0.65, 0.15)
+    ax3d.set_xlabel('X (m)', color='white', labelpad=4)
+    ax3d.set_ylabel('Y (m)', color='white', labelpad=4)
+    ax3d.set_zlabel('Z (m)', color='white', labelpad=4)
+    ax3d.tick_params(colors='gray')
+    gait = meta.get('gait_type', '')
+    V    = meta.get('V', '?')
+    Tt   = meta.get('T', '?')
+    step_h = meta.get('step_height', 0.0) * 1e3
+    step_l = meta.get('step_length', 0.0) * 1e3
+    total_m = meta.get('total_mass', 0.0)
+    ax3d.set_title(
+        f'Gait Anim  [{gait.upper()}]  v={V}m/s  T={Tt}s  D={D_meta}  '
+        f'step_h={step_h:.0f}mm  step_l={step_l:.0f}mm  total_mass={total_m:.2f}kg',
+        color='white', fontsize=9)
+    ax3d.view_init(elev=20, azim=-55)
+    try:
+        ax3d.xaxis.pane.fill = ax3d.yaxis.pane.fill = ax3d.zaxis.pane.fill = False
+    except AttributeError:
+        pass
+
+    # World 모드에서 body x 이동 범위 반영
+    if viz_body_mode == 'world':
+        x_max = float(np.max(R.body_pos_hist[:, 0]))
+        x_min = float(np.min(R.body_pos_hist[:, 0]))
+        ax3d.set_xlim(min(-reach, x_min - 0.3), max(reach, x_max + 0.3))
+
+    # Body chassis 박스 라인 (4 hip 잇는 사각형)
+    BC_BODY = np.array([
+        LEG_HIP_OFFSETS[0], LEG_HIP_OFFSETS[2],
+        LEG_HIP_OFFSETS[3], LEG_HIP_OFFSETS[1],
+        LEG_HIP_OFFSETS[0],
+    ])
+    body_chassis_line, = ax3d.plot([], [], [], '-', color='white', lw=2.5, alpha=0.7)
+    hip_markers = [ax3d.plot([], [], [], 'o', color=LEG_COLORS[leg],
+                              markersize=7, alpha=0.8)[0] for leg in range(4)]
+    body_com_marker, = ax3d.plot([], [], [], 'X', color='yellow',
+                                  markersize=10, alpha=0.9, markeredgecolor='black')
+    for leg in range(4):
+        h = LEG_HIP_OFFSETS[leg]
+        ax3d.text(h[0], h[1], h[2] + 0.02, LEG_NAMES[leg], color=LEG_COLORS[leg], fontsize=7)
+
+    # Ground plane (foot z @ home)
+    gnd_z = float(R.foot_hist[0, 0, 2])
+    xx, yy = np.meshgrid([ax3d.get_xlim()[0], ax3d.get_xlim()[1]], [-0.5, 0.5])
+    try:
+        ax3d.plot_surface(xx, yy, np.full_like(xx, gnd_z), alpha=0.12, color='#888888')
+    except Exception:
+        pass
+
+    # Leg links / swing dots / leg traces / link COM markers
+    leg_links = []
+    for leg in range(4):
+        nj = _NJ[leg]
+        lns = [ax3d.plot([], [], [], '-o', color=LEG_COLORS[leg],
+                          lw=2.5, markersize=5)[0] for _ in range(nj)]
+        leg_links.append(lns)
+    trace_len = int(T_meta / DT_R) if trace_cycle else N
+    leg_traces = [ax3d.plot([], [], [], '-', color=LEG_COLORS[leg],
+                             lw=1.2, alpha=0.6)[0] for leg in range(4)]
+    trace_buf = [[[], [], []] for _ in range(4)]
+    swing_dots = [ax3d.plot([], [], [], 'o', color=LEG_COLORS[leg],
+                             markersize=9, alpha=0.9)[0] for leg in range(4)]
+    link_com_markers = []
+    for leg in range(4):
+        nj = _NJ[leg]
+        lm = _LM[leg]
+        mks = [ax3d.plot([], [], [], '*', color='#ffd700',
+                          markersize=4.0 + 3.5 * math.sqrt(float(lm[k])),
+                          markeredgecolor='black', markeredgewidth=0.5,
+                          alpha=0.9, zorder=15)[0] for k in range(nj)]
+        link_com_markers.append(mks)
+
+    # Frame indicator quivers (joint frame, recreated each call)
+    FRAME_LEN = 0.035
+    jf_quivers = [[[None, None, None] for _ in range(_NJ[leg] + 1)]
+                   for leg in range(4)]
+
+    info_text = ax3d.text2D(0.02, 0.98, "", transform=ax3d.transAxes,
+                             color='white', fontfamily='monospace', fontsize=7.5, va='top')
+
+    # Base frame quivers (origin, static)
+    BASE_FRAME_LEN = 0.12
+    for ax_i, lbl in enumerate(['X (fwd)', 'Y (lat)', 'Z (up)']):
+        dv = np.zeros(3); dv[ax_i] = BASE_FRAME_LEN
+        ax3d.quiver(0, 0, 0, dv[0], dv[1], dv[2],
+                     color=_AX_COLORS[ax_i], linewidth=2.5, arrow_length_ratio=0.25)
+        ax3d.text(dv[0]*1.15, dv[1]*1.15, dv[2]*1.15,
+                   lbl, color=_AX_COLORS[ax_i], fontsize=8, fontweight='bold')
+
+    # body transform helper (closure)
+    def _body_T_at(fi):
+        if viz_body_mode == 'static':
+            return np.zeros(3), np.eye(3)
+        if viz_body_mode == 'body_follow':
+            return np.zeros(3), R.body_R_hist[fi]
+        return R.body_pos_hist[fi], R.body_R_hist[fi]
+
+    def init():
+        for leg in range(4):
+            for ln in leg_links[leg]:
+                ln.set_data([], []); ln.set_3d_properties([])
+            leg_traces[leg].set_data([], []); leg_traces[leg].set_3d_properties([])
+            swing_dots[leg].set_data([], []); swing_dots[leg].set_3d_properties([])
+            for mk in link_com_markers[leg]:
+                mk.set_data([], []); mk.set_3d_properties([])
+            trace_buf[leg][0].clear(); trace_buf[leg][1].clear(); trace_buf[leg][2].clear()
+        info_text.set_text('')
+        return []
+
+    def animate(fi):
+        t = fi * DT_R
+        body_pos_v, body_R_v = _body_T_at(fi)
+
+        bc_world = np.array([body_pos_v + body_R_v @ p for p in BC_BODY])
+        body_chassis_line.set_data(bc_world[:, 0], bc_world[:, 1])
+        body_chassis_line.set_3d_properties(bc_world[:, 2])
+        body_com_marker.set_data([body_pos_v[0]], [body_pos_v[1]])
+        body_com_marker.set_3d_properties([body_pos_v[2]])
+
+        for leg in range(4):
+            nj = _NJ[leg]
+            q  = R.joint_hist[fi, leg, :nj]
+            pts_dh = _fwk(q, dh=_LEG_DH[leg])
+            pts    = [_d2s(p, front_leg=(leg < 2)) for p in pts_dh]
+            hip_b  = LEG_HIP_OFFSETS[leg]
+            hip_w  = body_pos_v + body_R_v @ hip_b
+            hip_markers[leg].set_data([hip_w[0]], [hip_w[1]])
+            hip_markers[leg].set_3d_properties([hip_w[2]])
+            for k in range(nj):
+                A_b = hip_b + pts[k];   B_b = hip_b + pts[k+1]
+                A   = body_pos_v + body_R_v @ A_b
+                B   = body_pos_v + body_R_v @ B_b
+                leg_links[leg][k].set_data([A[0], B[0]], [A[1], B[1]])
+                leg_links[leg][k].set_3d_properties([A[2], B[2]])
+                mid = 0.5 * (A + B)
+                link_com_markers[leg][k].set_data([mid[0]], [mid[1]])
+                link_com_markers[leg][k].set_3d_properties([mid[2]])
+            pe_b = R.foot_hist[fi, leg]
+            pe   = body_pos_v + body_R_v @ pe_b
+            if swing_flag[fi, leg]:
+                swing_dots[leg].set_data([pe[0]], [pe[1]])
+                swing_dots[leg].set_3d_properties([pe[2]])
+            else:
+                swing_dots[leg].set_data([], []); swing_dots[leg].set_3d_properties([])
+            trace_buf[leg][0].append(pe[0])
+            trace_buf[leg][1].append(pe[1])
+            trace_buf[leg][2].append(pe[2])
+            leg_traces[leg].set_data(trace_buf[leg][0][-trace_len:],
+                                       trace_buf[leg][1][-trace_len:])
+            leg_traces[leg].set_3d_properties(trace_buf[leg][2][-trace_len:])
+            # Joint frame quivers (recreate)
+            T_dh = np.eye(4)
+            for j in range(nj + 1):
+                orig_sim_b = _d2s(T_dh[:3, 3], front_leg=(leg < 2))
+                pos_b      = hip_b + orig_sim_b
+                pos        = body_pos_v + body_R_v @ pos_b
+                for ax_i in range(3):
+                    dv_b = _d2s(T_dh[:3, ax_i], front_leg=(leg < 2))
+                    dv   = body_R_v @ dv_b
+                    if jf_quivers[leg][j][ax_i] is not None:
+                        jf_quivers[leg][j][ax_i].remove()
+                    jf_quivers[leg][j][ax_i] = ax3d.quiver(
+                        pos[0], pos[1], pos[2],
+                        dv[0]*FRAME_LEN, dv[1]*FRAME_LEN, dv[2]*FRAME_LEN,
+                        color=_AX_COLORS[ax_i], linewidth=1.0, arrow_length_ratio=0.3)
+                if j < nj:
+                    T_dh = T_dh @ _dhM(_LEG_DH[leg][j][0], _LEG_DH[leg][j][1],
+                                         _LEG_DH[leg][j][2], float(q[j]))
+
+        # Info text
+        sw_str = "  ".join(
+            f"{LEG_NAMES[l]}:{'SW' if swing_flag[fi, l] else 'ST'}" for l in range(4))
+        deg = np.degrees(R.joint_hist[fi])
+        jnt_lines = []; tau_lines = []; grf_lines = []
+        for leg in range(4):
+            d  = deg[leg]
+            tc = R.wbc_tau_cmd[fi, leg]
+            lm = R.wbc_lam_des[fi, leg]
+            jnt_lines.append(
+                f"{LEG_NAMES[leg]} th1={d[0]:+5.1f}d th2={d[1]:+6.1f}d "
+                f"th3={d[2]:+6.1f}d th4={d[3]:+5.1f}d th5={d[4]:+5.1f}d")
+            tau_lines.append(
+                f"{LEG_NAMES[leg]} tau=[{tc[0]:+5.1f} {tc[1]:+5.1f} "
+                f"{tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm")
+            grf_lines.append(
+                f"{LEG_NAMES[leg]} lam=[{lm[0]:+5.1f} {lm[1]:+5.1f} {lm[2]:+5.1f}]N")
+        info_text.set_text(
+            f"t={t:.3f}s\n{sw_str}\n\n"
+            + "\n".join(jnt_lines)
+            + "\n\n"
+            + "\n".join(tau_lines)
+            + "\n\n"
+            + "\n".join(grf_lines)
+        )
+        return []
+
+    intv = int(interval_ms if interval_ms is not None else DT_R * 1000)
+    anim = FuncAnimation(fig, animate, frames=N, init_func=init,
+                          interval=intv, blit=False, repeat=True)
+    return fig, anim

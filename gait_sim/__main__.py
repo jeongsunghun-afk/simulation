@@ -37,7 +37,7 @@ def main(argv=None):
 
     from gait_sim.runner import run_simulation
     from gait_sim.viz import (
-        plot_main_static, plot_joint_analysis, plot_wbc, plot_tau_decompose,
+        plot_main_static, plot_anim, plot_joint_analysis, plot_wbc, plot_tau_decompose,
         plot_body_state, plot_foot_trajectory, plot_gait_diagram, plot_diagnostics,
     )
 
@@ -47,7 +47,7 @@ def main(argv=None):
         use_nmpc=args.nmpc if args.nmpc else None,
     )
 
-    # Generate all 8 figures
+    # Static figures (1~8)
     plots = {
         'fig1_main':   plot_main_static,
         'fig2_joints': plot_joint_analysis,
@@ -65,7 +65,16 @@ def main(argv=None):
         except Exception as e:
             print(f"  [WARN] {name} 플롯 실패: {e}")
 
-    # Save if requested
+    # 3D animation — interactive 모드에서만 (Agg 백엔드는 anim 표시 불가)
+    anim_ref = None
+    if not (args.no_show or args.save):
+        try:
+            fig_a, anim_ref = plot_anim(R, meta)
+            figs['fig0_anim'] = fig_a
+        except Exception as e:
+            print(f"  [WARN] plot_anim 실패: {e}")
+
+    # Save if requested (3D anim 은 static frame 하나만 저장)
     if args.save:
         os.makedirs(args.save, exist_ok=True)
         for name, fig in figs.items():
@@ -76,6 +85,8 @@ def main(argv=None):
     # Show if not suppressed
     if not (args.no_show or args.save):
         plt.show()
+    # anim_ref retain — prevent GC (variable hold until function exit)
+    _ = anim_ref
 
 
 if __name__ == '__main__':
