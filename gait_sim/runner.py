@@ -26,6 +26,7 @@ from gait_sim.config import (
     CFG, DT, T, T_SW, T_ST, D, V, N_CYCLES, STEP_LENGTH, STEP_HEIGHT,
     STANCE_DELTA, GAIT_TYPE,
 )
+from gait_sim.config import G_ACC
 from gait_sim.model import (
     LEG_DH, LEG_HIP_OFFSETS, LEG_NAMES, N_JOINTS_PER_LEG, N_JOINTS_MAX,
     Q_HOME_FRONT, Q_HOME_HIND, Q_SWING_FRONT, Q_SWING_HIND,
@@ -34,15 +35,27 @@ from gait_sim.model import (
     FRONT_Q_LIM, HIND_Q_LIM,
     JOINT_VEL_LIMIT_RAD_S, JOINT_TORQUE_LIMIT, VEL_LIMIT_MARGIN,
     INIT_ERR_RAD, TAU_LAG,
+    KP_PD, KD_PD, KP_IMP, KD_IMP,
+    BODY_MASS, TOTAL_MASS, BODY_INERTIA, MU_FRICTION, MU_DAMP,
+    LINK_MASS_PER_LEG,
 )
 from gait_sim.kinematics import (
     forward_kinematics, _dh_to_sim, _sim_to_dh,
     analytical_ik_front, analytical_ik_hind,
     opt_ik_front, opt_ik_hind,
+    compute_jacobian_sim, compute_gravity_torque_sim,
     J4_TO_J5_SIM_PER_LEG,
 )
+from gait_sim.dynamics import rnea, compute_mh_leg
+from gait_sim.body_dyn import integrate_body_state, _R_to_euler_xyz
 from gait_sim.gait import (
     GaitScheduler, foot_pos_at_phase, _quintic_s,
+)
+from gait_sim.controllers.mpc import (
+    mpc_qp_plan, qp_grf_distribute, DT_MPC, N_MPC,
+)
+from gait_sim.controllers.wbic import (
+    wbic_qp_leg, wbic_qp_full,
 )
 from gait_sim.sim_state import SimState
 
@@ -328,32 +341,432 @@ def compute_derivatives(R: SimState):
 
 
 # ══════════════════════════════════════════════════════════════
-# 3) WBIC main loop + NMPC branch + foot world (Phase 6-c/d) — TODO
+# 3) WBIC state init — theta_a / dtheta_a + body_state dict
 # ══════════════════════════════════════════════════════════════
-def run_simulation(*, gait_type: str = None) -> tuple:
-    """전체 시뮬레이션 실행 (Phase 6-e). 현재는 trajectory precompute + derivatives 만.
+def init_wbic_state(R: SimState) -> tuple:
+    """WBIC main loop 진입 직전 상태 초기화.
+
+    fills R.theta_a_hist, R.dtheta_a_hist (1st-order lag of joint_hist)
+
+    Returns:
+        body_state: dict — floating-base 6-DoF 상태 (pos, R, v, omega, ...)
+        foot_z_home: float — FR foot z @ home (body z 0-ref 용)
+    """
+    N_FRAMES = R.n_frames
+    DT_R = R.dt
+    t_grid = np.arange(N_FRAMES) * DT_R
+
+    # theta_a_hist: 1st-order lag (initial offset = INIT_ERR_RAD)
+    for leg in range(4):
+        nj = N_JOINTS_PER_LEG[leg]
+        R.theta_a_hist[0, leg, :nj] = R.joint_hist[0, leg, :nj] + INIT_ERR_RAD
+        for fi in range(1, N_FRAMES):
+            prev   = R.theta_a_hist[fi-1, leg, :nj]
+            target = R.joint_hist[fi-1, leg, :nj]
+            R.theta_a_hist[fi, leg, :nj] = prev + (DT_R / TAU_LAG) * (target - prev)
+        # dtheta_a (CubicSpline or gradient)
+        if CFG.use_spline_diff:
+            _cs = _CubicSpline(t_grid, R.theta_a_hist[:, leg, :nj], axis=0, bc_type='natural')
+            R.dtheta_a_hist[:, leg, :nj] = _cs(t_grid, 1)
+        else:
+            R.dtheta_a_hist[:, leg, :nj] = np.gradient(R.theta_a_hist[:, leg, :nj], DT_R, axis=0)
+
+    # body_state: FR foot @ home → body z = -foot_z_home so foot world z = 0
+    foot_z_home = float(R.foot_hist[0, 0, 2])   # FR foot z (body-local, ≈ -0.465m)
+    body_state = {
+        'pos':   np.array([0.0, 0.0, -foot_z_home]),
+        'R':     np.eye(3),
+        'v':     np.array([V, 0.0, 0.0]),
+        'omega': np.zeros(3),
+        'a_lin': np.zeros(3),
+        'a_ang': np.zeros(3),
+        '_diverged': False,
+    }
+    return body_state, foot_z_home
+
+
+# ══════════════════════════════════════════════════════════════
+# 4) Main WBIC control loop — MPC + WBIC + body integration
+#    v13.py L2876~3206 추출
+# ══════════════════════════════════════════════════════════════
+# Body reference (steady-state) — used by MPC closed-loop
+_BODY_REF_STEP_TEMPLATE = np.array([
+    0.0, 0.0, 0.0,   # roll, pitch, yaw
+    0.0, 0.0, 0.0,   # px, py, pz
+    0.0, 0.0, 0.0,   # ω
+    0.0, 0.0, 0.0,   # v
+    0.0,             # g (constant)
+])
+
+
+def run_wbic_loop(R: SimState, sched: GaitScheduler,
+                   body_state: dict, foot_z_home: float) -> dict:
+    """WBIC + MPC main loop (v13.py L2876~3206).
+
+    Iterate per-frame:
+        Pass 1: per-leg kinematics + RNEA + M(q), h(q,q̇)
+        Pass 2: WBIC FB single QP or per-leg correction
+        Pass 3: τ_cmd 계산 + history 저장
+        Pass 4: floating-base body 6-DoF 적분
+
+    fills:
+        R.wbc_tau_ff/dyn/pd/imp/cmd/grf, R.wbc_lam_des/calc
+        R.wbic_dtau_hist, R.wbic_dlam_hist, R.wbic_residual_hist, R.wbic_status_hist
+        R.wbic_lam_used, R.wbic_fb_*_hist
+        R.body_pos/R/v/omega/alin/aang_hist + body_pos/v_ref_hist
+        R.tau_ff_corrected_prev (state for next call)
+
+    Returns: dict — diagnostic counters {mpc_fail, wbic_fail, wbic_fb_fail, duration_ms}
+    """
+    N_FRAMES = R.n_frames
+    DT_R = R.dt
+
+    USE_MPC             = CFG.use_mpc
+    USE_MPC_CLOSED_LOOP = CFG.use_mpc_closed_loop
+    USE_WBIC            = CFG.use_wbic
+    USE_WBIC_FB         = CFG.use_wbic_fb
+    USE_BODY_DYNAMICS   = CFG.use_body_dynamics
+    GRF_RAMP_RATIO      = CFG.grf_ramp_ratio
+    WBIC_W_DDQ          = CFG.wbic_w_ddq
+    WBIC_W_TAU          = CFG.wbic_w_tau
+    WBIC_W_LAM          = CFG.wbic_w_lam
+    WBIC_W_FB           = CFG.wbic_w_fb
+    WBIC_LAMZ_MIN       = CFG.wbic_lamz_min
+    WBIC_W_DTAU         = CFG.wbic_w_dtau
+
+    t0 = time.perf_counter()
+    mpc_fail = wbic_fail = wbic_fb_fail = 0
+
+    # swing_flag derived from phase_hist
+    swing_flag = (R.phase_hist < sched.swing_ratio)
+
+    for fi in range(N_FRAMES):
+        t_cur = fi * DT_R
+        contact_mask = ~swing_flag[fi]   # (4,) bool
+
+        # ── GRF 목표 (MPC QP or QP GRF) ─────────────────────
+        if USE_MPC:
+            cs = np.zeros((N_MPC, 4), dtype=bool)
+            fp = np.zeros((N_MPC, 4, 3))
+            for k in range(N_MPC):
+                t_k = t_cur + k * DT_MPC
+                for leg in range(4):
+                    cs[k, leg] = not sched.is_swing(leg, t_k)
+                    fp[k, leg] = R.foot_hist[fi, leg]   # quasi-static foot
+
+            if USE_MPC_CLOSED_LOOP and USE_BODY_DYNAMICS:
+                roll, pitch, yaw = _R_to_euler_xyz(body_state['R'])
+                x0_mpc = np.array([
+                    roll, pitch, yaw,
+                    body_state['pos'][0], body_state['pos'][1], body_state['pos'][2],
+                    body_state['omega'][0], body_state['omega'][1], body_state['omega'][2],
+                    body_state['v'][0], body_state['v'][1], body_state['v'][2],
+                    -G_ACC,
+                ])
+                x_ref_step = _BODY_REF_STEP_TEMPLATE.copy()
+                x_ref_step[5]  = -foot_z_home
+                x_ref_step[9]  = V
+                x_ref_step[12] = -G_ACC
+            else:
+                x0_mpc = np.array([
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0,
+                    V,   0.0, 0.0,
+                    -G_ACC,
+                ])
+                x_ref_step = None
+
+            lam_des_all = mpc_qp_plan(x0_mpc, cs, fp, x_ref_step=x_ref_step,
+                                       ltv=USE_MPC_CLOSED_LOOP and USE_BODY_DYNAMICS)
+            for leg in range(4):
+                if swing_flag[fi, leg]:
+                    lam_des_all[leg] = 0.0
+        else:
+            lam_des_all = qp_grf_distribute(contact_mask, R.foot_hist[fi])
+
+        # Contact ramp (stance 시작/끝 GRF smoothstep)
+        for leg in range(4):
+            if not swing_flag[fi, leg]:
+                st_t = sched.stance_t(leg, t_cur)
+                if st_t < GRF_RAMP_RATIO:
+                    tau_r = st_t / GRF_RAMP_RATIO
+                    ramp = 10*tau_r**3 - 15*tau_r**4 + 6*tau_r**5
+                    lam_des_all[leg] = lam_des_all[leg] * ramp
+                elif st_t > 1.0 - GRF_RAMP_RATIO:
+                    tau_r = (1.0 - st_t) / GRF_RAMP_RATIO
+                    ramp = 10*tau_r**3 - 15*tau_r**4 + 6*tau_r**5
+                    lam_des_all[leg] = lam_des_all[leg] * ramp
+
+        R.wbc_lam_des[fi] = lam_des_all
+
+        # ── Pass 1: per-leg kinematics + RNEA + M, h ─────────
+        leg_data = [None] * 4
+        foot_world_all = np.zeros((4, 3))
+        for leg in range(4):
+            nj    = N_JOINTS_PER_LEG[leg]
+            front = leg < 2
+            dh    = LEG_DH[leg]
+            lm    = LINK_MASS_PER_LEG[leg]
+
+            q_t   = R.joint_hist[fi, leg, :nj]
+            q_a   = R.theta_a_hist[fi, leg, :nj]
+            dq_t  = R.joint_vel_hist[fi, leg, :nj]
+            dq_a  = R.dtheta_a_hist[fi, leg, :nj]
+            ddq_t = R.joint_acc_hist[fi, leg, :nj]
+
+            J     = compute_jacobian_sim(q_t, dh, front)
+            J_a   = compute_jacobian_sim(q_a, dh, front)
+            tau_g = compute_gravity_torque_sim(q_t, dh, lm, front)
+
+            lam_des_leg = lam_des_all[leg]
+            tau_dyn_leg = rnea(q_t, dq_t, ddq_t, dh, lm)
+            tau_grf_leg = -J.T @ lam_des_leg
+            tau_ff_leg  = tau_dyn_leg + tau_grf_leg
+
+            # foot world position (body integration용)
+            foot_world_all[leg] = body_state['pos'] + body_state['R'] @ R.foot_hist[fi, leg]
+
+            if USE_WBIC or USE_WBIC_FB:
+                M_leg, h_leg = compute_mh_leg(q_t, dq_t, dh, lm)
+            else:
+                M_leg, h_leg = None, None
+
+            foot_t_j5 = R.foot_local[fi, leg] + J4_TO_J5_SIM_PER_LEG[leg]
+            pts_a     = forward_kinematics(q_a, dh=dh)
+            foot_a_j5 = _dh_to_sim(pts_a[-1], front_leg=front)
+            vel_t     = R.foot_vel_t[fi, leg]
+            vel_a     = J_a @ dq_a
+            f_imp       = KP_IMP * (foot_t_j5 - foot_a_j5) + KD_IMP * (vel_t - vel_a)
+            tau_imp_leg = J.T @ f_imp
+            tau_pd_leg  = KP_PD[:nj] * (q_t - q_a) + KD_PD[:nj] * (dq_t - dq_a)
+
+            leg_data[leg] = dict(nj=nj, J=J, ddq_t=ddq_t,
+                                  tau_g=tau_g, tau_dyn=tau_dyn_leg, tau_grf=tau_grf_leg,
+                                  tau_ff=tau_ff_leg, tau_pd=tau_pd_leg, tau_imp=tau_imp_leg,
+                                  M_leg=M_leg, h_leg=h_leg,
+                                  lam_des=lam_des_leg, lam_used=lam_des_leg.copy())
+
+        # ── Pass 2: WBIC (FB single QP OR per-leg) ──────────
+        used_fb = False
+        if USE_WBIC_FB:
+            v_dot_des_fb = np.zeros(6)
+            R_world = body_state['R']
+            I_world = R_world @ BODY_INERTIA @ R_world.T
+
+            fb_out = wbic_qp_full(
+                M_legs=[leg_data[i]['M_leg'] for i in range(4)],
+                h_legs=[leg_data[i]['h_leg'] for i in range(4)],
+                ddq_des_legs=[leg_data[i]['ddq_t'] for i in range(4)],
+                tau_ff_legs=[leg_data[i]['tau_ff'] for i in range(4)],
+                lam_des_all=lam_des_all,
+                J_legs=[leg_data[i]['J'] for i in range(4)],
+                contact_mask=contact_mask, nj_per_leg=N_JOINTS_PER_LEG,
+                foot_world_all=foot_world_all, body_pos=body_state['pos'],
+                v_dot_des_fb=v_dot_des_fb,
+                M_total=TOTAL_MASS, I_body=I_world, omega_world=body_state['omega'],
+                w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM, w_fb=WBIC_W_FB,
+                lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+                stance_foot_J_v11=None,
+                tau_prev_legs=R.tau_ff_corrected_prev, w_dtau=WBIC_W_DTAU,
+            )
+            if fb_out is not None:
+                used_fb = True
+                R.wbic_fb_residual_hist[fi] = fb_out['residual_fb']
+                R.wbic_fb_status_hist[fi]   = True
+                R.wbic_fb_dvfb_hist[fi]     = fb_out['d_v_fb']
+                for leg in range(4):
+                    nj = leg_data[leg]['nj']
+                    d_tau = fb_out['d_tau_legs'][leg]
+                    d_lam = fb_out['d_lam_legs'][leg]
+                    leg_data[leg]['tau_ff']   = leg_data[leg]['tau_ff'] + d_tau
+                    leg_data[leg]['lam_used'] = leg_data[leg]['lam_des'] + d_lam
+                    R.wbic_dtau_hist[fi, leg, :nj] = d_tau
+                    R.wbic_dlam_hist[fi, leg]      = d_lam
+                    R.wbic_residual_hist[fi, leg]  = fb_out['residual_legs'][leg]
+                    R.wbic_status_hist[fi, leg]    = True
+
+            if not used_fb:
+                wbic_fb_fail += 1
+
+        if (not used_fb) and USE_WBIC:
+            for leg in range(4):
+                d  = leg_data[leg]
+                nj = d['nj']
+                d_ddq, d_tau, d_lam, ok, res = wbic_qp_leg(
+                    d['M_leg'], d['h_leg'], d['ddq_t'], d['tau_ff'], d['lam_des'], d['J'],
+                    contact=contact_mask[leg], nj=nj,
+                    w_ddq=WBIC_W_DDQ, w_tau=WBIC_W_TAU, w_lam=WBIC_W_LAM,
+                    lamz_min=WBIC_LAMZ_MIN, mu=MU_FRICTION,
+                    tau_prev=R.tau_ff_corrected_prev[leg], w_dtau=WBIC_W_DTAU,
+                )
+                R.wbic_residual_hist[fi, leg] = res
+                R.wbic_status_hist[fi, leg]   = ok
+                if ok:
+                    d['tau_ff']  = d['tau_ff'] + d_tau
+                    d['lam_used'] = d['lam_des'] + d_lam
+                    R.wbic_dtau_hist[fi, leg, :nj] = d_tau
+                    R.wbic_dlam_hist[fi, leg]      = d_lam
+                else:
+                    wbic_fail += 1
+
+        # ── Pass 3: τ_cmd + 히스토리 저장 ────────────────────
+        for leg in range(4):
+            d  = leg_data[leg]
+            nj = d['nj']
+            tau_cmd_leg = d['tau_pd'] + d['tau_ff'] + d['tau_imp']
+            tau_cmd_leg = np.clip(tau_cmd_leg, -JOINT_TORQUE_LIMIT[:nj], JOINT_TORQUE_LIMIT[:nj])
+            R.wbic_lam_used[fi, leg] = d['lam_used']
+
+            JJT          = d['J'] @ d['J'].T + MU_DAMP * np.eye(3)
+            lam_calc_leg = np.linalg.solve(JJT, d['J'] @ (d['tau_g'] - tau_cmd_leg))
+
+            R.wbc_tau_ff  [fi, leg, :nj] = d['tau_ff']
+            R.wbc_tau_dyn [fi, leg, :nj] = d['tau_dyn']
+            R.wbc_tau_pd  [fi, leg, :nj] = d['tau_pd']
+            R.wbc_tau_imp [fi, leg, :nj] = d['tau_imp']
+            R.wbc_tau_grf [fi, leg, :nj] = d['tau_grf']
+            R.wbc_tau_cmd [fi, leg, :nj] = tau_cmd_leg
+            R.wbc_lam_calc[fi, leg]      = lam_calc_leg
+            R.tau_ff_corrected_prev[leg] = d['tau_ff'].copy()
+
+        # ── Pass 4: Floating-base body integration ──────────
+        if USE_BODY_DYNAMICS:
+            integrate_body_state(body_state, R.wbic_lam_used[fi], foot_world_all,
+                                  TOTAL_MASS, BODY_INERTIA, DT_R)
+        # Always save history
+        R.body_pos_hist[fi]   = body_state['pos']
+        R.body_R_hist[fi]     = body_state['R']
+        R.body_v_hist[fi]     = body_state['v']
+        R.body_omega_hist[fi] = body_state['omega']
+        R.body_alin_hist[fi]  = body_state.get('a_lin', np.zeros(3))
+        R.body_aang_hist[fi]  = body_state.get('a_ang', np.zeros(3))
+        # Reference (kinematic V·t)
+        R.body_pos_ref_hist[fi] = np.array([V * t_cur, 0.0, -foot_z_home])
+        R.body_v_ref_hist[fi]   = np.array([V, 0.0, 0.0])
+
+    duration = time.perf_counter() - t0
+    diag = dict(mpc_fail=mpc_fail, wbic_fail=wbic_fail, wbic_fb_fail=wbic_fb_fail,
+                duration_ms=duration*1e3)
+    return diag
+
+
+# ══════════════════════════════════════════════════════════════
+# 5) Foot world post-process (fig6 용)
+# ══════════════════════════════════════════════════════════════
+def postprocess_foot_world(R: SimState, sched: GaitScheduler):
+    """foot_actual_world_hist (body + R @ foot_local) + foot_target_world_hist (swing target).
+
+    NMPC 모드는 nmpc.populate_simstate_from_nmpc 가 직접 채움 → 호출 불필요.
+    """
+    N_FRAMES = R.n_frames
+    DT_R = R.dt
+
+    # Initial home world per-leg (used as swing trajectory start anchor)
+    foot_home_world = np.zeros((4, 3))
+    # (4,3) @ (3,3).T = (4,3): row i = R_b @ foot_hist[0, i]
+    R.foot_actual_world_hist[0] = R.body_pos_hist[0] + R.foot_hist[0] @ R.body_R_hist[0].T
+    for li in range(4):
+        foot_home_world[li] = R.foot_actual_world_hist[0, li]
+
+    for fi in range(N_FRAMES):
+        body_p = R.body_pos_hist[fi]
+        R_b    = R.body_R_hist[fi]
+        for li in range(4):
+            R.foot_actual_world_hist[fi, li] = body_p + R_b @ R.foot_hist[fi, li]
+
+        t_now = fi * DT_R
+        for li in range(4):
+            ph = sched.phase(li, t_now)
+            if ph < sched.swing_ratio:
+                sw_t = ph / sched.swing_ratio
+                t_sw_start = t_now - ph * T
+                t_sw_end   = t_sw_start + T_SW
+                ps = foot_home_world[li].copy()
+                ps[0] += V * t_sw_start - STEP_LENGTH / 2
+                pe = foot_home_world[li].copy()
+                pe[0] += V * t_sw_end + STEP_LENGTH / 2
+                s_xy = sw_t * sw_t * (3.0 - 2.0 * sw_t)
+                tgt  = ps + s_xy * (pe - ps)
+                tgt[2] = ps[2] + STEP_HEIGHT * 16.0 * sw_t * sw_t * (1 - sw_t) * (1 - sw_t)
+                R.foot_target_world_hist[fi, li] = tgt
+            else:
+                R.foot_target_world_hist[fi, li] = np.nan
+
+
+# ══════════════════════════════════════════════════════════════
+# 6) Top-level orchestrator
+# ══════════════════════════════════════════════════════════════
+def run_simulation(*, gait_type: str = None,
+                    use_nmpc: bool = None) -> tuple:
+    """전체 시뮬레이션 실행 (Phase 6-e).
+
+    Args:
+        gait_type: optional override CFG.gait_type
+        use_nmpc:  optional override CFG.use_nmpc
 
     Returns:
         (R, meta) — SimState + viz meta dict
     """
-    from gait_sim.config import N_FRAMES   # alias 갱신용
+    from gait_sim.config import N_FRAMES
     if gait_type:
-        CFG.gait_type = gait_type   # caller override (alias 재할당 필요)
+        CFG.gait_type = gait_type
+    if use_nmpc is not None:
+        CFG.use_nmpc = use_nmpc
 
     R = SimState.alloc(n_frames=N_FRAMES, dt=DT)
     sched = GaitScheduler()
 
+    # 1) Trajectory precompute + derivatives
     precompute_trajectories(R, sched)
     compute_derivatives(R)
 
-    # TODO Phase 6-c/d: WBIC main loop or NMPC branch
-    # TODO Phase 6-d:   postprocess_foot_world
+    nmpc_active = False
+    if CFG.use_nmpc:
+        from gait_sim.controllers.nmpc import (
+            _CROCODDYL_AVAILABLE, solve_nmpc_one_shot, solve_nmpc_receding,
+            populate_simstate_from_nmpc,
+        )
+        if _CROCODDYL_AVAILABLE:
+            print("─" * 55)
+            print("v12: NMPC ({}horizon FDDP) 풀이 시작...".format(
+                'receding ' if CFG.use_nmpc_receding else 'one-shot '))
+            if CFG.use_nmpc_receding:
+                xs, us, forces, done, pin_m, pin_d = solve_nmpc_receding(sched)
+            else:
+                xs, us, forces, done, pin_m, pin_d = solve_nmpc_one_shot(sched)
+            if done:
+                foot_z_home = float(R.foot_hist[0, 0, 2])
+                populate_simstate_from_nmpc(R, xs, us, forces, pin_m, pin_d,
+                                              foot_z_home=-foot_z_home)
+                nmpc_active = True
+                R.mode_str = 'NMPC (FDDP)'
+                print("  v11 arrays NMPC 결과로 채움. WBC + MPC 메인 루프 SKIP.")
+            else:
+                print("  ⚠ NMPC 수렴 실패 — v11 동작 (MPC+WBIC) fallback")
+        else:
+            print("  ⚠ crocoddyl 미설치 — v11 동작 fallback")
+
+    # 2) WBIC main loop (NMPC 활성 아니면)
+    if not nmpc_active:
+        body_state, foot_z_home = init_wbic_state(R)
+        diag = run_wbic_loop(R, sched, body_state, foot_z_home)
+        mode = f"MPC(N={N_MPC},dt={DT_MPC*1e3:.0f}ms)" if CFG.use_mpc else "QP GRF"
+        wbic = "WBIC ON" if CFG.use_wbic else "WBIC OFF"
+        print(f"WBC 완료 [{mode}, {wbic}].  {diag['duration_ms']:.1f}ms 총  "
+              f"({diag['duration_ms']*1e3/R.n_frames:.1f}μs/frame)")
+        R.mode_str = mode
+        R.wbic_str = wbic
+        # foot world post-process
+        postprocess_foot_world(R, sched)
+
+    R.diverged = body_state['_diverged'] if not nmpc_active else False
 
     meta = {
         'gait_type': CFG.gait_type, 'V': V, 'T': T, 'D': D,
         'step_height': STEP_HEIGHT, 'step_length': STEP_LENGTH,
-        'use_nmpc': CFG.use_nmpc, 'use_mpc': CFG.use_mpc, 'n_mpc': CFG.n_mpc,
+        'use_nmpc': nmpc_active, 'use_mpc': CFG.use_mpc, 'n_mpc': CFG.n_mpc,
         'mu_friction': CFG.mu_friction, 'opt_ik_maxiter': CFG.opt_ik_maxiter,
-        'joint_torque_limit': JOINT_TORQUE_LIMIT,
+        'joint_torque_limit': JOINT_TORQUE_LIMIT, 'total_mass': TOTAL_MASS,
+        'g_acc': G_ACC,
     }
     return R, meta
