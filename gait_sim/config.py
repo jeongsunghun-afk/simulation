@@ -80,6 +80,13 @@ class GaitConfig:
     wbic_w_dtau: float = 0.0      # τ smoothness: w_dtau·‖τ−τ_prev‖²  (v13.1: net negative → OFF default)
     use_spline_diff: bool = False # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: net negative → OFF default)
     qp_solver: str = 'quadprog'   # v13.0a: 'quadprog' / 'osqp' / 'proxqp' — MPC + WBIC QP solver 선택
+    # ─────────── Actuator model (v13.x Phase 7 Tier 1) ───────────
+    use_actuator_model: bool = False           # OFF default — opt-in
+    actuator_dq_idle_ratio: float = 0.3        # T-N curve: peak τ 유지 비율 of dq_max
+    actuator_stiction_ratio: float = 0.02      # stiction = τ_limit × ratio (2% default)
+    actuator_viscous_b: np.ndarray = field(
+        default_factory=lambda: np.zeros(5))   # viscous damping per joint [N·m·s/rad]
+    actuator_eps_v: float = 0.01               # static/kinetic 전환 속도 [rad/s]
     # ─────────── NMPC: solver ───────────
     use_nmpc: bool = False
     use_nmpc_receding: bool = True

@@ -57,6 +57,7 @@ from gait_sim.controllers.mpc import (
 from gait_sim.controllers.wbic import (
     wbic_qp_leg, wbic_qp_full,
 )
+from gait_sim.actuator import apply_actuator_dynamics
 from gait_sim.sim_state import SimState
 
 
@@ -610,11 +611,24 @@ def run_wbic_loop(R: SimState, sched: GaitScheduler,
                     wbic_fail += 1
 
         # ── Pass 3: τ_cmd + 히스토리 저장 ────────────────────
+        USE_ACT = CFG.use_actuator_model
         for leg in range(4):
             d  = leg_data[leg]
             nj = d['nj']
             tau_cmd_leg = d['tau_pd'] + d['tau_ff'] + d['tau_imp']
             tau_cmd_leg = np.clip(tau_cmd_leg, -JOINT_TORQUE_LIMIT[:nj], JOINT_TORQUE_LIMIT[:nj])
+            # Actuator dynamics (T-N curve + stiction + viscous) — opt-in
+            if USE_ACT:
+                dq_leg = R.joint_vel_hist[fi, leg, :nj]
+                tau_cmd_leg = apply_actuator_dynamics(
+                    tau_cmd_leg, dq_leg,
+                    tau_peak=JOINT_TORQUE_LIMIT[:nj],
+                    dq_max=JOINT_VEL_LIMIT_RAD_S[:nj],
+                    tau_static=JOINT_TORQUE_LIMIT[:nj] * CFG.actuator_stiction_ratio,
+                    b_viscous=CFG.actuator_viscous_b[:nj],
+                    dq_idle_ratio=CFG.actuator_dq_idle_ratio,
+                    eps_v=CFG.actuator_eps_v,
+                )
             R.wbic_lam_used[fi, leg] = d['lam_used']
 
             JJT          = d['J'] @ d['J'].T + MU_DAMP * np.eye(3)
