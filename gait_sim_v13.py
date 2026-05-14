@@ -204,7 +204,7 @@ class GaitConfig:
     wbic_w_dtau: float = 0.0      # τ smoothness: w_dtau·‖τ−τ_prev‖²  (v13.1: 정량 측정 결과 net negative → OFF default)
     use_spline_diff: bool = False # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: 정량 측정 결과 net negative → OFF default)
     # ─────────── NMPC: solver ───────────
-    use_nmpc: bool = True
+    use_nmpc: bool = False
     use_nmpc_receding: bool = True
     nmpc_maxiter: int = 200
     nmpc_init_reg: float = 1.0
@@ -233,10 +233,14 @@ class GaitConfig:
     # B2: per-node body x 추종 (이동 레퍼런스 x_ref(t) = q0[0]+V·t, vx=V).
     #     stateReg 는 x0(출발점)로 회귀시켜 전진을 방해 → B1 으로 px 성분 제외하고
     #     bodyTrack 으로 매 노드 px+vx 를 추종. 0 이면 기존 동작(terminal-only 추종).
-    nmpc_w_body_track: float = 200.0   # bodyTrack cost weight (매 running node)
-    # ↑ sweep 결과(v13): 0→264mm, 50→233, 200→181, 1000→115mm (x RMS). 가중치↑ 시
-    #   x 추종 개선되나 y/z 추종은 악화 + solver iter 급증. 200 = 균형점(x −31%, 0 fails).
+    nmpc_w_body_track: float = 500.0   # bodyTrack cost weight (매 running node)
+    # ↑ sweep 결과(v13, NMPC) — x error RMS:
+    #     w=0→264 / 50→233 / 200→181 / 500→140 / 1000→115mm  (단조 개선, 0 fails ~1000)
+    #     w=2000→465mm 💥 (3 fails) — 과도 가중치는 FDDP solver 발산.
+    #   500 = sweet spot (x −47%, 0 fails). 더 짜내려면 1000 (115mm, 1 fail) 까지.
     nmpc_body_track_w_px: float = 1.0  # body px residual 가중치 (activation)
+    # vx 가중치 ↑ 는 역효과: trot 의 step 내 자연 속도 진동과 충돌 → solver 발산.
+    #   sweep: w=200,vx=4→300mm / w=500,vx=4→518mm 💥. vx 는 0.5 이하 유지 권장.
     nmpc_body_track_w_vx: float = 0.5  # body vx residual 가중치 (activation)
     # ─────────── Perturbation test ───────────
     use_perturbation: bool = False
@@ -254,6 +258,12 @@ CFG = GaitConfig()
 import os as _os
 if 'NMPC_W_BODY_TRACK' in _os.environ:
     CFG.nmpc_w_body_track = float(_os.environ['NMPC_W_BODY_TRACK'])
+if 'NMPC_BT_W_PX' in _os.environ:
+    CFG.nmpc_body_track_w_px = float(_os.environ['NMPC_BT_W_PX'])
+if 'NMPC_BT_W_VX' in _os.environ:
+    CFG.nmpc_body_track_w_vx = float(_os.environ['NMPC_BT_W_VX'])
+if 'USE_NMPC' in _os.environ:
+    CFG.use_nmpc = _os.environ['USE_NMPC'] not in ('0', 'false', 'False', '')
 
 # ── 모듈 globals: CFG 필드 alias (기존 v11/v12 코드 호환) ────────
 GAIT_TYPE   = CFG.gait_type
@@ -3307,19 +3317,39 @@ mode_str = f"MPC(N={N_MPC},dt={DT_MPC*1e3:.0f}ms)" if USE_MPC else "QP GRF"
 wbic_str = "WBIC ON" if USE_WBIC else "WBIC OFF"
 if _USE_NMPC_ACTIVE:
     print(f"v12 NMPC 활성 — v11 main loop SKIP, joint/body arrays NMPC trajectory로 채움")
-    # NMPC 결과 진단 출력
-    import math as _m
-    _roll_max = _m.degrees(np.max(np.abs(np.arctan2(body_R_hist[:,2,1], body_R_hist[:,2,2]))))
-    _pitch_max = _m.degrees(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[:,2,0],-1,1)))))
-    print(f"  body roll_max={_roll_max:.2f}°, pitch_max={_pitch_max:.2f}°")
-    print(f"  body z range: [{body_pos_hist[:,2].min()*1e3:.2f}, {body_pos_hist[:,2].max()*1e3:.2f}] mm")
-    print(f"  body x final: {body_pos_hist[-1,0]:.3f}m  (target {V*T*N_CYCLES:.3f})")
-    print(f"  body vx mean: {body_v_hist[:,0].mean():.3f} m/s  (target {V})")
-    print(f"  |τ|max: {np.abs(wbc_tau_cmd).max():.2f} Nm")
-    fz_sum_des = np.zeros(N_FRAMES)   # placeholder (NMPC는 GRF 직접 풀이 안 함)
+    fz_sum_des  = np.zeros(N_FRAMES)   # placeholder (NMPC는 GRF 직접 풀이 안 함)
     fz_sum_used = np.zeros(N_FRAMES)
 else:
     print(f"WBC 완료 [{mode_str}, {wbic_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
+
+# ══════════════════════════════════════════════════════════════
+# 보행 안정성 진단 (GAIT STABILITY) — NMPC / MPC+WBIC 공통 포맷 (모드 비교 편의)
+# ══════════════════════════════════════════════════════════════
+_gs_pos_dev = body_pos_hist - body_pos_ref_hist
+_gs_v_dev   = body_v_hist   - body_v_ref_hist
+_gs_pos_max = float(np.max(np.linalg.norm(_gs_pos_dev, axis=1)))
+_gs_v_max   = float(np.max(np.linalg.norm(_gs_v_dev,   axis=1)))
+_gs_roll    = math.degrees(float(np.max(np.abs(np.arctan2(body_R_hist[:, 2, 1], body_R_hist[:, 2, 2])))))
+_gs_pitch   = math.degrees(float(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[:, 2, 0], -1, 1))))))
+_gs_omega   = float(np.max(np.abs(body_omega_hist)))
+_gs_z_min   = float(np.min(body_pos_hist[:, 2])) * 1e3
+_gs_z_max   = float(np.max(body_pos_hist[:, 2])) * 1e3
+_gs_x_final = float(body_pos_hist[-1, 0])
+_gs_x_tgt   = V * T * N_CYCLES
+_gs_vx_mean = float(body_v_hist[:, 0].mean())
+_gs_tau_max = float(np.abs(wbc_tau_cmd).max())
+_gs_mode    = 'NMPC' if _USE_NMPC_ACTIVE else 'MPC+WBIC'
+print("─" * 60)
+print(f"[보행 안정성 / GAIT STABILITY]  ({_gs_mode})")
+print(f"  |pos_dev|max = {_gs_pos_max*1e3:8.2f} mm      |v_dev|max = {_gs_v_max*1e3:8.2f} mm/s")
+print(f"  roll_max     = {_gs_roll:8.3f} °       pitch_max  = {_gs_pitch:8.3f} °")
+print(f"  |ω|max       = {_gs_omega:8.4f} rad/s   z range    = [{_gs_z_min:.1f}, {_gs_z_max:.1f}] mm")
+print(f"  x final      = {_gs_x_final:8.3f} m       (target {_gs_x_tgt:.3f})")
+print(f"  vx mean      = {_gs_vx_mean:8.3f} m/s     (target {V})")
+print(f"  |τ|max       = {_gs_tau_max:8.2f} N·m")
+if body_state.get('_diverged', False):
+    print(f"  [WARNING] body 발산 감지 — clamp 적용됨 (|ω|>50 rad/s 또는 |v|>50 m/s).")
+print("─" * 60)
 
 # ══════════════════════════════════════════════════════════════
 # v13 좌우 mirror 진단 — 잔여 y drift 원인 추적용
@@ -3419,24 +3449,8 @@ if not _USE_NMPC_ACTIVE:
         print(f"  WBIC FB: residual_fb max={fb_res_max:.2e} mean={fb_res_mean:.2e}  "
               f"|Δv̇_fb|max={fb_dvfb_max:.4f}  fail={wbic_fb_fail_count}/{N_FRAMES}")
 
-# v11/v12: Floating-base body 동역학 진단
-if USE_BODY_DYNAMICS and not _USE_NMPC_ACTIVE:
-    body_pos_dev   = body_pos_hist - body_pos_ref_hist
-    body_v_dev     = body_v_hist   - body_v_ref_hist
-    pos_dev_norm   = float(np.max(np.linalg.norm(body_pos_dev, axis=1)))
-    v_dev_norm     = float(np.max(np.linalg.norm(body_v_dev, axis=1)))
-    pitch_max      = float(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[:, 2, 0], -1, 1)))))
-    roll_max       = float(np.max(np.abs(np.arctan2(body_R_hist[:, 2, 1], body_R_hist[:, 2, 2]))))
-    omega_max      = float(np.max(np.abs(body_omega_hist)))
-    z_dev_max      = float(np.max(np.abs(body_pos_hist[:, 2])))   # CoM 수직 진동
-    print(f"  Body dyn: |pos_dev|max={pos_dev_norm*1e3:.2f}mm  |v_dev|max={v_dev_norm*1e3:.2f}mm/s  "
-          f"|z|max={z_dev_max*1e3:.2f}mm")
-    print(f"  Body dyn: pitch_max={math.degrees(pitch_max):.3f}° roll_max={math.degrees(roll_max):.3f}° "
-          f"|ω|max={omega_max:.4f}rad/s")
-    if body_state.get('_diverged', False):
-        print(f"  [WARNING] body 발산 감지 (|ω|>{50}rad/s 또는 |v|>{50}m/s 발생) — clamp 적용됨.")
-        print(f"            open-loop MPC + 작은 Ixx + trot 한계로 인한 정상적 발산. "
-              f"USE_MPC_CLOSED_LOOP=True + USE_WBIC_FB=True 권장.")
+# (구 'Body dyn' 진단 블록 → 상단 [보행 안정성 / GAIT STABILITY] 통합 블록으로 이동.
+#  NMPC / MPC+WBIC 공통 포맷으로 출력되어 모드 비교 용이.)
 
 _wbc_tau_cmd_no_grf = wbc_tau_cmd - wbc_tau_grf   # GRF feedforward 제외 (실 액추에이터 부담)
 for leg in [0, 3]:
@@ -4011,11 +4025,12 @@ for ri in range(3):
     ax_v.plot(_fr, body_v_hist[:, ri],     lw=1.6, color='#00d4ff',          label='actual')
     ax_v.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
 
-# headless 비교용: body pos/vel tracking RMS 콘솔 출력
+# headless 비교용: body pos/vel tracking ERROR RMS 콘솔 출력
+# (actual - reference 의 RMS — 0 에 가까울수록 추종 잘 됨)
 _bt_rms_p = np.sqrt(np.mean((body_pos_hist - body_pos_ref_hist) ** 2, axis=0))
 _bt_rms_v = np.sqrt(np.mean((body_v_hist   - body_v_ref_hist)   ** 2, axis=0))
-print(f"[BODY TRACK] pos RMS [mm]  x={_bt_rms_p[0]*1e3:7.2f}  y={_bt_rms_p[1]*1e3:7.2f}  "
-      f"z={_bt_rms_p[2]*1e3:7.2f}  |  vel RMS [m/s]  x={_bt_rms_v[0]:.4f}  "
+print(f"[BODY TRACK] pos error RMS [mm]  x={_bt_rms_p[0]*1e3:7.2f}  y={_bt_rms_p[1]*1e3:7.2f}  "
+      f"z={_bt_rms_p[2]*1e3:7.2f}  |  vel error RMS [m/s]  x={_bt_rms_v[0]:.4f}  "
       f"y={_bt_rms_v[1]:.4f}  z={_bt_rms_v[2]:.4f}  |  "
       f"NMPC_W_BODY_TRACK={NMPC_W_BODY_TRACK}  ({'NMPC' if _USE_NMPC_ACTIVE else 'MPC+WBIC'})")
 
