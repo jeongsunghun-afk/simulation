@@ -204,7 +204,7 @@ class GaitConfig:
     wbic_w_dtau: float = 0.0      # τ smoothness: w_dtau·‖τ−τ_prev‖²  (v13.1: 정량 측정 결과 net negative → OFF default)
     use_spline_diff: bool = False # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: 정량 측정 결과 net negative → OFF default)
     # ─────────── NMPC: solver ───────────
-    use_nmpc: bool = False
+    use_nmpc: bool = True
     use_nmpc_receding: bool = True
     nmpc_maxiter: int = 200
     nmpc_init_reg: float = 1.0
@@ -3322,100 +3322,7 @@ if _USE_NMPC_ACTIVE:
 else:
     print(f"WBC 완료 [{mode_str}, {wbic_str}].  {wbc_dur*1e3:.1f}ms 총  ({wbc_dur/N_FRAMES*1e6:.1f}μs/frame)")
 
-# ══════════════════════════════════════════════════════════════
-# 보행 안정성 진단 (GAIT STABILITY) — NMPC / MPC+WBIC 공통 포맷 (모드 비교 편의)
-# ══════════════════════════════════════════════════════════════
-_gs_pos_dev = body_pos_hist - body_pos_ref_hist
-_gs_v_dev   = body_v_hist   - body_v_ref_hist
-_gs_pos_max = float(np.max(np.linalg.norm(_gs_pos_dev, axis=1)))
-_gs_v_max   = float(np.max(np.linalg.norm(_gs_v_dev,   axis=1)))
-_gs_roll    = math.degrees(float(np.max(np.abs(np.arctan2(body_R_hist[:, 2, 1], body_R_hist[:, 2, 2])))))
-_gs_pitch   = math.degrees(float(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[:, 2, 0], -1, 1))))))
-_gs_omega   = float(np.max(np.abs(body_omega_hist)))
-_gs_z_min   = float(np.min(body_pos_hist[:, 2])) * 1e3
-_gs_z_max   = float(np.max(body_pos_hist[:, 2])) * 1e3
-_gs_x_final = float(body_pos_hist[-1, 0])
-_gs_x_tgt   = V * T * N_CYCLES
-_gs_vx_mean = float(body_v_hist[:, 0].mean())
-_gs_tau_max = float(np.abs(wbc_tau_cmd).max())
-_gs_mode    = 'NMPC' if _USE_NMPC_ACTIVE else 'MPC+WBIC'
-print("─" * 60)
-print(f"[보행 안정성 / GAIT STABILITY]  ({_gs_mode})")
-print(f"  |pos_dev|max = {_gs_pos_max*1e3:8.2f} mm      |v_dev|max = {_gs_v_max*1e3:8.2f} mm/s")
-print(f"  roll_max     = {_gs_roll:8.3f} °       pitch_max  = {_gs_pitch:8.3f} °")
-print(f"  |ω|max       = {_gs_omega:8.4f} rad/s   z range    = [{_gs_z_min:.1f}, {_gs_z_max:.1f}] mm")
-print(f"  x final      = {_gs_x_final:8.3f} m       (target {_gs_x_tgt:.3f})")
-print(f"  vx mean      = {_gs_vx_mean:8.3f} m/s     (target {V})")
-print(f"  |τ|max       = {_gs_tau_max:8.2f} N·m")
-if body_state.get('_diverged', False):
-    print(f"  [WARNING] body 발산 감지 — clamp 적용됨 (|ω|>50 rad/s 또는 |v|>50 m/s).")
-print("─" * 60)
-
-# ══════════════════════════════════════════════════════════════
-# v13 좌우 mirror 진단 — 잔여 y drift 원인 추적용
-# 6가지 후보를 자동 측정. 진짜 mirror 정합 시 모든 값 ≈ 0 또는 평균 ≈ 0.
-# ══════════════════════════════════════════════════════════════
-if not _USE_NMPC_ACTIVE:
-    print("─" * 60)
-    print("[v13 좌우 mirror 진단]")
-
-    # 1) opt-IK 좌우 q 미러 일치: q_FR 과 q_FL 이 정확히 같아야 함 (Q_HOME 동일)
-    q_diff_front = joint_hist[:, 0, :5] - joint_hist[:, 1, :5]   # FR - FL
-    q_diff_hind  = joint_hist[:, 2, :5] - joint_hist[:, 3, :5]   # HR - HL
-    print(f"  (1) opt-IK 좌우 q 차이 RMS [rad]:")
-    print(f"      FR-FL: q1={np.sqrt(np.mean(q_diff_front[:,0]**2)):.2e}  "
-          f"q2={np.sqrt(np.mean(q_diff_front[:,1]**2)):.2e}  "
-          f"q3={np.sqrt(np.mean(q_diff_front[:,2]**2)):.2e}  "
-          f"q4={np.sqrt(np.mean(q_diff_front[:,3]**2)):.2e}")
-    print(f"      HR-HL: q1={np.sqrt(np.mean(q_diff_hind[:,0]**2)):.2e}  "
-          f"q2={np.sqrt(np.mean(q_diff_hind[:,1]**2)):.2e}  "
-          f"q3={np.sqrt(np.mean(q_diff_hind[:,2]**2)):.2e}  "
-          f"q4={np.sqrt(np.mean(q_diff_hind[:,3]**2)):.2e}")
-
-    # 2) MPC GRF y 시간 평균 — 대칭 시 0
-    grf_y_mean_per_leg = wbc_lam_des[:, :, 1].mean(axis=0)
-    print(f"  (2) MPC GRF λ_y 시간평균 [N]:")
-    print(f"      FR={grf_y_mean_per_leg[0]:+.3f}  FL={grf_y_mean_per_leg[1]:+.3f}  "
-          f"HR={grf_y_mean_per_leg[2]:+.3f}  HL={grf_y_mean_per_leg[3]:+.3f}")
-    print(f"      4-leg sum (lateral net force) = {grf_y_mean_per_leg.sum():+.4f} N  "
-          f"(대칭이면 0)")
-
-    # 3) GRF 좌우 짝 합 (FR+HR=우측, FL+HL=좌측)
-    grf_y_right = wbc_lam_des[:, [0,2], 1].sum(axis=1).mean()    # FR + HR
-    grf_y_left  = wbc_lam_des[:, [1,3], 1].sum(axis=1).mean()    # FL + HL
-    print(f"  (3) GRF y 좌우 합:  우측(FR+HR) avg={grf_y_right:+.4f}N  "
-          f"좌측(FL+HL) avg={grf_y_left:+.4f}N  "
-          f"합={grf_y_right+grf_y_left:+.4f}N")
-
-    # 4) body 좌표축별 정상상태 offset (settle 후 후반 25% 평균)
-    _settle_idx = slice(int(0.75*N_FRAMES), N_FRAMES)
-    bp_steady = body_pos_hist[_settle_idx].mean(axis=0)
-    bv_steady = body_v_hist[_settle_idx].mean(axis=0)
-    print(f"  (4) body 정상상태 (후반 25% 평균):")
-    print(f"      pos: x={bp_steady[0]*1e3:+.1f}mm  y={bp_steady[1]*1e3:+.2f}mm  "
-          f"z={bp_steady[2]*1e3:+.1f}mm")
-    print(f"      vel: vx={bv_steady[0]:+.4f}m/s  vy={bv_steady[1]:+.4f}m/s  "
-          f"vz={bv_steady[2]:+.4f}m/s")
-
-    # 5) WBIC fb residual y 성분 평균 (body 6-DoF QP 잔차)
-    if USE_WBIC_FB and wbic_fb_status_hist.any():
-        fb_res_mean = wbic_fb_residual_hist[wbic_fb_status_hist].mean()
-        dvfb_mean = wbic_fb_dvfb_hist[wbic_fb_status_hist].mean(axis=0)
-        print(f"  (5) WBIC FB residual avg={fb_res_mean:.2e}  "
-              f"Δv̇_fb mean=({dvfb_mean[0]:+.3e},{dvfb_mean[1]:+.3e},{dvfb_mean[2]:+.3e}) "
-              f"(lin) ({dvfb_mean[3]:+.3e},{dvfb_mean[4]:+.3e},{dvfb_mean[5]:+.3e}) (ang)")
-
-    # 6) WBIC dtau / dlam 좌우 비교
-    if USE_WBIC:
-        dtau_y_rms_fr = np.sqrt(np.mean(wbic_dtau_hist[:, 0, :]**2))
-        dtau_y_rms_fl = np.sqrt(np.mean(wbic_dtau_hist[:, 1, :]**2))
-        dtau_y_rms_hr = np.sqrt(np.mean(wbic_dtau_hist[:, 2, :]**2))
-        dtau_y_rms_hl = np.sqrt(np.mean(wbic_dtau_hist[:, 3, :]**2))
-        print(f"  (6) WBIC Δτ RMS [Nm] per leg: FR={dtau_y_rms_fr:.4f}  FL={dtau_y_rms_fl:.4f}  "
-              f"HR={dtau_y_rms_hr:.4f}  HL={dtau_y_rms_hl:.4f}  (대칭이면 FR≈FL, HR≈HL)")
-    print("─" * 60)
-
-# GRF 합산 검증 (λ_des = MPC/QP 출력, λ_used = WBIC 보정 후)
+# GRF 합산 검증 + WBIC 보정 통계 (MPC+WBIC 전용 — operational, 4섹션 요약 아님)
 if not _USE_NMPC_ACTIVE:
     fz_sum_des  = np.sum(wbc_lam_des[:, :, 2], axis=1)
     fz_sum_used = np.sum(wbic_lam_used[:, :, 2], axis=1)
@@ -3424,7 +3331,6 @@ if not _USE_NMPC_ACTIVE:
     if USE_WBIC:
         print(f"  Σλz_used 평균={fz_sum_used.mean():.2f}N  "
               f"오차={abs(fz_sum_used.mean()-TOTAL_MASS*G_ACC):.2f}N")
-        # WBIC 보정 통계
         dtau_max  = float(np.max(np.abs(wbic_dtau_hist)))
         dtau_mean = float(np.mean(np.abs(wbic_dtau_hist)))
         dlam_max  = float(np.max(np.abs(wbic_dlam_hist)))
@@ -3440,8 +3346,6 @@ if not _USE_NMPC_ACTIVE:
             print(f"  [INFO] WBIC 보정량 0 — 모든 제약이 비활성. WBIC OFF와 동일 결과.")
         if n_fail > 0:
             print(f"  [WARNING] WBIC solver {n_fail}회 실패. 제약 충돌 가능성.")
-
-    # v11: WBIC FB 진단
     if USE_WBIC_FB:
         fb_res_max  = float(np.max(wbic_fb_residual_hist))
         fb_res_mean = float(np.mean(wbic_fb_residual_hist))
@@ -3449,23 +3353,91 @@ if not _USE_NMPC_ACTIVE:
         print(f"  WBIC FB: residual_fb max={fb_res_max:.2e} mean={fb_res_mean:.2e}  "
               f"|Δv̇_fb|max={fb_dvfb_max:.4f}  fail={wbic_fb_fail_count}/{N_FRAMES}")
 
-# (구 'Body dyn' 진단 블록 → 상단 [보행 안정성 / GAIT STABILITY] 통합 블록으로 이동.
-#  NMPC / MPC+WBIC 공통 포맷으로 출력되어 모드 비교 용이.)
-
 _wbc_tau_cmd_no_grf = wbc_tau_cmd - wbc_tau_grf   # GRF feedforward 제외 (실 액추에이터 부담)
+
+# ══════════════════════════════════════════════════════════════
+# 결과 요약 — NMPC / MPC+WBIC 공통 4-섹션 포맷 (모드 비교 편의)
+#   [1] 보행조건  [2] FR/HL 토크·속도·GRF (+좌우대칭성)  [3] body Track  [4] 보행 안정성
+# ══════════════════════════════════════════════════════════════
+_sm_mode = 'NMPC' if _USE_NMPC_ACTIVE else 'MPC+WBIC'
+
+# ── [1] 보행조건 ──────────────────────────────────────────────
+print("─" * 60)
+print(f"[1] 보행조건  ({_sm_mode})")
+print(f"  gait={GAIT_TYPE}  V={V}m/s  T={T}s  D={D}  N_CYCLES={N_CYCLES}  "
+      f"T_SW={T_SW:.3f}s  T_ST={T_ST:.3f}s")
+print(f"  STEP_HEIGHT={STEP_HEIGHT*1e3:.0f}mm  STEP_LENGTH={STEP_LENGTH*1e3:.0f}mm  "
+      f"μ={MU_FRICTION}  N_FRAMES={N_FRAMES}")
+
+# ── [2] FR / HL 토크·속도·GRF 지표 (+ 좌우 대칭성 검토) ──────────
+print("─" * 60)
+print(f"[2] FR / HL 토크·속도·GRF 지표  ({_sm_mode})")
 for leg in [0, 3]:
     nj = N_JOINTS_PER_LEG[leg]
     peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[:, leg, j])):6.2f}"
-                      for j in range(nj))
+                          for j in range(nj))
     peaks_dq  = "  ".join(f"th{j+1}:{np.max(np.abs(joint_vel_hist[:, leg, j])):6.2f}"
-                      for j in range(nj))
+                          for j in range(nj))
     fx_peak = np.max(np.abs(wbc_lam_des[:, leg, 0]))
     fy_peak = np.max(np.abs(wbc_lam_des[:, leg, 1]))
     fz_peak = np.max(np.abs(wbc_lam_des[:, leg, 2]))
-    print(f"  {LEG_NAMES[leg]} τ_cmd peak [N·m]: {peaks_cmd}")
-    print(f"  {LEG_NAMES[leg]} dq    peak [rad/s]: {peaks_dq}")
-    print(f"  {LEG_NAMES[leg]} λ (GRF) peak [N]:   Fx={fx_peak:6.2f}, Fy={fy_peak:6.2f}, Fz={fz_peak:6.2f}")
-print("─" * 55)
+    print(f"  {LEG_NAMES[leg]} τ_cmd  peak [N·m]:   {peaks_cmd}")
+    print(f"  {LEG_NAMES[leg]} dq     peak [rad/s]: {peaks_dq}")
+    print(f"  {LEG_NAMES[leg]} λ(GRF) peak [N]:     Fx={fx_peak:6.2f}  Fy={fy_peak:6.2f}  Fz={fz_peak:6.2f}")
+print("  [좌우 대칭성 검토]")
+_q_df = joint_hist[:, 0, :5] - joint_hist[:, 1, :5]   # FR - FL
+_q_dh = joint_hist[:, 2, :5] - joint_hist[:, 3, :5]   # HR - HL
+print(f"    q 차이 RMS [rad]  FR-FL: "
+      f"q1={np.sqrt(np.mean(_q_df[:,0]**2)):.2e} q2={np.sqrt(np.mean(_q_df[:,1]**2)):.2e} "
+      f"q3={np.sqrt(np.mean(_q_df[:,2]**2)):.2e} q4={np.sqrt(np.mean(_q_df[:,3]**2)):.2e}")
+print(f"    q 차이 RMS [rad]  HR-HL: "
+      f"q1={np.sqrt(np.mean(_q_dh[:,0]**2)):.2e} q2={np.sqrt(np.mean(_q_dh[:,1]**2)):.2e} "
+      f"q3={np.sqrt(np.mean(_q_dh[:,2]**2)):.2e} q4={np.sqrt(np.mean(_q_dh[:,3]**2)):.2e}")
+_sym_bp = body_pos_hist[int(0.75*N_FRAMES):].mean(axis=0)
+print(f"    body 정상상태 y offset = {_sym_bp[1]*1e3:+.2f} mm  (대칭이면 ≈0)")
+if not _USE_NMPC_ACTIVE:
+    _grf_y = wbc_lam_des[:, :, 1].mean(axis=0)
+    print(f"    GRF λ_y 시간평균 [N]  FR={_grf_y[0]:+.3f} FL={_grf_y[1]:+.3f} "
+          f"HR={_grf_y[2]:+.3f} HL={_grf_y[3]:+.3f}  (4-leg sum={_grf_y.sum():+.4f}, 대칭이면 0)")
+    if USE_WBIC:
+        _dt = [np.sqrt(np.mean(wbic_dtau_hist[:, i, :] ** 2)) for i in range(4)]
+        print(f"    WBIC Δτ RMS [Nm] per leg  FR={_dt[0]:.4f} FL={_dt[1]:.4f} "
+              f"HR={_dt[2]:.4f} HL={_dt[3]:.4f}  (대칭이면 FR≈FL, HR≈HL)")
+
+# ── [3] body Track 지표 (actual − reference 의 RMS, 0 에 가까울수록 추종 양호) ──
+_bt_rms_p = np.sqrt(np.mean((body_pos_hist - body_pos_ref_hist) ** 2, axis=0))
+_bt_rms_v = np.sqrt(np.mean((body_v_hist   - body_v_ref_hist)   ** 2, axis=0))
+print("─" * 60)
+print(f"[3] body Track 지표  ({_sm_mode})")
+print(f"  pos error RMS [mm]   x={_bt_rms_p[0]*1e3:8.2f}  y={_bt_rms_p[1]*1e3:8.2f}  "
+      f"z={_bt_rms_p[2]*1e3:8.2f}")
+print(f"  vel error RMS [m/s]  x={_bt_rms_v[0]:8.4f}  y={_bt_rms_v[1]:8.4f}  "
+      f"z={_bt_rms_v[2]:8.4f}")
+print(f"  (NMPC_W_BODY_TRACK={NMPC_W_BODY_TRACK})")
+
+# ── [4] 보행 안정성 (GAIT STABILITY) ──────────────────────────
+_gs_pos_max = float(np.max(np.linalg.norm(body_pos_hist - body_pos_ref_hist, axis=1)))
+_gs_v_max   = float(np.max(np.linalg.norm(body_v_hist   - body_v_ref_hist,   axis=1)))
+_gs_roll    = math.degrees(float(np.max(np.abs(np.arctan2(body_R_hist[:, 2, 1], body_R_hist[:, 2, 2])))))
+_gs_pitch   = math.degrees(float(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[:, 2, 0], -1, 1))))))
+_gs_omega   = float(np.max(np.abs(body_omega_hist)))
+_gs_z_min   = float(np.min(body_pos_hist[:, 2])) * 1e3
+_gs_z_max   = float(np.max(body_pos_hist[:, 2])) * 1e3
+_gs_x_final = float(body_pos_hist[-1, 0])
+_gs_x_tgt   = V * T * N_CYCLES
+_gs_vx_mean = float(body_v_hist[:, 0].mean())
+_gs_tau_max = float(np.abs(wbc_tau_cmd).max())
+print("─" * 60)
+print(f"[4] 보행 안정성 / GAIT STABILITY  ({_sm_mode})")
+print(f"  |pos_dev|max = {_gs_pos_max*1e3:8.2f} mm      |v_dev|max = {_gs_v_max*1e3:8.2f} mm/s")
+print(f"  roll_max     = {_gs_roll:8.3f} °       pitch_max  = {_gs_pitch:8.3f} °")
+print(f"  |ω|max       = {_gs_omega:8.4f} rad/s   z range    = [{_gs_z_min:.1f}, {_gs_z_max:.1f}] mm")
+print(f"  x final      = {_gs_x_final:8.3f} m       (target {_gs_x_tgt:.3f})")
+print(f"  vx mean      = {_gs_vx_mean:8.3f} m/s     (target {V})")
+print(f"  |τ|max       = {_gs_tau_max:8.2f} N·m")
+if body_state.get('_diverged', False):
+    print(f"  [WARNING] body 발산 감지 — clamp 적용됨 (|ω|>50 rad/s 또는 |v|>50 m/s).")
+print("─" * 60)
 
 # 비교 모드: metrics를 pickle로 덤프하고 figure/animation 건너뜀
 if _COMPARE_MODE:
@@ -4025,14 +3997,7 @@ for ri in range(3):
     ax_v.plot(_fr, body_v_hist[:, ri],     lw=1.6, color='#00d4ff',          label='actual')
     ax_v.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
 
-# headless 비교용: body pos/vel tracking ERROR RMS 콘솔 출력
-# (actual - reference 의 RMS — 0 에 가까울수록 추종 잘 됨)
-_bt_rms_p = np.sqrt(np.mean((body_pos_hist - body_pos_ref_hist) ** 2, axis=0))
-_bt_rms_v = np.sqrt(np.mean((body_v_hist   - body_v_ref_hist)   ** 2, axis=0))
-print(f"[BODY TRACK] pos error RMS [mm]  x={_bt_rms_p[0]*1e3:7.2f}  y={_bt_rms_p[1]*1e3:7.2f}  "
-      f"z={_bt_rms_p[2]*1e3:7.2f}  |  vel error RMS [m/s]  x={_bt_rms_v[0]:.4f}  "
-      f"y={_bt_rms_v[1]:.4f}  z={_bt_rms_v[2]:.4f}  |  "
-      f"NMPC_W_BODY_TRACK={NMPC_W_BODY_TRACK}  ({'NMPC' if _USE_NMPC_ACTIVE else 'MPC+WBIC'})")
+# (body Track ERROR RMS 콘솔 출력 → 상단 결과 요약 [3] 섹션으로 이동.)
 
 ax_or = fig5.add_subplot(gs5[3, 0])
 _or_max = max(np.max(np.abs(_roll_deg)), np.max(np.abs(_pitch_deg)), np.max(np.abs(_yaw_deg)))
