@@ -204,7 +204,7 @@ class GaitConfig:
     wbic_w_dtau: float = 0.0      # τ smoothness: w_dtau·‖τ−τ_prev‖²  (v13.1: 정량 측정 결과 net negative → OFF default)
     use_spline_diff: bool = False # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: 정량 측정 결과 net negative → OFF default)
     # ─────────── NMPC: solver ───────────
-    use_nmpc: bool = False
+    use_nmpc: bool = True
     use_nmpc_receding: bool = True
     nmpc_maxiter: int = 200
     nmpc_init_reg: float = 1.0
