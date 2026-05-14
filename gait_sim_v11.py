@@ -207,8 +207,14 @@ INIT_ERR_RAD = math.radians(1.0)
 # ── MPC / QP GRF 파라미터 ────────────────────────────────────
 MU_FRICTION  = 0.6       # 마찰 계수
 
-# 본체 관성 텐서 (직육면체 근사, 0.5×0.1×0.1m, 15kg) [kg·m²]
-BODY_INERTIA = np.diag([0.07, 0.26, 0.26])   # Ixx, Iyy, Izz
+# 본체 관성 텐서 — v13.14: CRBA composite (다리 포함) hardcode.
+#   base-link only [0.07,0.26,0.26] 면 MPC body 6-DoF under-damped → 3+ cycle 발산
+#   (Fz spike ~4500N). pinocchio CRBA(home pose) 측정값.
+BODY_INERTIA = np.array([
+    [ 0.8044,  0.0,    -0.2547],
+    [ 0.0,     2.1571,  0.0   ],
+    [-0.2547,  0.0,     1.5599],
+])   # Ixx, Iyy, Izz + Ixz coupling
 
 N_MPC  = 10              # MPC 예측 구간 [스텝]
 DT_MPC = DT * 10         # MPC 샘플링 주기 [s]  (= 0.02s)

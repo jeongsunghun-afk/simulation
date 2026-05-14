@@ -26,8 +26,13 @@ import pinocchio as pin
 # v13 sync: gait_sim.model 에서 직접 import → DH 4벌 (R/L mirror) 자동 적용
 from gait_sim.model import (
     LEG_DH, LEG_HIP_OFFSETS, LEG_NAMES,
-    BODY_MASS, BODY_INERTIA, LINK_MASS, LINK_RADIUS,
+    BODY_MASS, LINK_MASS, LINK_RADIUS,
 )
+# ⚠ base-link only inertia 사용 — model.BODY_INERTIA 는 CRBA upgrade 될 수 있어
+#   pin_model 의 base link 으로 쓰면 double counting (base→composite→다시 composite).
+#   CFG.body_inertia 는 항상 raw base-link only (0.07, 0.26, 0.26).
+from gait_sim.config import CFG as _CFG
+_BASE_LINK_INERTIA = _CFG.body_inertia
 
 
 # ══════════════════════════════════════════════════════════════
@@ -96,7 +101,7 @@ def build_model() -> pin.Model:
     root_jid = model.addJoint(0, pin.JointModelFreeFlyer(),
                                 pin.SE3.Identity(), "root_joint")
     body_inertia = pin.Inertia(BODY_MASS, np.zeros(3),
-                                  np.array(BODY_INERTIA, copy=True))
+                                  np.array(_BASE_LINK_INERTIA, copy=True))
     model.appendBodyToJoint(root_jid, body_inertia, pin.SE3.Identity())
     base_frame_id = model.addBodyFrame("base_link", root_jid,
                                           pin.SE3.Identity(), 0)
@@ -164,7 +169,7 @@ def export_urdf(model: pin.Model, urdf_path: str,
     lines.append('  <link name="base_link">')
     lines.append(f'    <inertial>')
     lines.append(f'      <mass value="{BODY_MASS}"/>')
-    Ib = np.array(BODY_INERTIA, copy=True)
+    Ib = np.array(_BASE_LINK_INERTIA, copy=True)
     lines.append(f'      <inertia ixx="{Ib[0,0]:.6f}" iyy="{Ib[1,1]:.6f}" izz="{Ib[2,2]:.6f}"')
     lines.append(f'               ixy="{Ib[0,1]:.6f}" ixz="{Ib[0,2]:.6f}" iyz="{Ib[1,2]:.6f}"/>')
     lines.append('    </inertial>')

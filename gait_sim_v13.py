@@ -154,7 +154,13 @@ class GaitConfig:
     g_acc: float = 9.81           # [m/s²]
     link_mass: np.ndarray = field(default_factory=lambda: np.array([3., 2., 1., 0.2, 0.1]))
     link_radius: float = 0.015    # 링크 단면 반경 [m] (RNEA 원통 관성용)
-    body_inertia: np.ndarray = field(default_factory=lambda: np.diag([0.07, 0.26, 0.26]))
+    # v13.14: CRBA composite (다리 포함) hardcode — base-link only 면 MPC body 6-DoF
+    #   under-damped → 3+ cycle 발산 (Fz spike ~4500N). pinocchio CRBA(home pose) 측정값.
+    body_inertia: np.ndarray = field(default_factory=lambda: np.array([
+        [ 0.8044,  0.0,    -0.2547],
+        [ 0.0,     2.1571,  0.0   ],
+        [-0.2547,  0.0,     1.5599],
+    ]))
     # ─────────── Joint motor limits ───────────
     joint_vel_limit_rad_s: np.ndarray = field(
         default_factory=lambda: np.array([14.66, 15.91, 15.91, 14.66, 14.66]))
