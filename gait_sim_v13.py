@@ -204,7 +204,7 @@ class GaitConfig:
     wbic_w_dtau: float = 0.0      # τ smoothness: w_dtau·‖τ−τ_prev‖²  (v13.1: 정량 측정 결과 net negative → OFF default)
     use_spline_diff: bool = False # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: 정량 측정 결과 net negative → OFF default)
     # ─────────── NMPC: solver ───────────
-    use_nmpc: bool = True
+    use_nmpc: bool = False
     use_nmpc_receding: bool = True
     nmpc_maxiter: int = 200
     nmpc_init_reg: float = 1.0
@@ -2817,7 +2817,28 @@ def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
                             for i in range(5)]
                      for leg in ['FR','FL','HR','HL']}
 
-    # Linear interp from t_nmpc → t_v11
+    # ── Fix A+B: 관절 q / q̇ 를 NMPC 노드의 (q, v) 로 cubic Hermite spline 보간 ──
+    # 기존: joint_hist 만 선형보간 → q piecewise-linear → q̈ 가 노드마다 임펄스
+    #       스파이크 → tau_dyn 튐. + joint_vel_hist 는 v11 궤적 값 그대로 stale.
+    # 수정: NMPC 상태 x=[q,v] 의 관절 속도를 직접 사용. Hermite spline 으로
+    #       q·q̇ 모두 NMPC 노드값을 정확히 만족하면서 매끄럽게 보간 →
+    #       joint_acc 임펄스 제거, joint_vel_hist NMPC-consistent 로 갱신.
+    from scipy.interpolate import CubicHermiteSpline
+    _nq = pin_model.nq
+    _q_nodes = np.zeros((N_NMPC + 1, 4, 5))
+    _v_nodes = np.zeros((N_NMPC + 1, 4, 5))
+    for _kk in range(N_NMPC + 1):
+        for _li, _leg in enumerate(['FR', 'FL', 'HR', 'HL']):
+            for _j in range(5):
+                _q_nodes[_kk, _li, _j] = xs[_kk][leg_q_idx_pin[_leg][_j]]
+                _v_nodes[_kk, _li, _j] = xs[_kk][_nq + leg_v_idx_pin[_leg][_j]]
+    _t_v11 = np.minimum(np.arange(N_FRAMES) * DT, t_nmpc[-1])
+    _herm  = CubicHermiteSpline(t_nmpc, _q_nodes, _v_nodes, axis=0)
+    joint_hist[:, :, :5]     = _herm(_t_v11)
+    joint_vel_hist[:, :, :5] = _herm(_t_v11, 1)
+    joint_acc_hist[:, :, :5] = _herm(_t_v11, 2)
+
+    # ── body state(선형보간) + control(ZOH — 실제 controller 거동) ──
     for fi in range(N_FRAMES):
         t_v11 = fi * DT
         # Clamp to NMPC range
@@ -2833,11 +2854,6 @@ def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
         # us[k] (zero-order hold)
         u = us[min(k, N_NMPC - 1)]
 
-        # Joint state per leg (v11 ordering)
-        for leg_idx, leg in enumerate(['FR', 'FL', 'HR', 'HL']):
-            nj = N_JOINTS_PER_LEG[leg_idx]
-            for j in range(5):
-                joint_hist[fi, leg_idx, j] = x[leg_q_idx_pin[leg][j]]
         # Body state (in pinocchio convention: q[0:3] pos, q[3:7] quat, v[0:3] lin, v[3:6] ang)
         body_pos_hist[fi]   = x[0:3]
         # Quaternion → R
@@ -2909,15 +2925,15 @@ def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
     # tau_pd  = 0  (NMPC는 명시적 PD 피드백 항이 없음 — whole-body OC가 통합 처리)
     # tau_imp = tau_cmd - tau_dyn - tau_grf       (잔차: per-leg 분해 ↔ whole-body NMPC 불일치)
     #           작을수록 분해가 NMPC 해와 정합. 크면 모델 mismatch / λ_des≠실제 접촉력.
-    _dq_hist  = np.gradient(joint_hist, DT, axis=0)
-    _ddq_hist = np.gradient(_dq_hist,   DT, axis=0)
+    # q̇·q̈ 는 Hermite spline 으로 갱신된 joint_vel_hist / joint_acc_hist 사용
+    # (NMPC-consistent + 매끄러움 — np.gradient 재미분 시 임펄스 스파이크 재발)
     for fi in range(N_FRAMES):
         R_b = body_R_hist[fi]
         for leg_idx in range(4):
             nj   = N_JOINTS_PER_LEG[leg_idx]
             q_leg   = joint_hist[fi, leg_idx, :nj]
-            dq_leg  = _dq_hist[fi, leg_idx, :nj]
-            ddq_leg = _ddq_hist[fi, leg_idx, :nj]
+            dq_leg  = joint_vel_hist[fi, leg_idx, :nj]
+            ddq_leg = joint_acc_hist[fi, leg_idx, :nj]
             front = (leg_idx < 2)
             dh    = LEG_DH[leg_idx]
             lm    = LINK_MASS_PER_LEG[leg_idx]
