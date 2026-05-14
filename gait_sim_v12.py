@@ -3283,10 +3283,10 @@ _AX_COLORS = ['#ff4444', '#44ff44', '#4444ff']
 def _body_T_at(fi):
     """프레임 fi의 시각화 변환 (translation, R) — VIZ_BODY_MODE 기반.
     'static' or USE_BODY_DYNAMICS=False : I (변환 없음)
-    'static'                              : (body_pos, body_R)  ← drift 그대로
+    'world'                              : (body_pos, body_R)  ← drift 그대로
     'body_follow'                        : (0, body_R)         ← 회전만, 카메라가 body 따라감
     """
-    if (not USE_BODY_DYNAMICS) or VIZ_BODY_MODE == 'world':
+    if (not USE_BODY_DYNAMICS) or VIZ_BODY_MODE == 'static':
         return np.zeros(3), np.eye(3)
     if VIZ_BODY_MODE == 'body_follow':
         return np.zeros(3), body_R_hist[fi]
