@@ -230,6 +230,14 @@ class GaitConfig:
     nmpc_touchdown_last_n: int = 2
     nmpc_w_stance_pos_xy: float = 1e2
     nmpc_w_stance_pos_z: float = 2.0
+    # B2: per-node body x 추종 (이동 레퍼런스 x_ref(t) = q0[0]+V·t, vx=V).
+    #     stateReg 는 x0(출발점)로 회귀시켜 전진을 방해 → B1 으로 px 성분 제외하고
+    #     bodyTrack 으로 매 노드 px+vx 를 추종. 0 이면 기존 동작(terminal-only 추종).
+    nmpc_w_body_track: float = 200.0   # bodyTrack cost weight (매 running node)
+    # ↑ sweep 결과(v13): 0→264mm, 50→233, 200→181, 1000→115mm (x RMS). 가중치↑ 시
+    #   x 추종 개선되나 y/z 추종은 악화 + solver iter 급증. 200 = 균형점(x −31%, 0 fails).
+    nmpc_body_track_w_px: float = 1.0  # body px residual 가중치 (activation)
+    nmpc_body_track_w_vx: float = 0.5  # body vx residual 가중치 (activation)
     # ─────────── Perturbation test ───────────
     use_perturbation: bool = False
     perturb_time: float = 1.0     # [s]
@@ -242,6 +250,10 @@ class GaitConfig:
     viz_body_mode: str = 'world'  # 'static' / 'world' / 'body_follow'
 
 CFG = GaitConfig()
+# 튜닝/AB 비교용 env override (예: NMPC_W_BODY_TRACK=0 python3 gait_sim_v13.py)
+import os as _os
+if 'NMPC_W_BODY_TRACK' in _os.environ:
+    CFG.nmpc_w_body_track = float(_os.environ['NMPC_W_BODY_TRACK'])
 
 # ── 모듈 globals: CFG 필드 alias (기존 v11/v12 코드 호환) ────────
 GAIT_TYPE   = CFG.gait_type
@@ -1812,6 +1824,9 @@ NMPC_W_TOUCHDOWN_V    = CFG.nmpc_w_touchdown_v
 NMPC_TOUCHDOWN_LAST_N = CFG.nmpc_touchdown_last_n
 NMPC_W_STANCE_POS_XY  = CFG.nmpc_w_stance_pos_xy
 NMPC_W_STANCE_POS_Z   = CFG.nmpc_w_stance_pos_z
+NMPC_W_BODY_TRACK     = CFG.nmpc_w_body_track
+NMPC_BODY_TRACK_W_PX  = CFG.nmpc_body_track_w_px
+NMPC_BODY_TRACK_W_VX  = CFG.nmpc_body_track_w_vx
 USE_PERTURBATION  = CFG.use_perturbation
 PERTURB_TIME      = CFG.perturb_time
 PERTURB_VEL_LIN   = CFG.perturb_vel_lin
@@ -2302,6 +2317,14 @@ def _solve_nmpc_trot():
     N_TOTAL = N_PER_CYCLE * N_CYCLES
 
     _LEGS_OS = ['FR', 'FL', 'HR', 'HL']
+    # B1/B2 공용 activation (state residual tangent dim ndx = 2·nv)
+    _ndx = 2 * pin_model.nv
+    _sr_w = np.ones(_ndx); _sr_w[0] = 0.0          # B1: stateReg 에서 body px 드래그 제거
+    _sr_act = _crocoddyl.ActivationModelWeightedQuad(_sr_w)
+    _bt_w = np.zeros(_ndx)                          # B2: bodyTrack — px, vx 성분만
+    _bt_w[0]             = NMPC_BODY_TRACK_W_PX
+    _bt_w[pin_model.nv]  = NMPC_BODY_TRACK_W_VX
+    _bt_act = _crocoddyl.ActivationModelWeightedQuad(_bt_w)
     actions = []
     for k in range(N_TOTAL):
         t = k * DT_NMPC
@@ -2327,10 +2350,20 @@ def _solve_nmpc_trot():
                 np.array([NMPC_BAUMGARTE_KP, NMPC_BAUMGARTE_KD]))
             cm_contact.addContact(f'c_{leg}', c)
         cost = _crocoddyl.CostModelSum(cstate, cactuation.nu)
+        # stateReg (B1: body px 성분 제외 — 출발점 회귀 드래그 제거)
         cost.addCost('stateReg',
-            _crocoddyl.CostModelResidual(cstate,
+            _crocoddyl.CostModelResidual(cstate, _sr_act,
                 _crocoddyl.ResidualModelState(cstate, x0, cactuation.nu)),
             NMPC_W_STATE_REG)
+        # bodyTrack (B2: per-node 이동 레퍼런스로 body px+vx 추종)
+        if NMPC_W_BODY_TRACK > 0.0:
+            x_ref_k = x0.copy()
+            x_ref_k[0]            = q0[0] + V * (k + 1) * DT_NMPC
+            x_ref_k[pin_model.nq] = V
+            cost.addCost('bodyTrack',
+                _crocoddyl.CostModelResidual(cstate, _bt_act,
+                    _crocoddyl.ResidualModelState(cstate, x_ref_k, cactuation.nu)),
+                NMPC_W_BODY_TRACK)
         cost.addCost('ctrlReg',
             _crocoddyl.CostModelResidual(cstate,
                 _crocoddyl.ResidualModelControl(cstate, cactuation.nu)),
@@ -2507,6 +2540,15 @@ def _solve_nmpc_trot_receding():
     DT_NMPC = T / N_PER_CYCLE
     N_TOTAL = N_PER_CYCLE * N_CYCLES
 
+    # B1/B2 공용 activation (state residual tangent dim ndx = 2·nv)
+    _ndx = 2 * pin_model.nv
+    _sr_w = np.ones(_ndx); _sr_w[0] = 0.0          # B1: stateReg 에서 body px 드래그 제거
+    _sr_act = _crocoddyl.ActivationModelWeightedQuad(_sr_w)
+    _bt_w = np.zeros(_ndx)                          # B2: bodyTrack — px, vx 성분만
+    _bt_w[0]             = NMPC_BODY_TRACK_W_PX
+    _bt_w[pin_model.nv]  = NMPC_BODY_TRACK_W_VX
+    _bt_act = _crocoddyl.ActivationModelWeightedQuad(_bt_w)
+
     _LEGS = ['FR', 'FL', 'HR', 'HL']
 
     def _gait_legs_at(t):
@@ -2540,10 +2582,20 @@ def _solve_nmpc_trot_receding():
                 np.array([NMPC_BAUMGARTE_KP, NMPC_BAUMGARTE_KD]))
             cm_contact.addContact(f'c_{leg}', c)
         cost = _crocoddyl.CostModelSum(cstate, cactuation.nu)
+        # stateReg (B1: body px 성분 제외 — 출발점 회귀 드래그 제거)
         cost.addCost('stateReg',
-            _crocoddyl.CostModelResidual(cstate,
+            _crocoddyl.CostModelResidual(cstate, _sr_act,
                 _crocoddyl.ResidualModelState(cstate, x0, cactuation.nu)),
             NMPC_W_STATE_REG)
+        # bodyTrack (B2: per-node 이동 레퍼런스로 body px+vx 추종)
+        if NMPC_W_BODY_TRACK > 0.0:
+            x_ref_k = x0.copy()
+            x_ref_k[0]            = q0[0] + V * (global_k + 1) * DT_NMPC
+            x_ref_k[pin_model.nq] = V
+            cost.addCost('bodyTrack',
+                _crocoddyl.CostModelResidual(cstate, _bt_act,
+                    _crocoddyl.ResidualModelState(cstate, x_ref_k, cactuation.nu)),
+                NMPC_W_BODY_TRACK)
         cost.addCost('ctrlReg',
             _crocoddyl.CostModelResidual(cstate,
                 _crocoddyl.ResidualModelControl(cstate, cactuation.nu)),
@@ -3456,7 +3508,7 @@ ax3d.set_ylabel('Y (m)', color='white', labelpad=4)
 ax3d.set_zlabel('Z (m)', color='white', labelpad=4)
 ax3d.tick_params(colors=_gray)
 ax3d.set_title(
-    f'Gait Sim v12  [{GAIT_TYPE.upper()}]  v={V}m/s  T={T}s  D={D}  '
+    f'Gait Sim v13  [{GAIT_TYPE.upper()}]  v={V}m/s  T={T}s  D={D}  '
     f'step_h={STEP_HEIGHT}m  step_l={STEP_LENGTH:.3f}m  total_mass={TOTAL_MASS:.2f}kg',
     color='white', fontsize=9)
 ax3d.view_init(elev=20, azim=-55)
@@ -3959,6 +4011,14 @@ for ri in range(3):
     ax_v.plot(_fr, body_v_hist[:, ri],     lw=1.6, color='#00d4ff',          label='actual')
     ax_v.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray')
 
+# headless 비교용: body pos/vel tracking RMS 콘솔 출력
+_bt_rms_p = np.sqrt(np.mean((body_pos_hist - body_pos_ref_hist) ** 2, axis=0))
+_bt_rms_v = np.sqrt(np.mean((body_v_hist   - body_v_ref_hist)   ** 2, axis=0))
+print(f"[BODY TRACK] pos RMS [mm]  x={_bt_rms_p[0]*1e3:7.2f}  y={_bt_rms_p[1]*1e3:7.2f}  "
+      f"z={_bt_rms_p[2]*1e3:7.2f}  |  vel RMS [m/s]  x={_bt_rms_v[0]:.4f}  "
+      f"y={_bt_rms_v[1]:.4f}  z={_bt_rms_v[2]:.4f}  |  "
+      f"NMPC_W_BODY_TRACK={NMPC_W_BODY_TRACK}  ({'NMPC' if _USE_NMPC_ACTIVE else 'MPC+WBIC'})")
+
 ax_or = fig5.add_subplot(gs5[3, 0])
 _or_max = max(np.max(np.abs(_roll_deg)), np.max(np.abs(_pitch_deg)), np.max(np.abs(_yaw_deg)))
 _style_ax5(ax_or, f'body orientation [deg]  cmd=0  '
@@ -4236,7 +4296,7 @@ fig8.suptitle(
 
 plt.figure(fig.number)
 plt.suptitle(
-    f'Gait Sim v12  |  {GAIT_TYPE.upper()}  |  '
+    f'Gait Sim v13  |  {GAIT_TYPE.upper()}  |  '
     f'v={V}m/s  T={T}s  D={D}  T_sw={T_SW:.2f}s  '
     f'step_h={STEP_HEIGHT*1e3:.0f}mm  step_l={STEP_LENGTH*1e3:.0f}mm',
     color='white', fontsize=9)
