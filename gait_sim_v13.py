@@ -3380,10 +3380,95 @@ print(f"  STEP_HEIGHT={STEP_HEIGHT*1e3:.0f}mm  STEP_LENGTH={STEP_LENGTH*1e3:.0f}
       f"μ={MU_FRICTION}  N_FRAMES={N_FRAMES}")
 print(f"  평가구간: {_ss_lbl}  (첫 {EVAL_SKIP_CYCLES}사이클 startup 제외)")
 
-# ── [2] FR / HL 토크·속도·GRF 지표 (+ 좌우 대칭성 검토) ──────────
-#     모든 지표는 steady-state 구간(_ss)만 평가
+# ── [2] 에너지 효율성 ─────────────────────────────────────────
+_dq_act   = joint_vel_hist                                   # (N,4,nj)
+_pwr_jt   = wbc_tau_cmd * _dq_act                            # per-joint power (N,4,nj)
+_pwr_inst = np.abs(_pwr_jt).sum(axis=(1, 2))                 # Σ|τ·q̇| [W] (N,)
+_pwr_pos  = np.maximum(_pwr_jt, 0.0).sum(axis=(1, 2))        # 양의 일률 (joint별 분해 후 합)
+_pwr_neg  = np.minimum(_pwr_jt, 0.0).sum(axis=(1, 2))        # 음의 일률
+_pwr_ss   = _pwr_inst[_ss]
+_dist_ss  = abs(float(body_pos_hist[-1, 0] - body_pos_hist[_ss_start, 0]))
+_E_mech   = float(_pwr_ss.sum() * DT)                        # ∫|P|dt [J]  (= W+ + |W-|)
+_cot      = _E_mech / max(TOTAL_MASS * G_ACC * _dist_ss, 1e-6)
+_W_pos    = float(_pwr_pos[_ss].sum() * DT)
+_W_neg    = float(_pwr_neg[_ss].sum() * DT)
 print("─" * 60)
-print(f"[2] FR / HL 토크·속도·GRF 지표  ({_sm_mode})")
+print(f"[2] 에너지 효율성  ({_sm_mode})")
+print(f"  CoT = E_mech/(m·g·d)  = {_cot:8.3f}        (낮을수록 효율적)")
+print(f"  기계적 일률 [W]       mean={_pwr_ss.mean():8.1f}  peak={_pwr_ss.max():8.1f}")
+print(f"  기계적 에너지 [J]     total={_E_mech:8.1f}  (W+={_W_pos:7.1f}  W-={_W_neg:7.1f})")
+
+# ── [3] 이동 성능·민첩성 ──────────────────────────────────────
+_vx_mean    = float(body_v_hist[_ss, 0].mean())
+_v_err_pct  = abs(_vx_mean - V) / max(V, 1e-6) * 100.0
+_x_dist     = float(body_pos_hist[-1, 0] - body_pos_hist[0, 0])
+_y_drift    = float(body_pos_hist[-1, 1] - body_pos_hist[0, 1])
+_x_tgt      = V * T * N_CYCLES
+_L_ref      = abs(_foot_z_home)                              # 기립 높이 ≈ 다리 길이 proxy
+_froude     = _vx_mean ** 2 / (G_ACC * max(_L_ref, 1e-6))
+_n_ss_cyc   = max(N_CYCLES - EVAL_SKIP_CYCLES, 1)
+_stride_act = (body_pos_hist[-1, 0] - body_pos_hist[_ss_start, 0]) / _n_ss_cyc
+print("─" * 60)
+print(f"[3] 이동 성능·민첩성  ({_sm_mode})")
+print(f"  vx mean       = {_vx_mean:8.3f} m/s   (target {V}, 오차 {_v_err_pct:.1f}%)")
+print(f"  이동거리 x    = {_x_dist:8.3f} m     (target {_x_tgt:.3f})    y drift = {_y_drift*1e3:+.1f} mm")
+print(f"  Froude number = {_froude:8.4f}      (v²/gL, L={_L_ref:.3f}m)")
+print(f"  stride/cycle  = {_stride_act:8.4f} m   (target {V*T:.4f})")
+
+# ── [4] 안정성·강인성 ────────────────────────────────────────
+_st_roll  = math.degrees(float(np.max(np.abs(np.arctan2(body_R_hist[_ss, 2, 1], body_R_hist[_ss, 2, 2])))))
+_st_pitch = math.degrees(float(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[_ss, 2, 0], -1, 1))))))
+_st_omega = float(np.max(np.abs(body_omega_hist[_ss])))
+_st_zmin  = float(np.min(body_pos_hist[_ss, 2])) * 1e3
+_st_zmax  = float(np.max(body_pos_hist[_ss, 2])) * 1e3
+_fc = np.full((N_FRAMES, 4), np.nan)                         # friction cone 사용률 (stance only)
+for _li in range(4):
+    _fxy = np.linalg.norm(wbc_lam_des[:, _li, :2], axis=1)
+    _fz  = wbc_lam_des[:, _li, 2]
+    _ok  = _fz > 1.0
+    _fc[_ok, _li] = _fxy[_ok] / (MU_FRICTION * _fz[_ok])
+_fc_max   = float(np.nanmax(_fc[_ss])) if np.any(~np.isnan(_fc[_ss])) else float('nan')
+_vfoot    = np.gradient(foot_actual_world_hist, axis=0) / DT  # stance foot slip
+_slip_st  = np.where(~swing_flag[:, :, None], np.linalg.norm(_vfoot, axis=2)[:, :, None], np.nan)[:, :, 0]
+# p95 사용: swing↔stance 전환 프레임의 np.gradient 경계 오염(스파이크) 배제
+_slip_p95 = float(np.nanpercentile(_slip_st[_ss], 95)) if np.any(~np.isnan(_slip_st[_ss])) else float('nan')
+_tau_sat  = 0.0                                              # 토크 포화율 max
+for _j in range(N_JOINTS_MAX):
+    if _j < len(JOINT_TORQUE_LIMIT) and JOINT_TORQUE_LIMIT[_j] > 0:
+        _tau_sat = max(_tau_sat, float(np.max(np.abs(wbc_tau_cmd[_ss, :, _j]) / JOINT_TORQUE_LIMIT[_j])))
+print("─" * 60)
+print(f"[4] 안정성·강인성  ({_sm_mode})")
+print(f"  roll_max = {_st_roll:7.3f} °   pitch_max = {_st_pitch:7.3f} °   |ω|max = {_st_omega:.4f} rad/s")
+print(f"  z range  = [{_st_zmin:.1f}, {_st_zmax:.1f}] mm   (수직 진동 {_st_zmax-_st_zmin:.1f} mm)")
+print(f"  마찰콘 사용률 max = {_fc_max:.3f}  (>1=slip)    stance foot slip p95 = {_slip_p95:.4f} m/s")
+print(f"  토크 포화율 max   = {_tau_sat:.3f}  (>1=saturation)")
+if body_state.get('_diverged', False):
+    print(f"  [WARNING] body 발산 감지 — clamp 적용됨 (|ω|>50 rad/s 또는 |v|>50 m/s).")
+
+# ── [5] 제어 정밀도 ───────────────────────────────────────────
+_bt_rms_p = np.sqrt(np.mean((body_pos_hist[_ss] - body_pos_ref_hist[_ss]) ** 2, axis=0))
+_bt_rms_v = np.sqrt(np.mean((body_v_hist[_ss]   - body_v_ref_hist[_ss])   ** 2, axis=0))
+_pos_dev_max = float(np.max(np.linalg.norm(body_pos_hist[_ss] - body_pos_ref_hist[_ss], axis=1)))
+_roll_t   = np.arctan2(body_R_hist[_ss, 2, 1], body_R_hist[_ss, 2, 2])
+_pitch_t  = np.arcsin(np.clip(-body_R_hist[_ss, 2, 0], -1, 1))
+_yaw_t    = np.arctan2(body_R_hist[_ss, 1, 0], body_R_hist[_ss, 0, 0])
+_ori_rms  = (math.degrees(np.sqrt(np.mean(_roll_t ** 2))),
+             math.degrees(np.sqrt(np.mean(_pitch_t ** 2))),
+             math.degrees(np.sqrt(np.mean(_yaw_t ** 2))))
+_ft_err   = np.linalg.norm(foot_actual_world_hist[_ss] - foot_target_world_hist[_ss], axis=2)  # NaN=stance
+_ft_rms   = float(np.sqrt(np.nanmean(_ft_err ** 2))) if np.any(~np.isnan(_ft_err)) else float('nan')
+print("─" * 60)
+print(f"[5] 제어 정밀도  ({_sm_mode})")
+print(f"  body pos error RMS [mm]   x={_bt_rms_p[0]*1e3:7.2f}  y={_bt_rms_p[1]*1e3:7.2f}  "
+      f"z={_bt_rms_p[2]*1e3:7.2f}   (|dev|max={_pos_dev_max*1e3:.1f})")
+print(f"  body vel error RMS [m/s]  x={_bt_rms_v[0]:7.4f}  y={_bt_rms_v[1]:7.4f}  z={_bt_rms_v[2]:7.4f}")
+print(f"  orientation RMS [deg]     roll={_ori_rms[0]:7.3f}  pitch={_ori_rms[1]:7.3f}  yaw={_ori_rms[2]:7.3f}")
+print(f"  swing foot tracking RMS   = {_ft_rms*1e3:7.2f} mm  (4-leg aggregate)")
+print(f"  ※ joint / GRF tracking error 는 NMPC 에 ref 부재 → 모드 비교 불가, 생략")
+
+# ── [부록] FR / HL 토크·속도·GRF peak + 좌우 대칭성 (raw data) ──
+print("─" * 60)
+print(f"[부록] FR / HL τ·dq·GRF peak + 좌우 대칭성  ({_sm_mode})")
 for leg in [0, 3]:
     nj = N_JOINTS_PER_LEG[leg]
     peaks_cmd = "  ".join(f"th{j+1}:{np.max(np.abs(wbc_tau_cmd[_ss, leg, j])):6.2f}"
@@ -3396,7 +3481,7 @@ for leg in [0, 3]:
     print(f"  {LEG_NAMES[leg]} τ_cmd  peak [N·m]:   {peaks_cmd}")
     print(f"  {LEG_NAMES[leg]} dq     peak [rad/s]: {peaks_dq}")
     print(f"  {LEG_NAMES[leg]} λ(GRF) peak [N]:     Fx={fx_peak:6.2f}  Fy={fy_peak:6.2f}  Fz={fz_peak:6.2f}")
-print("  [좌우 대칭성 검토]")
+print("  [좌우 대칭성]")
 _q_df = joint_hist[_ss, 0, :5] - joint_hist[_ss, 1, :5]   # FR - FL
 _q_dh = joint_hist[_ss, 2, :5] - joint_hist[_ss, 3, :5]   # HR - HL
 print(f"    q 차이 RMS [rad]  FR-FL: "
@@ -3415,40 +3500,6 @@ if not _USE_NMPC_ACTIVE:
         _dt = [np.sqrt(np.mean(wbic_dtau_hist[_ss, i, :] ** 2)) for i in range(4)]
         print(f"    WBIC Δτ RMS [Nm] per leg  FR={_dt[0]:.4f} FL={_dt[1]:.4f} "
               f"HR={_dt[2]:.4f} HL={_dt[3]:.4f}  (대칭이면 FR≈FL, HR≈HL)")
-
-# ── [3] body Track 지표 (actual − reference 의 RMS, 0 에 가까울수록 추종 양호) ──
-_bt_rms_p = np.sqrt(np.mean((body_pos_hist[_ss] - body_pos_ref_hist[_ss]) ** 2, axis=0))
-_bt_rms_v = np.sqrt(np.mean((body_v_hist[_ss]   - body_v_ref_hist[_ss])   ** 2, axis=0))
-print("─" * 60)
-print(f"[3] body Track 지표  ({_sm_mode})")
-print(f"  pos error RMS [mm]   x={_bt_rms_p[0]*1e3:8.2f}  y={_bt_rms_p[1]*1e3:8.2f}  "
-      f"z={_bt_rms_p[2]*1e3:8.2f}")
-print(f"  vel error RMS [m/s]  x={_bt_rms_v[0]:8.4f}  y={_bt_rms_v[1]:8.4f}  "
-      f"z={_bt_rms_v[2]:8.4f}")
-print(f"  (NMPC_W_BODY_TRACK={NMPC_W_BODY_TRACK})")
-
-# ── [4] 보행 안정성 (GAIT STABILITY) ──────────────────────────
-_gs_pos_max = float(np.max(np.linalg.norm(body_pos_hist[_ss] - body_pos_ref_hist[_ss], axis=1)))
-_gs_v_max   = float(np.max(np.linalg.norm(body_v_hist[_ss]   - body_v_ref_hist[_ss],   axis=1)))
-_gs_roll    = math.degrees(float(np.max(np.abs(np.arctan2(body_R_hist[_ss, 2, 1], body_R_hist[_ss, 2, 2])))))
-_gs_pitch   = math.degrees(float(np.max(np.abs(np.arcsin(np.clip(-body_R_hist[_ss, 2, 0], -1, 1))))))
-_gs_omega   = float(np.max(np.abs(body_omega_hist[_ss])))
-_gs_z_min   = float(np.min(body_pos_hist[_ss, 2])) * 1e3
-_gs_z_max   = float(np.max(body_pos_hist[_ss, 2])) * 1e3
-_gs_x_final = float(body_pos_hist[-1, 0])
-_gs_x_tgt   = V * T * N_CYCLES
-_gs_vx_mean = float(body_v_hist[_ss, 0].mean())
-_gs_tau_max = float(np.abs(wbc_tau_cmd[_ss]).max())
-print("─" * 60)
-print(f"[4] 보행 안정성 / GAIT STABILITY  ({_sm_mode})")
-print(f"  |pos_dev|max = {_gs_pos_max*1e3:8.2f} mm      |v_dev|max = {_gs_v_max*1e3:8.2f} mm/s")
-print(f"  roll_max     = {_gs_roll:8.3f} °       pitch_max  = {_gs_pitch:8.3f} °")
-print(f"  |ω|max       = {_gs_omega:8.4f} rad/s   z range    = [{_gs_z_min:.1f}, {_gs_z_max:.1f}] mm")
-print(f"  x final      = {_gs_x_final:8.3f} m       (target {_gs_x_tgt:.3f}, 전체 trajectory)")
-print(f"  vx mean      = {_gs_vx_mean:8.3f} m/s     (target {V})")
-print(f"  |τ|max       = {_gs_tau_max:8.2f} N·m")
-if body_state.get('_diverged', False):
-    print(f"  [WARNING] body 발산 감지 — clamp 적용됨 (|ω|>50 rad/s 또는 |v|>50 m/s).")
 print("─" * 60)
 
 # 비교 모드: metrics를 pickle로 덤프하고 figure/animation 건너뜀
