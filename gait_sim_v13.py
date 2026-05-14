@@ -204,7 +204,7 @@ class GaitConfig:
     wbic_w_dtau: float = 0.0      # τ smoothness: w_dtau·‖τ−τ_prev‖²  (v13.1: 정량 측정 결과 net negative → OFF default)
     use_spline_diff: bool = False # q̇/q̈ 미분: True=CubicSpline, False=np.gradient (v13.1: 정량 측정 결과 net negative → OFF default)
     # ─────────── NMPC: solver ───────────
-    use_nmpc: bool = False
+    use_nmpc: bool = True
     use_nmpc_receding: bool = True
     nmpc_maxiter: int = 200
     nmpc_init_reg: float = 1.0
@@ -2836,16 +2836,21 @@ def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
             tgt[2] = ps[2] + STEP_HEIGHT * 16.0 * sw_t * sw_t * (1-sw_t) * (1-sw_t)
             foot_target_world_hist[fi, li] = tgt
 
-    # tau_grf / tau_dyn 후처리 (fig3/fig4 시각화용 분해)
-    # tau_grf = -Jᵀ × R_body^T × λ_world  (body-local force)
-    # tau_dyn = compute_gravity_torque_sim (정적 중력 보상 — NMPC는 PD 분리 안 됨)
-    # tau_pd  = 0 (NMPC는 feedforward only)
-    # tau_imp = tau_cmd - tau_dyn - tau_grf  (잔차)
+    # tau_cmd 후처리 분해 (fig3/fig4 시각화용) — 제어 루프는 NMPC 단독, 값 변경 없음.
+    # tau_grf = -Jᵀ × R_body^T × λ_world         (body-local GRF feedforward)
+    # tau_dyn = full RNEA(q, q̇, q̈) = M·q̈ + C·q̇ + g  (MPC+WBIC의 tau_dyn과 동일 의미)
+    # tau_pd  = 0  (NMPC는 명시적 PD 피드백 항이 없음 — whole-body OC가 통합 처리)
+    # tau_imp = tau_cmd - tau_dyn - tau_grf       (잔차: per-leg 분해 ↔ whole-body NMPC 불일치)
+    #           작을수록 분해가 NMPC 해와 정합. 크면 모델 mismatch / λ_des≠실제 접촉력.
+    _dq_hist  = np.gradient(joint_hist, DT, axis=0)
+    _ddq_hist = np.gradient(_dq_hist,   DT, axis=0)
     for fi in range(N_FRAMES):
         R_b = body_R_hist[fi]
         for leg_idx in range(4):
             nj   = N_JOINTS_PER_LEG[leg_idx]
-            q_leg = joint_hist[fi, leg_idx, :nj]
+            q_leg   = joint_hist[fi, leg_idx, :nj]
+            dq_leg  = _dq_hist[fi, leg_idx, :nj]
+            ddq_leg = _ddq_hist[fi, leg_idx, :nj]
             front = (leg_idx < 2)
             dh    = LEG_DH[leg_idx]
             lm    = LINK_MASS_PER_LEG[leg_idx]
@@ -2853,8 +2858,13 @@ def _populate_arrays_from_nmpc(xs, us, forces, pin_model, pin_data):
             lam_world  = wbc_lam_des[fi, leg_idx]
             lam_local  = R_b.T @ lam_world
             wbc_tau_grf[fi, leg_idx, :nj] = -(J.T @ lam_local)
-            wbc_tau_dyn[fi, leg_idx, :nj] = compute_gravity_torque_sim(q_leg, dh, lm, front)
-            # PD = 0 (NMPC), imp = remaining
+            # full RNEA (중력만이 아닌 M·q̈ + C·q̇ + g 전체)
+            if USE_PINOCCHIO and _PIN_AVAILABLE:
+                wbc_tau_dyn[fi, leg_idx, :nj] = _pin_helpers.rnea_pin_per_leg(
+                    list(q_leg), list(dq_leg), list(ddq_leg), LEG_NAMES[leg_idx])
+            else:
+                wbc_tau_dyn[fi, leg_idx, :nj] = rnea(q_leg, dq_leg, ddq_leg, dh, lm)
+            # PD = 0 (NMPC는 명시적 PD 항 없음), imp = remaining 잔차
             wbc_tau_pd[fi, leg_idx, :nj]  = 0.0
             wbc_tau_imp[fi, leg_idx, :nj] = (wbc_tau_cmd[fi, leg_idx, :nj]
                                               - wbc_tau_dyn[fi, leg_idx, :nj]

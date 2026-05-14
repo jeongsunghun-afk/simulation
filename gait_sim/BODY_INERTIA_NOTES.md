@@ -115,3 +115,34 @@ CAD 모델 (SolidWorks / Fusion 360)
   controller bug 인지 물리 차이인지 구분 불가 → fix 필수.
 
 → **결론**: CAD 도착 전까지는 v13.14 hardcode 로 안정 동작 보장. CAD 도착 후 v14.6 에서 정확값 교체.
+
+---
+
+## 7. crocoddyl / pinocchio 환경 setup (NMPC + CRBA upgrade 용)
+
+NMPC (crocoddyl FDDP) 와 BODY_INERTIA 자동 CRBA upgrade 는 pinocchio + crocoddyl 필요.
+
+### 올바른 설치
+
+```bash
+pip install --user pin       # ⚠ 패키지명 'pin' (NOT 'pinocchio' — 그건 다른 CLI tool)
+                             #   → pin-3.9.0 + cmeel-urdfdom-4.0.1 + eigenpy-3.12.0 + numpy 2.x
+# crocoddyl 은 이미 system pip 에 (crocoddyl 3.2.0 + libcrocoddyl 3.2.0 + libpinocchio 3.9.0)
+```
+
+### 주의사항
+
+- **`pip install pinocchio` 는 잘못된 패키지** (`pinocchio-0.4.3` = 무관한 CLI tool). 반드시 `pin`.
+- `pin` 이 `cmeel-urdfdom-4.0.1` 을 끌어옴 → `liburdfdom_sensor.so.4.0` 제공
+  (crocoddyl 3.2.0 이 urdfdom 4.0 요구. urdfdom 3.x 만 있으면 crocoddyl import 실패)
+- `pin` 설치 시 numpy 가 2.x 로 올라감 — matplotlib 3.10 / scipy 1.15 / gait_sim 모두 호환 확인됨.
+
+### 검증
+
+```bash
+python3 -c "import pinocchio; print(pinocchio.__version__)"   # 3.9.0
+python3 -c "import crocoddyl; print('OK')"                     # OK
+```
+
+→ crocoddyl import 성공 시 `_CROCODDYL_AVAILABLE=True` → NMPC 활성 + BODY_INERTIA CRBA 자동 upgrade.
+   (단 v13.14 hardcode default 가 이미 안전값이라 crocoddyl 없어도 발산 안 함.)

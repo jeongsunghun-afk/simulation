@@ -373,10 +373,10 @@ DT_MPC = DT * 10         # MPC 샘플링 주기 [s]  (= 0.02s)
 # MPC 상태 가중치: x=[roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
 _Q_DIAG = np.array([
     200, 200, 100,   # roll, pitch, yaw
-      0,   0, 200,   # px, py, pz (높이 추종)
+      0, 100, 200,   # px, py, pz  (v13: py 활성화)
       0,   0,   0,   # ωx, ωy, ωz
-     10,   0,   0,   # vx (전진속도 추종), vy, vz
-      0,           # g (상수, 추종 불필요)
+     10,  10,   0,   # vx, vy, vz  (v13: vy 활성화)
+      0,           # g (상수, 추종 불필요)         # g (상수, 추종 불필요)
 ], dtype=float)
 MPC_Q = np.diag(_Q_DIAG)
 MPC_R = 1e-6 * np.eye(3)   # GRF 가중치 (per foot, 3×3)

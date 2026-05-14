@@ -234,6 +234,9 @@ v11 의 "MPC body→λ_des→WBIC→τ" pipeline 을 single optimization 으로 
 
 ### 8-3. NMPC 후처리 + 시각화 — **v12.1, v12.2**
 - [x] tau_grf, tau_dyn, tau_imp 분해 (NMPC 모드에서 fig3/fig4 의미 회복)
+- [x] **v13**: tau_dyn 을 정적 중력 보상 → full RNEA(M·q̈+C·q̇+g) 로 교체.
+      tau_imp 가 의미 있는 잔차(per-leg 분해 ↔ whole-body NMPC 불일치)가 됨.
+      ※ 순수 후처리 분해일 뿐 — 제어 루프는 여전히 NMPC 단독, τ_cmd 값 변경 없음.
 - [x] **fig5**: body state vs cmd (pos/vel/orientation/ω + RMS error)
 - [x] **fig6**: foot trajectory cmd vs actual (3×4 grid, swing only)
 - [x] **fig7**: gait diagram (Hildebrand-style stance chart + Fz timeline)
@@ -255,8 +258,13 @@ v11 의 "MPC body→λ_des→WBIC→τ" pipeline 을 single optimization 으로 
       장점: 단순, NMPC 가 직접 τ 만듦. 단점: WBIC 안 씀 → friction/torque hard constraint 없음
 - [ ] **옵션 B**: NMPC trajectory + WBIC tracking (NMPC offline ref, WBIC 매 frame enforce)
       장점: sim2real safer (WBIC 가 friction/torque limit hard constraint). 단점: NMPC ref 미세 violation 잘림
-- [ ] **옵션 C**: Hybrid (NMPC ~100ms re-solve + WBIC 매 2ms)
-      장점: 가장 robust. 단점: 가장 복잡
+- [ ] **옵션 C**: Hierarchical-rate hybrid (실무 표준 구조) — **유력안**
+      - NMPC: 저주파(~100–400 Hz) 또는 단순화 모델로 receding-horizon 해 → ref 궤적(τ/ddq/λ) 생성
+      - WBIC: 고주파 instantaneous QP 로 매 틱(~2 ms) ref 추종 + hard constraint(토크 한계,
+        마찰콘) 강제. NMPC 출력을 레퍼런스 생성기로, WBIC 를 trailing tracker 로 사용.
+      - 장점: 가장 robust (sim2real). 단점: 가장 복잡 (2-rate 인터페이스 설계 필요)
+      - 주의: NMPC 가 이미 full whole-body OC → 순수하게는 중복. 의미는 "rate 분리 +
+        hard constraint 보강"에 있음. v13 의 SE(3) hip transform 정리 후 착수.
 - [ ] body y drift 해결 (WBIC CoP / lateral balance constraint 명시)
 
 ### 8-7. (추후) Walk / multi-gait NMPC 지원
