@@ -212,13 +212,15 @@ class GaitConfig:
     nmpc_rh_n_resolve: int = 12   # half cycle re-solve
     nmpc_rh_maxiter: int = 50
     # ─────────── NMPC: cost weights ───────────
-    # swing foot tracking 가중치. v13.24 sweep 결과:
+    # swing foot tracking 가중치. v13.24~25 sweep 결과:
     #   - w_track_z: 1000~100000 휘저어도 발 z 오차 ≈28~32mm 로 고정 → z under-shoot
     #     (peak ~0.05 vs 0.08m)는 구조적 한계, 가중치로 못 고침. 10000 은 과도값이라
     #     x 추종만 악화시킴 → 3000 으로 낮춤 (z 동일, x·posture·τ 모두 소폭 개선).
     #   - w_track_xy: 100→2000 단조로 발/몸통 x·y 추종 개선하나 roll/pitch 도 악화
-    #     (tradeoff). 500 = 균형점 (foot RMS −29%, body x −24%, roll/pitch ~2°, 0 fails).
-    nmpc_w_track_xy: float = 500.0
+    #     (tradeoff). v13.25: 추종 우선 — 2000 (foot RMS −40%, body x −43%,
+    #     roll/pitch ~3-4°, 0 fails). 자세 안정성 우선 시 NMPC_W_TRACK_XY env override
+    #     로 500(균형) 또는 100(원래값) 가능.
+    nmpc_w_track_xy: float = 2000.0
     nmpc_w_track_z: float = 3000.0
     nmpc_baumgarte_kp: float = 0.0
     nmpc_baumgarte_kd: float = 20.0
