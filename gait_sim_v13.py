@@ -212,8 +212,14 @@ class GaitConfig:
     nmpc_rh_n_resolve: int = 12   # half cycle re-solve
     nmpc_rh_maxiter: int = 50
     # ─────────── NMPC: cost weights ───────────
-    nmpc_w_track_xy: float = 100.0
-    nmpc_w_track_z: float = 10000.0
+    # swing foot tracking 가중치. v13.24 sweep 결과:
+    #   - w_track_z: 1000~100000 휘저어도 발 z 오차 ≈28~32mm 로 고정 → z under-shoot
+    #     (peak ~0.05 vs 0.08m)는 구조적 한계, 가중치로 못 고침. 10000 은 과도값이라
+    #     x 추종만 악화시킴 → 3000 으로 낮춤 (z 동일, x·posture·τ 모두 소폭 개선).
+    #   - w_track_xy: 100→2000 단조로 발/몸통 x·y 추종 개선하나 roll/pitch 도 악화
+    #     (tradeoff). 500 = 균형점 (foot RMS −29%, body x −24%, roll/pitch ~2°, 0 fails).
+    nmpc_w_track_xy: float = 500.0
+    nmpc_w_track_z: float = 3000.0
     nmpc_baumgarte_kp: float = 0.0
     nmpc_baumgarte_kd: float = 20.0
     nmpc_w_state_reg: float = 1.0
@@ -266,6 +272,12 @@ if 'NMPC_BT_W_PX' in _os.environ:
     CFG.nmpc_body_track_w_px = float(_os.environ['NMPC_BT_W_PX'])
 if 'NMPC_BT_W_VX' in _os.environ:
     CFG.nmpc_body_track_w_vx = float(_os.environ['NMPC_BT_W_VX'])
+if 'NMPC_W_TRACK_XY' in _os.environ:
+    CFG.nmpc_w_track_xy = float(_os.environ['NMPC_W_TRACK_XY'])
+if 'NMPC_W_TRACK_Z' in _os.environ:
+    CFG.nmpc_w_track_z = float(_os.environ['NMPC_W_TRACK_Z'])
+if 'NMPC_W_TOUCHDOWN_V' in _os.environ:
+    CFG.nmpc_w_touchdown_v = float(_os.environ['NMPC_W_TOUCHDOWN_V'])
 if 'USE_NMPC' in _os.environ:
     CFG.use_nmpc = _os.environ['USE_NMPC'] not in ('0', 'false', 'False', '')
 
@@ -3471,8 +3483,11 @@ _yaw_t    = np.arctan2(body_R_hist[_ss, 1, 0], body_R_hist[_ss, 0, 0])
 _ori_rms  = (math.degrees(np.sqrt(np.mean(_roll_t ** 2))),
              math.degrees(np.sqrt(np.mean(_pitch_t ** 2))),
              math.degrees(np.sqrt(np.mean(_yaw_t ** 2))))
-_ft_err   = np.linalg.norm(foot_actual_world_hist[_ss] - foot_target_world_hist[_ss], axis=2)  # NaN=stance
+_ft_d     = foot_actual_world_hist[_ss] - foot_target_world_hist[_ss]   # (n_ss,4,3) NaN=stance
+_ft_err   = np.linalg.norm(_ft_d, axis=2)
 _ft_rms   = float(np.sqrt(np.nanmean(_ft_err ** 2))) if np.any(~np.isnan(_ft_err)) else float('nan')
+_ft_rms_xyz = [float(np.sqrt(np.nanmean(_ft_d[:, :, _a] ** 2)))
+               if np.any(~np.isnan(_ft_d[:, :, _a])) else float('nan') for _a in range(3)]
 print("─" * 60)
 print(f"[5] 제어 정밀도  ({_sm_mode})")
 print(f"  body pos error RMS [mm]   x={_bt_rms_p[0]*1e3:7.2f}  y={_bt_rms_p[1]*1e3:7.2f}  "
@@ -3480,6 +3495,8 @@ print(f"  body pos error RMS [mm]   x={_bt_rms_p[0]*1e3:7.2f}  y={_bt_rms_p[1]*1
 print(f"  body vel error RMS [m/s]  x={_bt_rms_v[0]:7.4f}  y={_bt_rms_v[1]:7.4f}  z={_bt_rms_v[2]:7.4f}")
 print(f"  orientation RMS [deg]     roll={_ori_rms[0]:7.3f}  pitch={_ori_rms[1]:7.3f}  yaw={_ori_rms[2]:7.3f}")
 print(f"  swing foot tracking RMS   = {_ft_rms*1e3:7.2f} mm  (4-leg aggregate)")
+print(f"    축별 [mm]  x={_ft_rms_xyz[0]*1e3:7.2f}  y={_ft_rms_xyz[1]*1e3:7.2f}  "
+      f"z={_ft_rms_xyz[2]*1e3:7.2f}")
 print(f"  ※ joint / GRF tracking error 는 NMPC 에 ref 부재 → 모드 비교 불가, 생략")
 
 # ── [부록] FR / HL 토크·속도·GRF peak + 좌우 대칭성 (raw data) ──
