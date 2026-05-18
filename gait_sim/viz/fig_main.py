@@ -510,12 +510,12 @@ def plot_anim(R: SimState, meta: dict = None,
         sw_str = "  ".join(
             f"{LEG_NAMES[l]}:{'SW' if swing_flag[fi, l] else 'ST'}" for l in range(4))
         deg = np.degrees(R.joint_hist[fi])
-        jnt_lines = []; tau_lines = []; grf_des_lines = []; grf_calc_lines = []
+        jnt_lines = []; tau_lines = []; grf_des_lines = []; grf_used_lines = []
         for leg in range(4):
             d  = deg[leg]
             tc = R.wbc_tau_cmd[fi, leg]            # 실제 motor τ_cmd (clip 후)
             ld = R.wbc_lam_des[fi, leg]            # MPC QP planned GRF
-            lc = R.wbc_lam_calc[fi, leg]           # τ_cmd 가 만드는 등가 GRF (땅이 발에 가하는 추정 반력)
+            lu = R.wbic_lam_used[fi, leg]          # WBIC 보정 후 실제 body 에 적용된 GRF (sim ground truth)
             jnt_lines.append(
                 f"{LEG_NAMES[leg]} th1={d[0]:+5.1f}d th2={d[1]:+6.1f}d "
                 f"th3={d[2]:+6.1f}d th4={d[3]:+5.1f}d th5={d[4]:+5.1f}d")
@@ -524,8 +524,8 @@ def plot_anim(R: SimState, meta: dict = None,
                 f"{tc[2]:+5.1f} {tc[3]:+5.1f} {tc[4]:+5.1f}]Nm")
             grf_des_lines.append(
                 f"{LEG_NAMES[leg]} lam_des =[{ld[0]:+6.1f} {ld[1]:+6.1f} {ld[2]:+7.1f}]N")
-            grf_calc_lines.append(
-                f"{LEG_NAMES[leg]} lam_calc=[{lc[0]:+6.1f} {lc[1]:+6.1f} {lc[2]:+7.1f}]N")
+            grf_used_lines.append(
+                f"{LEG_NAMES[leg]} lam_used=[{lu[0]:+6.1f} {lu[1]:+6.1f} {lu[2]:+7.1f}]N")
         info_text.set_text(
             f"t={t:.3f}s\n{sw_str}\n\n"
             + "\n".join(jnt_lines)
@@ -534,7 +534,7 @@ def plot_anim(R: SimState, meta: dict = None,
             + "\n\n"
             + "\n".join(grf_des_lines)
             + "\n\n"
-            + "\n".join(grf_calc_lines)
+            + "\n".join(grf_used_lines)
         )
         return []
 
