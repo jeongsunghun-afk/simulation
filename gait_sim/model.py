@@ -23,7 +23,7 @@ from gait_sim.config import (
 # ══════════════════════════════════════════════════════════════
 # HIND variant (env var: HIND_VARIANT=orig|ext)
 #   orig : 원본 (간격 401mm)
-#   ext  : 뒷발 -50mm 확장 (간격 451mm)
+#   ext  : 뒷발 -130mm 확장 (간격 531mm) — v14.5.4 sweep 최적점, HL th2 tau_grf -50%
 # ══════════════════════════════════════════════════════════════
 _HIND_VARIANT = os.environ.get('HIND_VARIANT', 'orig')
 assert _HIND_VARIANT in ('orig', 'ext'), f"HIND_VARIANT={_HIND_VARIANT} (expected 'orig'/'ext')"
@@ -77,7 +77,7 @@ _A2_F = 0.21; _A3_F = 0.235; _A4_F = 0.1; _A5_F = 0.045; _D2_F = 0.0075
 # ══════════════════════════════════════════════════════════════
 Q_HOME_FRONT_DEG = [0.0, 133.2973, 46.7027, 30.6583, 59.3417]    # 원본 (BODY_Z_H=-0.05)
 if _HIND_VARIANT == 'ext':
-    Q_HOME_HIND_DEG = [0.0, -154.8138, -92.8840, 88.6091, 60.0000]   # 뒷발 -50mm 확장
+    Q_HOME_HIND_DEG = [0.0, -175.5711, -77.7261, 94.2085, 60.0000]   # 뒷발 -130mm 확장 (간격 531mm)
 else:
     Q_HOME_HIND_DEG = [0.0, -150.0, -90.0, 90.0, 60.0]               # 원본
 Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
@@ -198,7 +198,7 @@ FRONT_Q_LIM = [
 # 뒷다리 관절 위치 한계 [rad]  — home: [0, -150, -90, 90, 60] deg
 HIND_Q_LIM = [
     (-math.radians(45),  math.radians(45)),    # th1: 고관절 벌림
-    (-math.radians(180), -math.radians(60)),   # th2: 고관절 굴곡
+    (-math.radians(200), -math.radians(60)),   # th2: 고관절 굴곡 (-200°로 확장 — hind reach 늘려 MPC Fz 분배 균형)
     (-math.radians(120),  math.radians(30)),   # th3: 무릎
     (-math.radians(30),   math.radians(150)),  # th4: 발목
     (-math.radians(90),   math.radians(120)),  # th5: 발끝
