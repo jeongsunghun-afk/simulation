@@ -52,13 +52,12 @@ def plot_wbc(R: SimState, meta: Optional[dict] = None) -> plt.Figure:
     for col, leg in enumerate([0, 3]):   # FR=0, HL=3
         nj = N_JOINTS_PER_LEG[leg]
 
-        # row 0: tau_cmd − tau_grf (액추에이터 부담 만 표시)
+        # row 0: tau_cmd (실제 motor 명령 — clip 후, PD/imp/dyn/grf 모두 포함)
         ax_tc = fig.add_subplot(gs[0, col])
-        _style_ax(ax_tc, f'{LEG_NAMES[leg]} tau_cmd − tau_grf [N·m]', ylabel='[N·m]')
+        _style_ax(ax_tc, f'{LEG_NAMES[leg]} tau_cmd [N·m]', ylabel='[N·m]')
         ax_tc.set_xlim(0, N)
-        tau_disp = R.wbc_tau_cmd[:, leg, :] - R.wbc_tau_grf[:, leg, :]
         for j in range(nj):
-            ax_tc.plot(fr, tau_disp[:, j], lw=1.4, color=_AX5_COLORS[j], label=f'th{j+1}')
+            ax_tc.plot(fr, R.wbc_tau_cmd[:, leg, j], lw=1.4, color=_AX5_COLORS[j], label=f'th{j+1}')
         ax_tc.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
         ax_tc.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white',
                      edgecolor='gray', ncol=5)

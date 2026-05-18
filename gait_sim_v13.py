@@ -370,7 +370,8 @@ _A2_F = 0.21; _A3_F = 0.235; _A4_F = 0.1; _A5_F = 0.045; _D2_F = 0.0075
 Q_HOME_FRONT_DEG = [0.0, 133.2973, 46.7027, 30.6583, 59.3417]    # 원본 (BODY_Z_H=-0.05)
 # HIND variant 분기 (비교용; HIND_VARIANT 환경변수)
 if _HIND_VARIANT == 'ext':
-    Q_HOME_HIND_DEG  = [0.0, -175.5711, -77.7261, 94.2085, 60.0000]  # 뒷발 -130mm 확장 (간격 531mm, v14.5.4 sweep 최적)
+    # Q_HOME_HIND_DEG  = [0.0, -175.5711, -77.7261, 94.2085, 60.0000]  # 뒷발 -130mm 확장 (간격 531mm) — sim 최적이지만 stretched
+    Q_HOME_HIND_DEG  = [0.0, -165.0547, -86.3883, 92.3542, 60.0000]    # 뒷발  -90mm 확장 (간격 491mm) — sim/hardware 안전 균형점
 else:  # 'orig'
     Q_HOME_HIND_DEG  = [0.0, -150.0, -90.0, 90.0, 60.0]              # 원본 (간격 401mm)
 Q_HOME_FRONT = [math.radians(a) for a in Q_HOME_FRONT_DEG]
@@ -3977,13 +3978,12 @@ _ax5col = ['#ff6b6b', '#ffd166', '#06d6a0', '#4cc9f0', '#f72585']
 for col, leg in enumerate([0, 3]):   # FR=0, HL=3
     nj = N_JOINTS_PER_LEG[leg]
 
-    # row 0: tau_cmd − tau_grf  (GRF feedforward 성분 제외 — 실제 액추에이터 부담만 표시)
+    # row 0: tau_cmd (실제 motor 명령 — clip 후, PD/imp/dyn/grf 모두 포함)
     ax_tc = fig3.add_subplot(gs3[0, col])
-    _style_ax3(ax_tc, f'{LEG_NAMES[leg]} tau_cmd − tau_grf [N·m]', ylabel='[N·m]')
+    _style_ax3(ax_tc, f'{LEG_NAMES[leg]} tau_cmd [N·m]', ylabel='[N·m]')
     ax_tc.set_xlim(0, N_FRAMES)
-    _tau_disp = wbc_tau_cmd[:, leg, :] - wbc_tau_grf[:, leg, :]
     for j in range(nj):
-        ax_tc.plot(_fr, _tau_disp[:, j], lw=1.4, color=_ax5col[j], label=f'th{j+1}')
+        ax_tc.plot(_fr, wbc_tau_cmd[:, leg, j], lw=1.4, color=_ax5col[j], label=f'th{j+1}')
     ax_tc.axhline(0, color='white', lw=0.5, ls='--', alpha=0.4)
     ax_tc.legend(fontsize=7, facecolor='#1a1a2e', labelcolor='white', edgecolor='gray', ncol=5)
 

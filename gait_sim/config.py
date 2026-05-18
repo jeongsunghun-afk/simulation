@@ -9,6 +9,7 @@ CFG 필드를 *runtime 변경* 하려면 새 CFG 객체 생성 후 alias 도 재
 일반 사용은 dataclass 의 default 값을 직접 편집.
 """
 import math
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -158,6 +159,12 @@ PHASE_OFFSETS = {name: cfg['offsets'] for name, cfg in GAIT_PRESETS.items()}
 # CFG instantiation + module-level alias 들 (다른 모듈 호환)
 # ══════════════════════════════════════════════════════════════
 CFG = GaitConfig()
+
+# ── env 변수 override (자주 토글하는 옵션) ─────────────────────────────
+# SWING_BLEND=0|1 : use_swing_qref_blend (FRONT swing q_ref blend, default True)
+_sb = os.environ.get('SWING_BLEND')
+if _sb is not None:
+    CFG.use_swing_qref_blend = _sb not in ('0', 'false', 'False', '')
 
 GAIT_TYPE = CFG.gait_type
 DT        = CFG.dt
