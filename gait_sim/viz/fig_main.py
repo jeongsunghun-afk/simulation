@@ -318,10 +318,12 @@ def plot_anim(R: SimState, meta: dict = None,
     D_meta = meta.get('D', 0.5)
     swing_flag = (R.phase_hist < D_meta)
 
-    fig = plt.figure(figsize=(11, 9))
+    fig = plt.figure(figsize=(16, 9))
     fig.patch.set_facecolor('#1a1a2e')
     ax3d = fig.add_subplot(111, projection='3d')
     ax3d.set_facecolor('#16213e')
+    # 3D ax 가 기본적으로 figure 가운데 좁게 자리 잡는 문제 — 명시적으로 폭 확장
+    ax3d.set_position([0.02, 0.04, 0.96, 0.88])
 
     # Viewport
     reach = 0.65
@@ -353,6 +355,13 @@ def plot_anim(R: SimState, meta: dict = None,
         x_max = float(np.max(R.body_pos_hist[:, 0]))
         x_min = float(np.min(R.body_pos_hist[:, 0]))
         ax3d.set_xlim(min(-reach, x_min - 0.3), max(reach, x_max + 0.3))
+
+    # 3D box aspect: 데이터 range 비례로 자동 설정 — 기본 cubical 이 z 를 stretch 시키는 문제 해결
+    # robot 비율이 실제 m 단위 그대로 보임 (v13 fig1 와 유사한 가로형 view)
+    _xr = ax3d.get_xlim()[1] - ax3d.get_xlim()[0]
+    _yr = ax3d.get_ylim()[1] - ax3d.get_ylim()[0]
+    _zr = ax3d.get_zlim()[1] - ax3d.get_zlim()[0]
+    ax3d.set_box_aspect([_xr, _yr, _zr])
 
     # Body chassis 박스 라인 (4 hip 잇는 사각형)
     BC_BODY = np.array([
