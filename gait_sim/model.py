@@ -25,7 +25,7 @@ from gait_sim.config import (
 #   orig : 원본 (간격 401mm)
 #   ext  : 뒷발 -130mm 확장 (간격 531mm) — v14.5.4 sweep 최적점, HL th2 tau_grf -50%
 # ══════════════════════════════════════════════════════════════
-_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'orig')
+_HIND_VARIANT = os.environ.get('HIND_VARIANT', 'ext')   # v14.5.4: default 'ext' (간격 531mm) — v13.py 와 통일
 assert _HIND_VARIANT in ('orig', 'ext'), f"HIND_VARIANT={_HIND_VARIANT} (expected 'orig'/'ext')"
 
 
