@@ -68,6 +68,25 @@ class BipedWBIC:
         mujoco.mj_jac(self.m, self.d, jp, None, self.foot_world(i), self.foot_body[i])
         return jp
 
+    def draw_grf_arrows(self, viewer, feet, forces, scale=0.004):
+        """GRF 를 화살표로 시각화 (시작=발바닥, 방향=힘 방향, 길이∝크기)."""
+        scn = viewer.user_scn
+        scn.ngeom = 0
+        for leg, F in zip(feet, forces):
+            if F is None:
+                continue
+            F = np.asarray(F, float)
+            if np.linalg.norm(F) < 1.0:
+                continue
+            p0 = self.foot_world(leg)
+            p1 = p0 + F * scale
+            g = scn.geoms[scn.ngeom]
+            mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_ARROW,
+                                np.zeros(3), np.zeros(3), np.zeros(9),
+                                np.array([0.1, 0.9, 0.2, 1.0], np.float32))
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_ARROW, 0.012, p0, p1)
+            scn.ngeom += 1
+
     def com_jac(self):
         jp = np.zeros((3, self.nv))
         mujoco.mj_jacSubtreeCom(self.m, self.d, jp, 0)
@@ -382,10 +401,12 @@ class BipedMarch(BipedWBIC):
 
             tau = np.zeros(8)
             if mode == 'DS':
+                used_feet = [0, 1]
                 tau_w, lam, ok = self.wbic_stance(contacts=[0, 1], com_ref=com_ref)
                 if ok: tau[:] = tau_w
                 else:  nfall += 1
             else:  # SS: 지지 WBIC + 스윙 IK-PD
+                used_feet = [stance]
                 if s < 0.02:
                     liftoff[swing] = self.foot_world(swing)[:2].copy()
                 # capture-point/ICP 풋스텝: 발을 CoM 낙하 방향으로 전진 (forward walking 허용)
@@ -422,6 +443,7 @@ class BipedMarch(BipedWBIC):
                     break
                 if d.qpos[2] < 0.15 or d.qpos[2] > 0.9 or abs(d.qpos[3]) < 0.6:
                     settle_and_set_ref(self); self.scratch.qpos[:] = d.qpos[:]; com_y_prev = 0.0
+                self.draw_grf_arrows(v, used_feet, lam if ok else [None] * len(used_feet))
                 v.sync()
                 dt = m.opt.timestep - (time.time() - t0)
                 if dt > 0:
@@ -508,6 +530,7 @@ class BipedMarch(BipedWBIC):
                     break
                 if d.qpos[2] < 0.15 or d.qpos[2] > 0.9 or abs(d.qpos[3]) < 0.6:
                     settle_and_set_ref(self); self.scratch.qpos[:] = d.qpos[:]
+                self.draw_grf_arrows(v, stance_feet, lam if ok else [None] * len(stance_feet))
                 v.sync()
                 dt = m.opt.timestep - (time.time() - t0)
                 if dt > 0:
