@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Editor / IDE
+.omc/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MuJoCo
+MUJOCO_LOG.TXT
+
+# 산출물 / 캐시
+*.npz.cache
+mujoco_trace.npz

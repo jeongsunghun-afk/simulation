@@ -1,0 +1,110 @@
+<mujoco model="biped_v0">
+  <compiler angle="radian" meshdir="meshes/"/>
+
+  <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"/>
+
+  <default>
+    <joint damping="0.05" armature="0.001"/>
+    <motor ctrlrange="-100 100" ctrllimited="true"/>
+    <geom friction="0.8 0.005 0.0001" contype="1" conaffinity="1"/>
+  </default>
+
+  <asset>
+    <mesh name="base"                   content_type="model/stl" file="base.STL"/>
+    <mesh name="HL_hip_link"            content_type="model/stl" file="HL_hip_link.STL"/>
+    <mesh name="HL_thigh_link"          content_type="model/stl" file="HL_thigh_link.STL"/>
+    <mesh name="HL_calf_link"           content_type="model/stl" file="HL_calf_link.STL"/>
+    <mesh name="HL_foot_link"           content_type="model/stl" file="HL_foot_link.STL"/>
+    <mesh name="HL_foot_contact_link"   content_type="model/stl" file="HL_foot_contact_link.STL"/>
+    <mesh name="HR_hip_link"            content_type="model/stl" file="HR_hip_link.STL"/>
+    <mesh name="HR_thigh_link"          content_type="model/stl" file="HR_thigh_link.STL"/>
+    <mesh name="HR_calf_link"           content_type="model/stl" file="HR_calf_link.STL"/>
+    <mesh name="HR_foot_link"           content_type="model/stl" file="HR_foot_link.STL"/>
+    <mesh name="HR_foot_contact_link"   content_type="model/stl" file="HR_foot_contact_link.STL"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 3" dir="0 0 -1" diffuse="1 1 1"/>
+    <geom name="floor" type="plane" pos="0 0 0" size="5 5 0.1" rgba="0.7 0.7 0.7 1"/>
+
+    <body name="base_link" pos="0 0 0.6">
+      <freejoint/>
+      <inertial pos="-0.0722392 4.71690e-05 4.14377e-05" mass="1.43172"
+                diaginertia="0.00303342 0.00174473 0.00177371"/>
+      <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="base" contype="0" conaffinity="0"/>
+
+      <body name="HL_hip_link" pos="-0.225 0.0225 0">
+        <inertial pos="0.0261853 0.0390397 -5.87595e-05"
+                  quat="0.727668 -1.11581e-05 -7.9576e-06 0.685929"
+                  mass="0.573599" diaginertia="0.000789816 0.000556058 0.000450024"/>
+        <joint name="HL_hip_joint" pos="0 0 0" axis="1 0 0" range="-0.6109 0.6109"/>
+        <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HL_hip_link" contype="0" conaffinity="0"/>
+        <body name="HL_thigh_link" pos="0 0.115 0">
+          <inertial pos="0.0335807 0.00105068 -0.0870736"
+                    quat="0.696359 -0.123301 -0.123244 0.696199"
+                    mass="1.63929" diaginertia="0.00559661 0.0043494 0.00135058"/>
+          <joint name="HL_thigh_joint" pos="0 0 0" axis="0 1 0" range="-1.396 2.0944"/>
+          <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HL_thigh_link" contype="0" conaffinity="0"/>
+          <body name="HL_calf_link" pos="0.0786646 0 -0.216129">
+            <inertial pos="-0.0493618 0.000143142 -0.0908927"
+                      quat="0.683134 0.182558 0.182558 0.683134"
+                      mass="0.545884" diaginertia="0.00243106 0.00231642 0.000134649"/>
+            <joint name="HL_calf_joint" pos="0 0 0" axis="0 1 0" range="-0.524 1.484"/>
+            <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HL_calf_link" contype="0" conaffinity="0"/>
+            <body name="HL_foot_link" pos="-0.1225 0 -0.212176">
+              <inertial pos="0.00677086 0.00530273 -0.0612"
+                        quat="0.541747 0.596761 0.39187 0.443649"
+                        mass="0.23774" diaginertia="0.000665197 0.000401092 0.000278805"/>
+              <joint name="HL_foot_joint" pos="0 0 0" axis="0 1 0" range="-1.571 0.524"/>
+              <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HL_foot_link" contype="0" conaffinity="0"/>
+              <geom name="HL_foot_collision" type="box" size="0.090 0.025 0.008"
+                    pos="0.0376222 0 -0.103366" rgba="1 0 0 1"/>
+            </body>
+          </body>
+        </body>
+      </body>
+
+      <body name="HR_hip_link" pos="-0.225 -0.0225 0">
+        <inertial pos="0.0450048 -0.0366177 4.87686e-05"
+                  quat="0.7041 9.85399e-06 1.27629e-05 0.710101"
+                  mass="0.691108" diaginertia="0.000819668 0.00055306 0.0004652"/>
+        <joint name="HR_hip_joint" pos="0 0 0" axis="1 0 0" range="-0.6109 0.6109"/>
+        <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HR_hip_link" contype="0" conaffinity="0"/>
+        <body name="HR_thigh_link" pos="0 -0.115 0">
+          <inertial pos="0.0302455 -0.00105069 -0.0882874"
+                    quat="0.696515 -0.122249 -0.122358 0.696384"
+                    mass="1.63929" diaginertia="0.00559661 0.0043494 0.00135058"/>
+          <joint name="HR_thigh_joint" pos="0 0 0" axis="0 1 0" range="-1.396 2.0944"/>
+          <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HR_thigh_link" contype="0" conaffinity="0"/>
+          <body name="HR_calf_link" pos="0.0786646 0 -0.216129">
+            <inertial pos="-0.0492174 -0.000135417 -0.0904028"
+                      quat="0.683168 0.182431 0.182431 0.683168"
+                      mass="0.531761" diaginertia="0.00230999 0.00219944 0.000130225"/>
+            <joint name="HR_calf_joint" pos="0 0 0" axis="0 1 0" range="-0.524 1.484"/>
+            <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HR_calf_link" contype="0" conaffinity="0"/>
+            <body name="HR_foot_link" pos="-0.1225 0 -0.212176">
+              <inertial pos="0.00677086 -0.00530273 -0.0612"
+                        quat="0.443649 0.39187 0.596761 0.541747"
+                        mass="0.23774" diaginertia="0.000665197 0.000401092 0.000278805"/>
+              <joint name="HR_foot_joint" pos="0 0 0" axis="0 1 0" range="-1.571 0.524"/>
+              <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HR_foot_link" contype="0" conaffinity="0"/>
+              <geom name="HR_foot_collision" type="box" size="0.090 0.025 0.008"
+                    pos="0.0376222 0 -0.103366" rgba="1 0 0 1"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor name="HL_hip"   joint="HL_hip_joint"/>
+    <motor name="HL_thigh" joint="HL_thigh_joint"/>
+    <motor name="HL_calf"  joint="HL_calf_joint"/>
+    <motor name="HL_foot"  joint="HL_foot_joint"/>
+    <motor name="HR_hip"   joint="HR_hip_joint"/>
+    <motor name="HR_thigh" joint="HR_thigh_joint"/>
+    <motor name="HR_calf"  joint="HR_calf_joint"/>
+    <motor name="HR_foot"  joint="HR_foot_joint"/>
+  </actuator>
+</mujoco>
