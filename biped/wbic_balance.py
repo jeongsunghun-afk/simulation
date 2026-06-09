@@ -141,11 +141,15 @@ class BipedWBIC:
             P[sl_lam(k), sl_lam(k)] += w_lam * np.eye(3)
 
         # ---- equality: floating-base 6-DoF dynamics ----
+        Js = [self.foot_jac(c) for c in contacts]
         A = np.zeros((6, nz)); b = -h[0:6]
         A[:, :nv] = M[0:6, :]
-        Js = [self.foot_jac(c) for c in contacts]
         for k, J in enumerate(Js):
             A[:, sl_lam(k)] = -J[:, 0:6].T
+        # ---- equality: 접촉 발 무가속 (J_c·q̈ = 0, 디딘 발 planted) ----
+        for J in Js:
+            Ac = np.zeros((3, nz)); Ac[:, :nv] = J
+            A = np.vstack([A, Ac]); b = np.concatenate([b, np.zeros(3)])
 
         # ---- inequality: friction pyramid + λz>=λz_min ----
         G = []; hg = []
@@ -547,6 +551,88 @@ class BipedMarch(BipedWBIC):
         print('mpc done. QPfail=%d final bz=%.3f upright=%.3f' % (nfail, d.qpos[2], d.qpos[3]))
         return d.qpos[2], d.qpos[3]
 
+    # ───────────────────── LIPM / ICP 풋스텝 플래너 ─────────────────────
+    def run_lipm(self, seconds=8.0, T_step=0.34, viewer=False, push=None):
+        """LIPM + Capture-Point 풋스텝 안정화.
+
+        핵심: 스탠스 WBIC 는 높이+직립만 유지(수평 CoM 규제 0 → CoM 이 LIPM 진자처럼
+        자유롭게 흔들림). 수평 CoM 은 '발을 어디 딛느냐'로 제어.
+        풋스텝 = 스텝 종료 시점 ICP 예측치에 배치 (deadbeat capture).
+        """
+        import time
+        m, d = self.m, self.d
+        settle_and_set_ref(self)
+        omega = float(np.sqrt(9.81 / self.z_ref))
+        foot_y = {0: self.foot_world(0)[1], 1: self.foot_world(1)[1]}   # +0.138 / -0.138
+        foot_x_nom = self.foot_world(0)[0]                              # -0.231
+        liftoff = {0: self.foot_world(0).copy(), 1: self.foot_world(1).copy()}
+        swing_tgt = {0: self.foot_world(0).copy(), 1: self.foot_world(1).copy()}
+        planned = -1
+        v = mujoco.viewer.launch_passive(m, d) if viewer else None
+        if viewer:
+            print('viewer open (lipm) — 창 닫으면 종료.')
+        nfall = 0
+        for step in range(int(seconds / m.opt.timestep)):
+            t = d.time
+            k = int(t / T_step); s = (t - k * T_step) / T_step
+            swing = k % 2; stance = 1 - swing
+            com = d.subtree_com[0].copy()
+            vcom = self.com_jac() @ d.qvel
+
+            # 스텝 시작 시 풋스텝 플랜 (ICP 예측 → deadbeat capture)
+            if k != planned:
+                planned = k
+                liftoff[swing] = self.foot_world(swing).copy()
+                p_st = self.foot_world(stance)[:2]
+                xi0 = com[:2] + vcom[:2] / omega
+                xi_end = p_st + (xi0 - p_st) * np.exp(omega * T_step)   # 종료 시 ICP
+                tx = np.clip(xi_end[0], foot_x_nom - 0.12, foot_x_nom + 0.12)
+                ty = foot_y[swing] + np.clip(xi_end[1] - foot_y[swing], -0.05, 0.05)
+                swing_tgt[swing] = np.array([tx, ty, GROUND_Z])
+
+            # 스윙 발 궤적 (gait_sim baseline)
+            p_tgt = swing_foot_pos(s, liftoff[swing], swing_tgt[swing],
+                                   np.array([vcom[0], vcom[1], 0.0]),
+                                   step_height=STEP_HEIGHT, tau_land=1.0)
+            q_sw_tgt = self.foot_ik(swing, p_tgt, d.qpos[LEG_QPOS[swing]])
+
+            # 스탠스: 높이+직립만 (수평 CoM 규제 0 → LIPM 자유 진자)
+            com_ref = np.array([com[0], com[1], self.z_ref])
+            tau_w, lam, ok = self.wbic_stance(contacts=[stance], com_ref=com_ref,
+                                              kp=(0., 0., 120.), kd=(0., 0., 22.))
+            tau = np.zeros(8)
+            if ok: tau[:] = tau_w
+            else:  nfall += 1
+            sl = slice(swing * 4, swing * 4 + 4)
+            tau[sl] = np.clip(self.KP_SW * (q_sw_tgt - d.qpos[LEG_QPOS[swing]])
+                              - self.KD_SW * d.qvel[LEG_QVEL[swing]], -TAU_MAX, TAU_MAX)
+
+            if push and abs(t - push[0]) < m.opt.timestep:
+                d.qvel[0] += push[1]
+            d.ctrl[:] = tau
+            t0 = time.time()
+            mujoco.mj_step(m, d)
+            if v is not None:
+                if not v.is_running():
+                    break
+                if d.qpos[2] < 0.15 or d.qpos[2] > 0.9 or abs(d.qpos[3]) < 0.6:
+                    settle_and_set_ref(self); self.scratch.qpos[:] = d.qpos[:]; planned = -1
+                self.draw_grf_arrows(v, [stance], [lam[0]] if ok else [None])
+                v.sync()
+                dt = m.opt.timestep - (time.time() - t0)
+                if dt > 0:
+                    time.sleep(dt)
+            if step % 100 == 0:
+                xi = com[:2] + vcom[:2] / omega
+                print('t=%.2f bz=%.3f com=(%.3f,%.3f) ICP=(%.3f,%.3f) sw=%s ncon=%d %s'
+                      % (t, d.qpos[2], com[0], com[1], xi[0], xi[1],
+                         'HL' if swing == 0 else 'HR', d.ncon, '' if ok else 'QPfail'))
+        if v is not None:
+            try: v.close()
+            except Exception: pass
+        print('lipm done. fall=%d final bz=%.3f upright=%.3f' % (nfall, d.qpos[2], d.qpos[3]))
+        return d.qpos[2], d.qpos[3]
+
 
 # ────────────────────────────────────────────────────────────────
 def settle_and_set_ref(ctrl: BipedWBIC, base_z=0.46):
@@ -640,7 +726,7 @@ if __name__ == '__main__':
     import argparse
     os.environ.setdefault('DISPLAY', ':0')           # GUI 자동
     ap = argparse.ArgumentParser(description='biped WBIC balance — 인자 없이 실행하면 viewer')
-    ap.add_argument('--mode', choices=['stance', 'march', 'mpc'], default='stance')
+    ap.add_argument('--mode', choices=['stance', 'march', 'mpc', 'lipm'], default='stance')
     ap.add_argument('--headless', action='store_true', help='창 없이 콘솔 로그만')
     ap.add_argument('--seconds', type=float, default=5.0)
     a = ap.parse_args()
@@ -650,8 +736,10 @@ if __name__ == '__main__':
         run(seconds=secs, viewer=use_viewer)
     elif a.mode == 'march':
         BipedMarch('biped_wrapper.mjcf').run_march(seconds=secs, viewer=use_viewer)
-    else:
+    elif a.mode == 'mpc':
         BipedMarch('biped_wrapper.mjcf').run_mpc(seconds=secs, viewer=use_viewer)
+    else:
+        BipedMarch('biped_wrapper.mjcf').run_lipm(seconds=secs, viewer=use_viewer)
     # Wayland/glfw 종료단계 teardown segfault 회피 — 즉시 클린 종료
     sys.stdout.flush()
     if use_viewer:
