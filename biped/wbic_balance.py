@@ -39,6 +39,13 @@ class BipedWBIC:
         self.nv = self.m.nv                      # 14
         self.foot_bid = [mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_GEOM, f) for f in FEET]
         self.foot_body = [self.m.geom_bodyid[g] for g in self.foot_bid]
+        # 발바닥 접촉점 = collision 메시 최하단 정점 (geom 원점이 아님!)
+        self.sole_local = []
+        for g in self.foot_bid:
+            mid = self.m.geom_dataid[g]
+            adr = self.m.mesh_vertadr[mid]; n = self.m.mesh_vertnum[mid]
+            V = self.m.mesh_vert[adr:adr + n].reshape(-1, 3)
+            self.sole_local.append(V[np.argmin(V[:, 2])].copy())
         self.z_ref = None
         self.com_x_ref = None
         self.q_home = np.zeros(8)   # crouch posture ref (settle 에서 채움)
@@ -49,8 +56,12 @@ class BipedWBIC:
         mujoco.mj_fullM(self.m, M, self.d.qM)
         return M
 
-    def foot_world(self, i):
-        return self.d.geom_xpos[self.foot_bid[i]].copy()
+    def foot_world(self, i, data=None):
+        """발바닥 접촉점 (메시 최하단 정점) world pos. geom 원점 아님."""
+        d = data if data is not None else self.d
+        g = self.foot_bid[i]
+        R = d.geom_xmat[g].reshape(3, 3)
+        return d.geom_xpos[g] + R @ self.sole_local[i]
 
     def foot_jac(self, i):
         jp = np.zeros((3, self.nv))
@@ -204,6 +215,13 @@ class BipedMarch(BipedWBIC):
         mpc.BODY_INERTIA = self.I_com
         mpc._I_BODY = self.I_com           # ★ LTV 경로가 쓰는 실제 관성 (line 217)
         mpc.MU_FRICTION = MU
+        # biped 전용 가중치 (Cheetah3 논문 참조 + 직립 위해 roll/pitch 유지)
+        #   [roll,pitch,yaw, px,py,pz, ωx,ωy,ωz, vx,vy,vz, g]
+        mpc.MPC_Q = np.diag([100., 100., 1.,   1., 1., 50.,
+                             0., 0., 1.,        1., 1., 1.,   0.])
+        mpc.MPC_R = 1e-6 * np.eye(3)
+        mpc.LAMZ_MIN = 10.0                # 최소 수직 지지력 [N]
+        mpc.LAMZ_MAX = 350.0               # 최대 수직 지지력 [N] (힘 폭발 캡)
         self.mpc = mpc
         self.N_MPC = mpc.N_MPC
         self.DT_MPC = mpc.DT_MPC
@@ -295,7 +313,7 @@ class BipedMarch(BipedWBIC):
             s.qpos[qidx] = q
             mujoco.mj_kinematics(self.m, s)
             mujoco.mj_comPos(self.m, s)
-            p = s.geom_xpos[self.foot_bid[leg]]
+            p = self.foot_world(leg, data=s)
             e = p_tgt - p
             if np.linalg.norm(e) < 1e-4:
                 break
@@ -509,28 +527,32 @@ class BipedMarch(BipedWBIC):
 
 # ────────────────────────────────────────────────────────────────
 def settle_and_set_ref(ctrl: BipedWBIC, base_z=0.46):
-    """Crouch home 자세(무릎 굽힘)로 시작 → q_home / CoM / 높이 ref 기록.
+    """Crouch home 자세로 초기화 → q_home / CoM / 높이 ref 기록.
 
-    곧게 편 q=0 은 leg Jacobian 특이점 근처라 힘 제어가 발산 → 발은 엉덩이 아래
-    (nominal xy) 에 두고 base 를 낮춰 무릎을 굽힌 crouch 자세를 IK 로 구함.
+    MJCF 의 'home' keyframe(무릎 굽힌 crouch) 을 로드. 곧게 편 q=0 은 leg Jacobian
+    특이점 근처라 힘제어 발산 → home keyframe 으로 회피. keyframe 없으면 IK fallback.
     """
     d, m = ctrl.d, ctrl.m
-    d.qpos[:] = 0; d.qpos[3] = 1; d.qpos[2] = base_z
-    mujoco.mj_forward(m, d)
-    tgt = {leg: np.array([-0.231, 0.138 * (1 if leg == 0 else -1), GROUND_Z])
-           for leg in range(2)}
-    for _ in range(200):
-        mujoco.mj_kinematics(m, d); mujoco.mj_comPos(m, d)
-        for leg in range(2):
-            p = d.geom_xpos[ctrl.foot_bid[leg]]
-            jp = np.zeros((3, m.nv))
-            mujoco.mj_jac(m, d, jp, None, p, ctrl.foot_body[leg])
-            J = jp[:, LEG_QVEL[leg]]
-            dq = J.T @ np.linalg.solve(J @ J.T + 1e-5 * np.eye(3), tgt[leg] - p)
-            q = d.qpos[LEG_QPOS[leg]] + 0.5 * dq
-            for k, a in enumerate(LEG_QPOS[leg]):
-                lo, hi = m.jnt_range[m.dof_jntid[LEG_QVEL[leg][k]]]
-                d.qpos[a] = min(max(q[k], lo), hi)
+    kid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, 'home')
+    if kid >= 0:
+        mujoco.mj_resetDataKeyframe(m, d, kid)
+    else:
+        d.qpos[:] = 0; d.qpos[3] = 1; d.qpos[2] = base_z
+        mujoco.mj_forward(m, d)
+        tgt = {leg: np.array([-0.231, 0.138 * (1 if leg == 0 else -1), GROUND_Z])
+               for leg in range(2)}
+        for _ in range(200):
+            mujoco.mj_kinematics(m, d); mujoco.mj_comPos(m, d)
+            for leg in range(2):
+                p = ctrl.foot_world(leg)
+                jp = np.zeros((3, m.nv))
+                mujoco.mj_jac(m, d, jp, None, p, ctrl.foot_body[leg])
+                J = jp[:, LEG_QVEL[leg]]
+                dq = J.T @ np.linalg.solve(J @ J.T + 1e-5 * np.eye(3), tgt[leg] - p)
+                q = d.qpos[LEG_QPOS[leg]] + 0.5 * dq
+                for k, a in enumerate(LEG_QPOS[leg]):
+                    lo, hi = m.jnt_range[m.dof_jntid[LEG_QVEL[leg][k]]]
+                    d.qpos[a] = min(max(q[k], lo), hi)
     mujoco.mj_forward(m, d)
     ctrl.q_home = d.qpos[7:15].copy()
     ctrl.z_ref = d.subtree_com[0][2]

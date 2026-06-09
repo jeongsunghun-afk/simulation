@@ -57,7 +57,7 @@
                         mass="0.23774" diaginertia="0.000665197 0.000401092 0.000278805"/>
               <joint name="HL_foot_joint" pos="0 0 0" axis="0 1 0" range="-1.571 0.524"/>
               <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HL_foot_link" contype="0" conaffinity="0"/>
-              <geom name="HL_foot_collision" type="box" size="0.090 0.025 0.008"
+              <geom name="HL_foot_collision" type="mesh" mesh="HL_foot_contact_link"
                     pos="0.0376222 0 -0.103366" rgba="1 0 0 1"/>
             </body>
           </body>
@@ -88,7 +88,7 @@
                         mass="0.23774" diaginertia="0.000665197 0.000401092 0.000278805"/>
               <joint name="HR_foot_joint" pos="0 0 0" axis="0 1 0" range="-1.571 0.524"/>
               <geom type="mesh" rgba="0.75 0.75 0.75 1" mesh="HR_foot_link" contype="0" conaffinity="0"/>
-              <geom name="HR_foot_collision" type="box" size="0.090 0.025 0.008"
+              <geom name="HR_foot_collision" type="mesh" mesh="HR_foot_contact_link"
                     pos="0.0376222 0 -0.103366" rgba="1 0 0 1"/>
             </body>
           </body>
@@ -107,4 +107,12 @@
     <motor name="HR_calf"  joint="HR_calf_joint"/>
     <motor name="HR_foot"  joint="HR_foot_joint"/>
   </actuator>
+
+  <!-- home: 무릎 굽힌 crouch standing 자세 (q=0 곧은다리 특이점 회피, 발바닥 바닥 안착) -->
+  <keyframe>
+    <key name="home"
+         qpos="0 0 0.457 1 0 0 0
+               -0.01096 -0.39797 0.87906 -0.55956
+               -0.01311 -0.39166 0.86419 -0.55058"/>
+  </keyframe>
 </mujoco>

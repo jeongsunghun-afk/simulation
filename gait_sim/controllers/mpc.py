@@ -43,6 +43,11 @@ _Q_DIAG = np.array([
 MPC_Q = np.diag(_Q_DIAG)
 MPC_R = 1e-6 * np.eye(3)   # GRF 가중치 (per foot, 3×3)
 
+# 수직 지지력 한계 [N] — 기본값은 기존 quadruped 동작 보존 (min=0, max=∞).
+# biped 등에서 override 가능 (Cheetah3: min=10, max=666).
+LAMZ_MIN = 0.0
+LAMZ_MAX = np.inf
+
 
 # ══════════════════════════════════════════════════════════════
 # QP GRF distribute — 단일 스텝 fallback (MPC 실패 시)
@@ -261,18 +266,23 @@ def mpc_qp_plan(x0, contact_schedule, foot_positions, x_ref_step=None, ltv=False
     mu = MU_FRICTION
     G_list = []
     h_list = []
+    has_fmax = np.isfinite(LAMZ_MAX)
     for k in range(N):
         for i in range(4):
             if contact_schedule[k, i]:
                 col = k*nu + i*3
-                g_blk = np.zeros((5, N*nu), dtype=float)
-                g_blk[0, col+2] = -1.0
+                nrow = 6 if has_fmax else 5
+                g_blk = np.zeros((nrow, N*nu), dtype=float)
+                rhs   = np.zeros(nrow)
+                g_blk[0, col+2] = -1.0;  rhs[0] = -LAMZ_MIN          # λz ≥ LAMZ_MIN
                 g_blk[1, col]   =  1.0;  g_blk[1, col+2] = -mu
                 g_blk[2, col]   = -1.0;  g_blk[2, col+2] = -mu
                 g_blk[3, col+1] =  1.0;  g_blk[3, col+2] = -mu
                 g_blk[4, col+1] = -1.0;  g_blk[4, col+2] = -mu
+                if has_fmax:
+                    g_blk[5, col+2] = 1.0;  rhs[5] = LAMZ_MAX        # λz ≤ LAMZ_MAX
                 G_list.append(g_blk)
-                h_list.append(np.zeros(5))
+                h_list.append(rhs)
 
     G_mpc = np.vstack(G_list) if G_list else np.zeros((1, N*nu))
     h_mpc = np.concatenate(h_list) if h_list else np.zeros(1)

@@ -36,8 +36,14 @@ def main():
 
     m = mujoco.MjModel.from_xml_path(MJCF)
     d = mujoco.MjData(m)
-    # base 를 바닥 가까이 (홈 자세에서 발이 바닥에 닿도록)
-    d.qpos[2] = 0.45
+    # MJCF 'home' keyframe(무릎 굽힌 crouch) 로드 — q=0 곧은다리 특이점 회피
+    global Q_HOME
+    kid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_KEY, 'home')
+    if kid >= 0:
+        mujoco.mj_resetDataKeyframe(m, d, kid)
+        Q_HOME = d.qpos[7:15].copy()      # PD 목표 = crouch 자세
+    else:
+        d.qpos[2] = 0.45
     mujoco.mj_forward(m, d)
 
     if args.headless:
