@@ -11,7 +11,9 @@ quad_nmpc.py(FDDP, crocoddyl, soft penalty) 와 달리, 마찰콘·토크를 Pro
 검증: conda env python. 모델은 quad_nmpc.NMPCModel(pinocchio) 재사용.
 """
 import os
+import time
 import numpy as np
+import mujoco
 import pinocchio as pin
 import aligator
 from aligator import constraints as acon
@@ -169,9 +171,11 @@ def solve_trot_oneshot(robot='go2', V=0.0, settle_steps=15, n_cycle=3, dt=0.02,
 
 
 def track_oneshot(robot='go2', V=0.0, settle_steps=15, n_cycle=4, dt=0.02,
-                  T=0.5, sf=0.5, step_h=0.06, maxiter=100, view=False, exec_robot=None):
+                  T=0.5, sf=0.5, step_h=0.06, maxiter=100, view=False, exec_robot=None,
+                  reanchor=False):
     """one-shot 안정계획 + DDP 피드백 추종(재계획 없음). Go2는 pin=MuJoCo라 모델일치.
-       exec_robot: MuJoCo 실행모델 분리(예: 계획='ours' pin, 실행='ours_sphere' 점접촉 정합)."""
+       exec_robot: MuJoCo 실행모델 분리(예: 계획='ours' pin, 실행='ours_sphere' 점접촉 정합).
+       reanchor: 사이클 경계마다 남은 계획의 베이스 SE(2)를 로봇 실제 pose에 정렬(1단·드리프트 흡수)."""
     exec_robot = exec_robot or robot
     import sys, time, mujoco
     P = ProxModel(robot)
@@ -200,26 +204,219 @@ def track_oneshot(robot='go2', V=0.0, settle_steps=15, n_cycle=4, dt=0.02,
         sys.argv = _a
     m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
     sub = max(1, round(dt / m.opt.timestep)); tmax = 0.0
-    viewer = None
-    if view:
-        import mujoco.viewer as mjv; viewer = mjv.launch_passive(m, d)
+    cyc = round(T / dt)
+    ra_div = int(os.environ.get('RA_DIV', '0'))   # re-anchor 주기 = cyc/RA_DIV. 0=매스텝(최선·기본)
+    ra_period = 1 if ra_div <= 0 else max(1, cyc // ra_div)
+    gait_t0 = -settle_steps * dt                  # footstep 마커용 gait 위상 기준
+    hud = _HUD(m, d, sub) if view else None
     for k in range(N):
+        if hud and not hud.running():
+            break
+        # 1단: 사이클 경계마다 남은 계획을 로봇 실제 SE(2)에 re-anchor(드리프트 흡수)
+        if reanchor and k > settle_steps and (k - settle_steps) % ra_period == 0:
+            _se2_reanchor(xs, k, d.qpos[0], d.qpos[1], _yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
+        if hud: hud.pre_step()
         for _ in range(sub):
             x = mj_to_pin(d)
             dx = P.space.difference(xs[k], x)
             u = us[k] - Ks[k] @ dx
             umj = np.zeros(P.nu); umj[pin2mj] = u
             d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
-            if viewer: viewer.sync(); time.sleep(m.opt.timestep)
+        if hud:
+            gt = gait_t0 + k * dt
+            mk = _footstep_markers(P, V, T, sf, gt, d.qpos[0], d.qpos[1],
+                                   _yaw_xyzw(d.qpos[[4, 5, 6, 3]])) if gt >= 0 else ()
+            hud.post_step(mk)
         xx, yy = d.qpos[4], d.qpos[5]
         tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
+        if os.environ.get('TRACE') and k % 5 == 0:
+            til = np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1)))
+            yaw = np.degrees(_yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
+            print('  k=%3d t=%.2f tilt=%4.1f yaw=%5.1f x=%.2f y=%+.3f z=%.3f' % (
+                k, k * dt, til, yaw, d.qpos[0], d.qpos[1], d.qpos[2]), flush=True)
         if d.qpos[2] < 0.15:
             print('  추종 ❌ 전복 @plan스텝%d (%.2fs)' % (k, k * dt));
-            if viewer: viewer.close()
+            if hud: hud.close()
             return
-    if viewer: viewer.close()
+    if hud: hud.close()
     print('  추종 ✅ 계획끝까지 생존 base_z=%.3f tilt_max=%.0f° 전진=%.2fm' % (
         d.qpos[2], tmax, d.qpos[0]))
+
+
+def _yaw_xyzw(q):
+    x, y, z, w = q
+    return np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+
+
+def _qmul_xyzw(a, b):
+    ax, ay, az, aw = a; bx, by, bz, bw = b
+    return np.array([aw * bx + ax * bw + ay * bz - az * by,
+                     aw * by - ax * bz + ay * bw + az * bx,
+                     aw * bz + ax * by - ay * bx + az * bw,
+                     aw * bw - ax * bx - ay * by - az * bz])
+
+
+def _se2_reanchor(xs, k0, rx, ry, ryaw):
+    """xs[k0:] 의 베이스 (x,y,yaw) 를 로봇 실제 SE(2)(rx,ry,ryaw) 에 평행이동·회전 정렬.
+       속도는 pinocchio free-flyer local-frame 이라 re-anchor 불변(건드리지 않음).
+       드리프트 방향 Floquet multiplier 를 정확히 1(중립)로 만든다(1단)."""
+    px, py = xs[k0][0], xs[k0][1]
+    pyaw = _yaw_xyzw(xs[k0][3:7])
+    dpsi = ryaw - pyaw
+    c, s = np.cos(dpsi), np.sin(dpsi)
+    qz = np.array([0.0, 0.0, np.sin(dpsi / 2), np.cos(dpsi / 2)])
+    for j in range(k0, len(xs)):
+        dx, dy = xs[j][0] - px, xs[j][1] - py
+        xs[j][0] = rx + c * dx - s * dy
+        xs[j][1] = ry + s * dx + c * dy
+        xs[j][3:7] = _qmul_xyzw(qz, xs[j][3:7])
+
+
+class _HUD:
+    """ProxDDP 뷰어 공통 HUD: 좌상단 sim time, 우상단 외력 N, [/] 속도조절,
+       Ctrl+드래그 외력, 다음 footstep 빨간점."""
+
+    def __init__(self, m, d, sub=1):
+        import mujoco.viewer as mjv
+        self.m, self.d, self.speed, self.sub = m, d, 1.0, sub
+        self.v = mjv.launch_passive(m, d, key_callback=self._key)
+        self.v.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = 1     # 외력 박스 표시
+        print('viewer: [ 느리게 / ] 빠르게, Ctrl+드래그=외력, 창닫기=종료')
+
+    def _key(self, kc):
+        if kc == ord(']'):
+            self.speed = min(16.0, self.speed * 2)
+        elif kc == ord('['):
+            self.speed = max(1.0 / 16, self.speed / 2)
+        else:
+            return
+        print('[viewer] 재생속도 x%.3g' % self.speed)
+
+    def running(self):
+        return self.v.is_running()
+
+    def pre_step(self):
+        # Ctrl+드래그 외력 — active(드래그 중)일 때만 적용. 아니면 잔류 외력 0 클리어.
+        if self.v.perturb.active:
+            mujoco.mjv_applyPerturbForce(self.m, self.d, self.v.perturb)
+        else:
+            self.d.xfrc_applied[:] = 0.0
+
+    def post_step(self, markers=()):
+        m, d, v = self.m, self.d, self.v
+        scn = v.user_scn; scn.ngeom = 0
+        eye = np.eye(3).flatten()
+        for p in markers:                                              # 다음 footstep(빨강 지면구)
+            if scn.ngeom >= scn.maxgeom:
+                break
+            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                                np.array([0.03, 0, 0]), np.array([p[0], p[1], 0.012]),
+                                eye, np.array([1, 0.1, 0.1, 0.9], np.float32))
+            scn.ngeom += 1
+        fext = max((float(np.linalg.norm(d.xfrc_applied[b, :3]))
+                    for b in range(1, m.nbody)), default=0.0)
+        v.set_texts([
+            (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPLEFT,
+             'sim time', '%.2f s  (x%.3g)' % (d.time, self.speed)),
+            (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPRIGHT,
+             'ext force', '%.0f N' % fext)])
+        v.sync()
+        slp = m.opt.timestep * self.sub / self.speed                  # 제어스텝당 1회 호출 기준
+        if slp > 0:
+            time.sleep(slp)
+
+    def close(self):
+        self.v.close()
+
+
+def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
+    """현재 swing 다리의 다음 착지점(world xy). 로봇 베이스 SE(2)에 body-relative 발 nominal +
+       전방 스텝을 회전·평행이동. 시각화용(아직 Raibert 보정 전)."""
+    c, s = np.cos(byaw), np.sin(byaw)
+    out = []
+    for L in P.legs:
+        ph = (gait_t / T + P.diag[L]) % 1.0
+        if ph >= sf:                                # stance — 표시 안 함
+            continue
+        off = P.foot_home[L] - P.x0[:3]             # body-relative 발 nominal(평지 가정)
+        lx = off[0] + V * T * sf * 0.5              # 착지 전방 스텝
+        ly = off[1]
+        out.append((bx + c * lx - s * ly, by + s * lx + c * ly))
+    return out
+
+
+def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
+              step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None):
+    """★ 무한 연속보행: 정상상태 1사이클(us/Ks/xs)을 저장해 매스텝 SE(2) re-anchor로 무한 반복.
+       절대 x,y,yaw 를 보지 않고 상대(높이·자세·관절·속도)만 추종 → 재최적화·드리프트 누적 없음.
+       (track_oneshot 의 매스텝 re-anchor 가 유한계획에서 검증된 것을 주기루프로 확장한 형태.)"""
+    exec_robot = exec_robot or robot
+    import sys, time, mujoco
+    P = ProxModel(robot)
+    cyc = round(T / dt)
+    # ── warm 계획(settle + n_warm 사이클) 풀어 정상상태 1사이클 추출 ──
+    N = settle_steps + n_warm * cyc
+    x_ref_fwd = P.x0.copy(); x_ref_fwd[P.nq + 0] = V
+    stages = []
+    for k in range(N):
+        tg = (k - settle_steps) * dt
+        if tg < 0:
+            stages.append(P.stage(P.legs, P.x0, dt))
+        else:
+            st, sw = QN._trot_schedule(tg, T, sf, step_h, P.foot_home, P.legs, P.diag, V, march=V * tg)
+            stages.append(P.stage(st, x_ref_fwd, dt, swing=sw))
+    prob = aligator.TrajOptProblem(P.x0, stages, P.terminal_cost(x_ref_fwd))
+    sol = aligator.SolverProxDDP(1e-5, 1e-8, max_iters=maxiter)
+    sol.setup(prob); sol.run(prob, [P.x0] * (N + 1), [np.zeros(P.nu)] * N)
+    r = sol.results
+    xs = [np.array(x) for x in r.xs]; us = [np.array(u) for u in r.us]
+    Ks = [-np.array(k) for k in r.controlFeedbacks()]
+    b = settle_steps + (n_warm - 1) * cyc          # 마지막(정상상태) 사이클 시작
+    cyc_xs = [xs[b + i].copy() for i in range(cyc)]
+    cyc_us = [us[b + i].copy() for i in range(cyc)]
+    cyc_Ks = [Ks[b + i].copy() for i in range(cyc)]
+    print('계획 conv=%s iters=%d → 정상사이클 추출(b=%d,cyc=%d) → 무한루프 추종' % (
+        r.conv, r.num_iters, b, cyc))
+    # ── MuJoCo 무한루프 추종 ──
+    _a = sys.argv; sys.argv = [_a[0]]
+    try:
+        import quad_sim; quad_sim._ROBOT = exec_robot; q = quad_sim.QuadSim(); q.crouch_home()
+    finally:
+        sys.argv = _a
+    m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
+    sub = max(1, round(dt / m.opt.timestep)); tmax = 0.0
+    nsteps = int(total_T / dt); t0 = time.time()
+    hud = _HUD(m, d, sub) if view else None
+    for s in range(nsteps):
+        if hud and not hud.running():
+            break
+        i = s % cyc
+        target = cyc_xs[i].copy()                  # 매스텝 re-anchor(균형 무한안정. 단 heading 무보정→곡선)
+        _se2_reanchor([target], 0, d.qpos[0], d.qpos[1], _yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
+        if hud: hud.pre_step()
+        for _ in range(sub):
+            x = mj_to_pin(d)
+            u = cyc_us[i] - cyc_Ks[i] @ P.space.difference(target, x)
+            umj = np.zeros(P.nu); umj[pin2mj] = u
+            d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
+        if hud:
+            mk = _footstep_markers(P, V, T, sf, s * dt, d.qpos[0], d.qpos[1],
+                                   _yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
+            hud.post_step(mk)
+        xx, yy = d.qpos[4], d.qpos[5]
+        tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
+        if os.environ.get('TRACE') and s % 25 == 0:
+            print('  t=%.1f tilt=%4.1f x=%.2f y=%+.3f z=%.3f' % (
+                s * dt, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))),
+                d.qpos[0], d.qpos[1], d.qpos[2]), flush=True)
+        if d.qpos[2] < 0.15:
+            print('  무한루프 ❌ 전복 @%.2fs (x=%.2f, 벽시계%.0fs)' % (
+                s * dt, d.qpos[0], time.time() - t0))
+            if hud: hud.close()
+            return
+    if hud: hud.close()
+    print('  무한루프 ✅ %.1fs 완주 base_z=%.3f tilt_max=%.0f° 전진=%.2fm(평균%.2fm/s) 벽시계%.0fs' % (
+        total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
 
 
 def _solver_opts(sol):
@@ -404,7 +601,8 @@ if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
     # track = 작동하는 표준경로(one-shot 안정계획 + DDP 추종). mpc = 폐기된 매스텝 재계획.
-    ap.add_argument('--test', default='track', choices=['stand', 'track', 'walk', 'mpc'])
+    ap.add_argument('--test', default='track', choices=['stand', 'track', 'walk', 'loop', 'mpc'])
+    ap.add_argument('--total-T', type=float, default=30.0)
     ap.add_argument('--robot', default='go2', choices=['ours', 'go2', 'ours_sphere'])
     ap.add_argument('--vel', type=float, default=0.0)
     ap.add_argument('--settle', type=float, default=0.6)
@@ -412,6 +610,7 @@ if __name__ == '__main__':
     ap.add_argument('--gait-T', type=float, default=0.5)
     ap.add_argument('--step-h', type=float, default=0.06)
     ap.add_argument('--exec-robot', default=None, choices=[None, 'ours', 'go2', 'ours_sphere'])
+    ap.add_argument('--reanchor', action='store_true', help='1단 SE(2) re-anchoring(드리프트 흡수)')
     ap.add_argument('--noview', action='store_true')
     a = ap.parse_args()
     os.environ.setdefault('DISPLAY', ':0')
@@ -419,7 +618,11 @@ if __name__ == '__main__':
         solve_standing(robot=a.robot)
     elif a.test == 'track':                       # ★ 권장 경로
         track_oneshot(robot=a.robot, V=a.vel, n_cycle=a.cycles, T=a.gait_T,
-                      step_h=a.step_h, view=not a.noview, exec_robot=a.exec_robot)
+                      step_h=a.step_h, view=not a.noview, exec_robot=a.exec_robot,
+                      reanchor=a.reanchor)
+    elif a.test == 'loop':                        # ★ 무한 연속보행(정상사이클 + 매스텝 re-anchor)
+        walk_loop(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
+                  view=not a.noview, exec_robot=a.exec_robot)
     elif a.test == 'walk':
         walk_continuous(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h,
                         view=not a.noview, exec_robot=a.exec_robot)
