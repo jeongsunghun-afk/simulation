@@ -403,15 +403,26 @@ def mpc_loop(N=20, dt=0.02, T=0.5, sf=0.5, step_h=0.06, V=0.0, settle=0.6, robot
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument('--test', default='stand', choices=['stand', 'mpc'])
-    ap.add_argument('--robot', default='ours', choices=['ours', 'go2'])
+    # track = 작동하는 표준경로(one-shot 안정계획 + DDP 추종). mpc = 폐기된 매스텝 재계획.
+    ap.add_argument('--test', default='track', choices=['stand', 'track', 'walk', 'mpc'])
+    ap.add_argument('--robot', default='go2', choices=['ours', 'go2', 'ours_sphere'])
     ap.add_argument('--vel', type=float, default=0.0)
     ap.add_argument('--settle', type=float, default=0.6)
+    ap.add_argument('--cycles', type=int, default=4)
+    ap.add_argument('--gait-T', type=float, default=0.5)
+    ap.add_argument('--step-h', type=float, default=0.06)
+    ap.add_argument('--exec-robot', default=None, choices=[None, 'ours', 'go2', 'ours_sphere'])
     ap.add_argument('--noview', action='store_true')
     a = ap.parse_args()
     os.environ.setdefault('DISPLAY', ':0')
     if a.test == 'stand':
         solve_standing(robot=a.robot)
+    elif a.test == 'track':                       # ★ 권장 경로
+        track_oneshot(robot=a.robot, V=a.vel, n_cycle=a.cycles, T=a.gait_T,
+                      step_h=a.step_h, view=not a.noview, exec_robot=a.exec_robot)
+    elif a.test == 'walk':
+        walk_continuous(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h,
+                        view=not a.noview, exec_robot=a.exec_robot)
     else:
         mpc_loop(robot=a.robot, V=a.vel, settle=a.settle, view=not a.noview)
 
