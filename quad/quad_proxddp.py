@@ -256,13 +256,13 @@ def _qmul_xyzw(a, b):
                      aw * bw - ax * bx - ay * by - az * bz])
 
 
-def _se2_reanchor(xs, k0, rx, ry, ryaw):
-    """xs[k0:] 의 베이스 (x,y,yaw) 를 로봇 실제 SE(2)(rx,ry,ryaw) 에 평행이동·회전 정렬.
+def _se2_reanchor(xs, k0, rx, ry, ref_yaw):
+    """xs[k0:] 의 베이스 위치(x,y)를 로봇 (rx,ry)에, 베이스 yaw 기준을 ref_yaw 로 정렬.
        속도는 pinocchio free-flyer local-frame 이라 re-anchor 불변(건드리지 않음).
-       드리프트 방향 Floquet multiplier 를 정확히 1(중립)로 만든다(1단)."""
+       ref_yaw=robot_yaw → 완전 정렬(드리프트 중립). ref_yaw=heading명령 → heading 능동보정(직진/조향)."""
     px, py = xs[k0][0], xs[k0][1]
     pyaw = _yaw_xyzw(xs[k0][3:7])
-    dpsi = ryaw - pyaw
+    dpsi = ref_yaw - pyaw
     c, s = np.cos(dpsi), np.sin(dpsi)
     qz = np.array([0.0, 0.0, np.sin(dpsi / 2), np.cos(dpsi / 2)])
     for j in range(k0, len(xs)):
@@ -386,13 +386,30 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
     sub = max(1, round(dt / m.opt.timestep)); tmax = 0.0
     nsteps = int(total_T / dt); t0 = time.time()
+    # ── 상위 명령 루프: 직선(y=0) 추종. 측방 위치 → yaw 조향(steer-to-line, crab 제거),
+    #    전진 carrot(고정 전방오프셋 → 일정 전진 push). Raibert 발 디딤 없이 heading 권한만 사용. ──
+    K_LAT = float(os.environ.get('K_LAT', '1.2'))      # 측방 위치 → 조향 yaw 게인
+    K_LATD = float(os.environ.get('K_LATD', '0.4'))    # 측방 속도 댐핑
+    YAW_MAX = float(os.environ.get('YAW_MAX', '0.35'))  # 조향 한계(rad)
+    MAXLAG = float(os.environ.get('MAXLAG', '0.06'))   # 후방 lag 포화(m) → 위치유지·runaway 방지
+    LOOK_T = float(os.environ.get('LOOK_T', '0.4'))    # 전방 carrot 룩어헤드(s) → push 속도비례
+    LEAD_MAX = float(os.environ.get('LEAD_MAX', '0.1'))  # 전방 carrot 상한(m) → 고속 과push 방지
     hud = _HUD(m, d, sub) if view else None
+    y_prev = 0.0; xtgt = float(d.qpos[0])              # 전진 가상타깃(명령속도로 전진, V=0이면 위치유지)
     for s in range(nsteps):
         if hud and not hud.running():
             break
         i = s % cyc
-        target = cyc_xs[i].copy()                  # 매스텝 re-anchor(균형 무한안정. 단 heading 무보정→곡선)
-        _se2_reanchor([target], 0, d.qpos[0], d.qpos[1], _yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
+        # 상위 명령 루프: 측방오차 y → 조향 yaw_cmd, 전진 = 가상타깃(속도전진 + lag 포화)
+        y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
+        yaw_cmd = float(np.clip(-K_LAT * y - K_LATD * vy, -YAW_MAX, YAW_MAX))
+        xtgt += V * dt                                  # 비대칭 클립: 전방 carrot(속도비례·상한) / 후방 고정 lag
+        lead = max(MAXLAG, min(V * LOOK_T, LEAD_MAX))    # lead 상한 → 고속서 과push 전복 방지
+        xtgt = float(np.clip(xtgt, d.qpos[0] - MAXLAG, d.qpos[0] + lead))
+        rx_ref = xtgt
+        ry_ref = d.qpos[1] + MAXLAG * np.sin(yaw_cmd)   # 조향 방향으로 측방 carrot
+        target = cyc_xs[i].copy()
+        _se2_reanchor([target], 0, rx_ref, ry_ref, yaw_cmd)
         if hud: hud.pre_step()
         for _ in range(sub):
             x = mj_to_pin(d)
