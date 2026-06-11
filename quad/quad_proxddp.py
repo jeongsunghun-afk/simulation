@@ -21,6 +21,16 @@ import quad_nmpc as QN
 LEGS = QN.LEGS_PIN
 MU = 0.6 * 0.707
 TAU_LIM = 80.0
+# cost 가중 (env 튜닝): base z/자세(roll·pitch)/yaw, 관절, base속도, 관절속도, swing, 제어
+PW = dict(z=float(os.environ.get('PW_Z', '50')), ori=float(os.environ.get('PW_ORI', '150')),
+          yaw=float(os.environ.get('PW_YAW', '10')), j=float(os.environ.get('PW_J', '0.2')),
+          bv=float(os.environ.get('PW_BV', '1')), jv=float(os.environ.get('PW_JV', '0.1')),
+          sw=float(os.environ.get('PW_SW', '100')), u=float(os.environ.get('PW_U', '1e-3')))
+
+
+def _wstate(nu):
+    return np.concatenate([[0, 0, PW['z']], [PW['ori'], PW['ori'], PW['yaw']],
+                           [PW['j']] * nu, [PW['bv']] * 6, [PW['jv']] * nu])
 # 마찰 pyramid A(5x3): A·f ≤ 0  (fz≥0, |fx|≤μfz, |fy|≤μfz)
 _FC_A = np.array([[0, 0, -1.0],
                   [1, 0, -MU], [-1, 0, -MU],
@@ -67,15 +77,14 @@ class ProxModel:
         # ── cost ──
         cost = aligator.CostStack(self.space, self.nu)
         if w_state is None:
-            w_state = np.concatenate([[0, 0, 50, 150, 150, 10], [0.2] * self.nu,
-                                      [1] * 6, [0.1] * self.nu])
+            w_state = _wstate(self.nu)
         cost.addCost('xreg', aligator.QuadraticStateCost(
             self.space, self.nu, x_ref, np.diag(w_state ** 2)), 1.0)
         cost.addCost('ureg', aligator.QuadraticControlCost(
-            self.space, np.zeros(self.nu), 1e-3 * np.eye(self.nu)), 1.0)
+            self.space, np.zeros(self.nu), PW['u'] * np.eye(self.nu)), 1.0)
         for L, tgt in swing.items():
             res = aligator.FrameTranslationResidual(self.ndx, self.nu, self.model, tgt, self.M.foot_fid[L])
-            cost.addCost('sw_' + L, aligator.QuadraticResidualCost(self.space, res, 1e2 * np.eye(3)), 1.0)
+            cost.addCost('sw_' + L, aligator.QuadraticResidualCost(self.space, res, PW['sw'] * np.eye(3)), 1.0)
         stm = aligator.StageModel(cost, disc)
         # ── hard constraints ──
         # 마찰콘: A·f ≤ 0 (stance 발마다)
@@ -92,8 +101,7 @@ class ProxModel:
 
     def terminal_cost(self, x_ref, w_state=None):
         if w_state is None:
-            w_state = np.concatenate([[0, 0, 50, 150, 150, 10], [0.2] * self.nu,
-                                      [1] * 6, [0.1] * self.nu])
+            w_state = _wstate(self.nu)
         return aligator.QuadraticStateCost(self.space, self.nu, x_ref, np.diag((1e2 * w_state) ** 2))
 
 
@@ -161,8 +169,10 @@ def solve_trot_oneshot(robot='go2', V=0.0, settle_steps=15, n_cycle=3, dt=0.02,
 
 
 def track_oneshot(robot='go2', V=0.0, settle_steps=15, n_cycle=4, dt=0.02,
-                  T=0.5, sf=0.5, step_h=0.06, maxiter=100, view=False):
-    """one-shot 안정계획 + DDP 피드백 추종(재계획 없음). Go2는 pin=MuJoCo라 모델일치."""
+                  T=0.5, sf=0.5, step_h=0.06, maxiter=100, view=False, exec_robot=None):
+    """one-shot 안정계획 + DDP 피드백 추종(재계획 없음). Go2는 pin=MuJoCo라 모델일치.
+       exec_robot: MuJoCo 실행모델 분리(예: 계획='ours' pin, 실행='ours_sphere' 점접촉 정합)."""
+    exec_robot = exec_robot or robot
     import sys, time, mujoco
     P = ProxModel(robot)
     N = settle_steps + n_cycle * round(T / dt)
@@ -185,7 +195,7 @@ def track_oneshot(robot='go2', V=0.0, settle_steps=15, n_cycle=4, dt=0.02,
     # MuJoCo 추종
     _a = sys.argv; sys.argv = [_a[0]]
     try:
-        import quad_sim; quad_sim._ROBOT = robot; q = quad_sim.QuadSim(); q.crouch_home()
+        import quad_sim; quad_sim._ROBOT = exec_robot; q = quad_sim.QuadSim(); q.crouch_home()
     finally:
         sys.argv = _a
     m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
@@ -210,6 +220,93 @@ def track_oneshot(robot='go2', V=0.0, settle_steps=15, n_cycle=4, dt=0.02,
     if viewer: viewer.close()
     print('  추종 ✅ 계획끝까지 생존 base_z=%.3f tilt_max=%.0f° 전진=%.2fm' % (
         d.qpos[2], tmax, d.qpos[0]))
+
+
+def _solver_opts(sol):
+    for opt, val in [('rollout_type', getattr(aligator, 'ROLLOUT_LINEAR', None)),
+                     ('sa_strategy', getattr(aligator, 'SA_FILTER', None))]:
+        try:
+            if val is not None:
+                setattr(sol, opt, val)
+        except Exception:
+            pass
+    try:
+        sol.filter.beta = 1e-5
+    except Exception:
+        pass
+    return sol
+
+
+def walk_continuous(robot='go2', V=0.0, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
+                    horizon_cycles=2, replan_steps=15, total_T=6.0, maxiter=60,
+                    view=False, exec_robot=None):
+    """연속보행 — 주기적 re-plan(replan_steps 계획스텝마다 완전수렴 재계획) + DDP 추종.
+       매 스텝 재계획(불안정)이 아니라 사이클 단위 재계획으로 누적오차 보정."""
+    import sys, time, mujoco
+    exec_robot = exec_robot or robot
+    P = ProxModel(robot)
+    dt = 0.02
+    Hn = round(horizon_cycles * T / dt)                  # 계획 호라이즌(스텝)
+    x_ref_fwd = P.x0.copy(); x_ref_fwd[P.nq + 0] = V
+    _a = sys.argv; sys.argv = [_a[0]]
+    try:
+        import quad_sim; quad_sim._ROBOT = exec_robot
+        q = quad_sim.QuadSim(); q.crouch_home()
+    finally:
+        sys.argv = _a
+    m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
+    sub = max(1, round(dt / m.opt.timestep))
+
+    def plan(gait_t0, x, xs_ws=None, us_ws=None):
+        body_x = x[0]; stages = []
+        for k in range(Hn):
+            tg = gait_t0 + k * dt
+            if tg < 0:
+                stages.append(P.stage(P.legs, P.x0, dt))
+            else:
+                st, sw = QN._trot_schedule(tg, T, sf, step_h, P.foot_home, P.legs, P.diag,
+                                           V, march=body_x + V * (k * dt))
+                stages.append(P.stage(st, x_ref_fwd, dt, swing=sw))
+        x_ref_T = P.x0 if (gait_t0 + Hn * dt) < 0 else x_ref_fwd
+        prob = aligator.TrajOptProblem(x.copy(), stages, P.terminal_cost(x_ref_T))
+        sol = _solver_opts(aligator.SolverProxDDP(1e-4, 1e-7, max_iters=maxiter))
+        sol.setup(prob)
+        sol.run(prob, xs_ws or [x] * (Hn + 1), us_ws or [np.zeros(P.nu)] * Hn)
+        r = sol.results
+        return ([np.array(s) for s in r.xs], [np.array(u) for u in r.us],
+                [-np.array(k) for k in r.controlFeedbacks()])
+
+    gait_t = -settle
+    xs, us, Ks = plan(gait_t, mj_to_pin(d)); pidx = 0
+    viewer = None
+    if view:
+        import mujoco.viewer as mjv; viewer = mjv.launch_passive(m, d)
+    tmax = 0.0; t0 = time.time(); n_plan_steps = int(total_T / dt)
+    for ps in range(n_plan_steps):
+        if pidx >= replan_steps:
+            # 이전 해를 pidx 만큼 shift 해 warm-start(부드러운 재계획)
+            s = pidx
+            xw = xs[s:] + [xs[-1]] * s; uw = us[s:] + [us[-1]] * s
+            xs, us, Ks = plan(gait_t, mj_to_pin(d), xw[:Hn + 1], uw[:Hn]); pidx = 0
+        for _ in range(sub):
+            x = mj_to_pin(d)
+            u = us[pidx] - Ks[pidx] @ P.space.difference(xs[pidx], x)
+            umj = np.zeros(P.nu); umj[pin2mj] = u
+            d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
+            if viewer:
+                viewer.sync(); time.sleep(m.opt.timestep)
+        pidx += 1; gait_t += dt
+        xx, yy = d.qpos[4], d.qpos[5]
+        tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
+        if d.qpos[2] < 0.15:
+            if viewer:
+                viewer.close()
+            print('연속보행 ❌ 전복 @%.1fs (x=%.2f, 벽시계%.0fs)' % (ps * dt, d.qpos[0], time.time() - t0))
+            return
+    if viewer:
+        viewer.close()
+    print('연속보행 ✅ %.1fs 생존 base_z=%.3f tilt_max=%.0f° 전진=%.2fm(평균%.2fm/s, 벽시계%.0fs)' % (
+        total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
 
 
 def mpc_loop(N=20, dt=0.02, T=0.5, sf=0.5, step_h=0.06, V=0.0, settle=0.6, robot="ours",
