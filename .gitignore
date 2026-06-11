@@ -19,3 +19,8 @@ MUJOCO_LOG.TXT
 # 산출물 / 캐시
 *.npz.cache
 mujoco_trace.npz
+
+# quad: 대용량 원본 메시(재빌드 소스; 런타임은 meshes_sim/ 사용)
+quad/meshes/
+quad/*.log
+quad/*.out
