@@ -623,6 +623,125 @@ def walk_continuous(robot='go2', V=0.0, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
         total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
 
 
+def _xref_pose(P, px, py, pyaw, v, w):
+    """기준 베이스 pose(px,py,pyaw) + body 트위스트(전진 v, yaw rate w) 의 상태 레퍼런스."""
+    xr = P.x0.copy()
+    xr[0], xr[1] = px, py
+    xr[3:7] = _qmul_xyzw(np.array([0.0, 0.0, np.sin(pyaw / 2), np.cos(pyaw / 2)]), P.x0[3:7])
+    xr[P.nq + 0] = v        # body-forward 속도
+    xr[P.nq + 5] = w        # yaw rate
+    return xr
+
+
+def _swing_turn(tg, T, sf, step_h, P, px, py, pyaw, v):
+    """선회 반영 swing 발 타깃: body-relative nominal 발 + 전진스윙을 기준 pose(px,py,pyaw)로 회전·평행이동."""
+    c, s = np.cos(pyaw), np.sin(pyaw)
+    stance, swing = [], {}
+    for L in P.legs:
+        ph = (tg / T + P.diag[L]) % 1.0
+        if ph < sf:
+            sp = ph / sf
+            arc = 4 * step_h * sp * (1 - sp)
+            fwd = v * T * sf * (sp - 0.5)
+            ox = P.foot_home[L][0] - P.x0[0] + fwd        # body-frame (전진 스윙 포함)
+            oy = P.foot_home[L][1] - P.x0[1]
+            swing[L] = np.array([px + c * ox - s * oy, py + s * ox + c * oy,
+                                 P.foot_home[L][2] + arc])
+        else:
+            stance.append(L)
+    return stance, swing
+
+
+def walk_replan(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
+                horizon_cycles=2, replan_steps=12, total_T=30.0, dt=0.02, maxiter=40,
+                view=False, exec_robot=None, cmd_source=None):
+    """[실험·불안정] 재계획 연속보행: 현재 상태+명령(v,w)으로 짧은 호라이즌 ProxDDP 재계획 →
+       DDP 추종 → replan_steps 마다 warm-start 재계획. 선회를 계획에 반영(_swing_turn).
+       ※ 검증결과 전환 transient 로 불안정(replan_steps 6/12/25 모두 <3s 전복) — 매 재계획 시
+       us/Ks 가 바뀌며 제어 점프. = 메모리 기록된 receding-MPC 불안정 재확인. 안정 경로는
+       walk_loop(plan-once + 매스텝 re-anchor). 진정한 재계획은 실시간 RTI(단일 뉴턴스텝/틱)나 MJPC 필요.
+       (turning-aware planning + warm-start 구조는 추후 RTI 개발 참조용으로 보존.)"""
+    import sys, time, mujoco
+    exec_robot = exec_robot or robot
+    P = ProxModel(robot)
+    Hn = round(horizon_cycles * T / dt)
+    _a = sys.argv; sys.argv = [_a[0]]
+    try:
+        import quad_sim; quad_sim._ROBOT = exec_robot; q = quad_sim.QuadSim(); q.crouch_home()
+    finally:
+        sys.argv = _a
+    m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
+    sub = max(1, round(dt / m.opt.timestep))
+    K_LAT = float(os.environ.get('K_LAT', '1.0')); K_LATD = float(os.environ.get('K_LATD', '0.3'))
+
+    def plan(gait_t0, x, v_cmd, w_cmd, xs_ws=None, us_ws=None):
+        px, py, pyaw = x[0], x[1], _yaw_xyzw(x[3:7])
+        stages = []
+        for k in range(Hn):
+            tg = gait_t0 + k * dt
+            xr = _xref_pose(P, px, py, pyaw, v_cmd, w_cmd)
+            if tg < 0:
+                stages.append(P.stage(P.legs, xr, dt))
+            else:
+                st, sw = _swing_turn(tg, T, sf, step_h, P, px, py, pyaw, v_cmd)
+                stages.append(P.stage(st, xr, dt, swing=sw))
+            px += v_cmd * np.cos(pyaw) * dt; py += v_cmd * np.sin(pyaw) * dt; pyaw += w_cmd * dt
+        xr_T = _xref_pose(P, px, py, pyaw, v_cmd, w_cmd)
+        prob = aligator.TrajOptProblem(x.copy(), stages, P.terminal_cost(xr_T))
+        sol = _solver_opts(aligator.SolverProxDDP(1e-4, 1e-7, max_iters=maxiter))
+        sol.setup(prob)
+        sol.run(prob, xs_ws or [x] * (Hn + 1), us_ws or [np.zeros(P.nu)] * Hn)
+        r = sol.results
+        return ([np.array(s) for s in r.xs], [np.array(u) for u in r.us],
+                [-np.array(k) for k in r.controlFeedbacks()])
+
+    gait_t = -settle
+    xs, us, Ks = plan(gait_t, mj_to_pin(d), V, 0.0); pidx = 0
+    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V) if view else None
+    active_cmd = hud.cmd if hud else cmd_source
+    y_prev = 0.0; tmax = 0.0; t0 = time.time(); nps = int(total_T / dt)
+    for ps in range(nps):
+        if hud and not hud.running():
+            break
+        if active_cmd is not None:
+            v_cmd, w_cmd = active_cmd.read()
+        else:                                              # 헤드리스 자동 직선유지(→ plan yaw rate)
+            v_cmd = V
+            y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
+            w_cmd = float(np.clip(-K_LAT * y - K_LATD * vy, -0.25, 0.25))
+        if pidx >= replan_steps:                           # warm-start 재계획(이전해 shift)
+            sh = pidx
+            xw = xs[sh:] + [xs[-1]] * sh; uw = us[sh:] + [us[-1]] * sh
+            xs, us, Ks = plan(gait_t, mj_to_pin(d), v_cmd, w_cmd, xw[:Hn + 1], uw[:Hn]); pidx = 0
+        if hud: hud.pre_step()
+        for _ in range(sub):
+            x = mj_to_pin(d)
+            u = us[pidx] - Ks[pidx] @ P.space.difference(xs[pidx], x)
+            umj = np.zeros(P.nu); umj[pin2mj] = u
+            d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
+        pidx += 1; gait_t += dt
+        xx, yy = d.qpos[4], d.qpos[5]
+        tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
+        if hud:
+            byaw = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])
+            mk = _footstep_markers(P, v_cmd, T, sf, gait_t, d.qpos[0], d.qpos[1], byaw)
+            zc = d.qpos[2] + 0.18; ln = 0.15 + 0.5 * abs(v_cmd); sg = 1.0 if v_cmd >= 0 else -1.0
+            frm = np.array([d.qpos[0], d.qpos[1], zc])
+            to = frm + sg * ln * np.array([np.cos(byaw), np.sin(byaw), 0.0])
+            hud.post_step(mk, arrow=(frm, to))
+        if os.environ.get('TRACE') and ps % 25 == 0:
+            print('  t=%.1f tilt=%4.1f x=%.2f y=%+.3f z=%.3f' % (
+                ps * dt, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))),
+                d.qpos[0], d.qpos[1], d.qpos[2]), flush=True)
+        if d.qpos[2] < 0.15:
+            print('  재계획 ❌ 전복 @%.2fs (x=%.2f, 벽시계%.0fs)' % (ps * dt, d.qpos[0], time.time() - t0))
+            if hud: hud.close()
+            return
+    if hud: hud.close()
+    print('  재계획 ✅ %.1fs 완주 base_z=%.3f tilt_max=%.0f° 전진=%.2fm(평균%.2fm/s) 벽시계%.0fs' % (
+        total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
+
+
 def mpc_loop(N=20, dt=0.02, T=0.5, sf=0.5, step_h=0.06, V=0.0, settle=0.6, robot="ours",
              maxiter=8, sim_T=4.0, view=True):
     """네이티브 ProxDDP receding-horizon closed-loop (hard constraint). MuJoCo 물리."""
@@ -718,7 +837,7 @@ if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
     # track = 작동하는 표준경로(one-shot 안정계획 + DDP 추종). mpc = 폐기된 매스텝 재계획.
-    ap.add_argument('--test', default='track', choices=['stand', 'track', 'walk', 'loop', 'mpc'])
+    ap.add_argument('--test', default='track', choices=['stand', 'track', 'walk', 'loop', 'replan', 'mpc'])
     ap.add_argument('--total-T', type=float, default=30.0)
     ap.add_argument('--robot', default='go2', choices=['ours', 'go2', 'ours_sphere'])
     ap.add_argument('--vel', type=float, default=0.0)
@@ -744,6 +863,10 @@ if __name__ == '__main__':
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_loop(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
                   view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
+    elif a.test == 'replan':                      # ★ 재계획 연속보행 + 조작기(track 수준 매끄러움+선회)
+        cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
+        walk_replan(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
+                    view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
     elif a.test == 'walk':
         walk_continuous(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h,
                         view=not a.noview, exec_robot=a.exec_robot)
