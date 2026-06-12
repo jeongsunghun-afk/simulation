@@ -272,25 +272,88 @@ def _se2_reanchor(xs, k0, rx, ry, ref_yaw):
         xs[j][3:7] = _qmul_xyzw(qz, xs[j][3:7])
 
 
-class _HUD:
-    """ProxDDP 뷰어 공통 HUD: 좌상단 sim time, 우상단 외력 N, [/] 속도조절,
-       Ctrl+드래그 외력, 다음 footstep 빨간점."""
+# ══════════════════════════════════════════════════════════════
+# 조작기(teleop) 명령 인터페이스 — 컨트롤러는 read()→(v,w)만 사용.
+# 소스 교체로 시뮬↔실배포 동일: KeyboardCmd(뷰어) / JsonCmd(외부GUI·테스트) / RosTwistCmd(배포).
+# ══════════════════════════════════════════════════════════════
+class CommandSource:
+    """전진 v[m/s] + 선회 w[rad/s] 명령. read()→(v,w). 하위클래스가 소스별 구현."""
+    def __init__(self, v0=0.0, vmax=0.5, wmax=0.6):
+        self.v, self.w, self.vmax, self.wmax = v0, 0.0, vmax, wmax
 
-    def __init__(self, m, d, sub=1):
+    def read(self):
+        return self.v, self.w
+
+    def key(self, kc):                       # 키보드 소스만 사용(뷰어 key_callback 위임)
+        return False
+
+
+class KeyboardCmd(CommandSource):
+    """MuJoCo 뷰어 키보드: W/S=전진±, A/D=선회±, X=정지."""
+    def key(self, kc):
+        if kc == ord('W'):
+            self.v = min(self.vmax, self.v + 0.05)
+        elif kc == ord('S'):
+            self.v = max(-self.vmax, self.v - 0.05)
+        elif kc == ord('A'):
+            self.w = min(self.wmax, self.w + 0.1)
+        elif kc == ord('D'):
+            self.w = max(-self.wmax, self.w - 0.1)
+        elif kc == ord('X'):
+            self.v = self.w = 0.0
+        else:
+            return False
+        print('[조작기] v_cmd=%+.2f m/s  w_cmd=%+.2f rad/s' % (self.v, self.w))
+        return True
+
+
+class JsonCmd(CommandSource):
+    """외부 GUI/테스트가 JSON 파일에 {\"v\":..,\"w\":..} 기록 → 매 read 시 폴링.
+       (배포 전 비ROS 환경에서 웹/Qt UI 연동, 또는 스크립트 자동주행 테스트용.)"""
+    def __init__(self, path='/tmp/quad_cmd.json', v0=0.0, vmax=0.5, wmax=0.6):
+        super().__init__(v0, vmax, wmax); self.path = path
+
+    def read(self):
+        try:
+            import json
+            with open(self.path) as f:
+                d = json.load(f)
+            self.v = float(np.clip(d.get('v', self.v), -self.vmax, self.vmax))
+            self.w = float(np.clip(d.get('w', self.w), -self.wmax, self.wmax))
+        except Exception:
+            pass
+        return self.v, self.w
+
+
+def make_cmd_source(kind, v0=0.0):
+    """--cmd {key,json,ros} → CommandSource. ros 는 배포시 rclpy /cmd_vel(Twist) 구독(자리)."""
+    if kind == 'json':
+        return JsonCmd(v0=v0)
+    if kind == 'ros':
+        raise NotImplementedError('RosTwistCmd: 배포시 rclpy 로 /cmd_vel(Twist) 구독 구현 '
+                                  '(linear.x=v, angular.z=w). conda proxddp env 에 rclpy 필요.')
+    return KeyboardCmd(v0=v0)
+
+
+class _HUD:
+    """ProxDDP 뷰어 공통 HUD: 좌상단 sim time, 우상단 외력 N, 하단 조작기 명령,
+       [/] 재생속도, Ctrl+드래그 외력, 다음 footstep 빨간점. 명령은 CommandSource(cmd) 위임."""
+
+    def __init__(self, m, d, sub=1, cmd=None, v0=0.0, vmax=0.5, wmax=0.6):
         import mujoco.viewer as mjv
         self.m, self.d, self.speed, self.sub = m, d, 1.0, sub
+        self.cmd = cmd if cmd is not None else KeyboardCmd(v0, vmax, wmax)  # 조작기 명령원
         self.v = mjv.launch_passive(m, d, key_callback=self._key)
         self.v.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = 1     # 외력 박스 표시
-        print('viewer: [ 느리게 / ] 빠르게, Ctrl+드래그=외력, 창닫기=종료')
+        print('조작기: W/S=전진±  A/D=선회±  X=정지 | [/]=재생속도  Ctrl+드래그=외력  창닫기=종료')
 
     def _key(self, kc):
         if kc == ord(']'):
-            self.speed = min(16.0, self.speed * 2)
+            self.speed = min(16.0, self.speed * 2); print('[viewer] 재생속도 x%.3g' % self.speed)
         elif kc == ord('['):
-            self.speed = max(1.0 / 16, self.speed / 2)
+            self.speed = max(1.0 / 16, self.speed / 2); print('[viewer] 재생속도 x%.3g' % self.speed)
         else:
-            return
-        print('[viewer] 재생속도 x%.3g' % self.speed)
+            self.cmd.key(kc)                    # 조작기 키는 CommandSource 에 위임
 
     def running(self):
         return self.v.is_running()
@@ -319,7 +382,9 @@ class _HUD:
             (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPLEFT,
              'sim time', '%.2f s  (x%.3g)' % (d.time, self.speed)),
             (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPRIGHT,
-             'ext force', '%.0f N' % fext)])
+             'ext force', '%.0f N' % fext),
+            (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
+             'cmd  v / w', '%+.2f m/s  %+.2f rad/s' % (self.cmd.v, self.cmd.w))])
         v.sync()
         slp = m.opt.timestep * self.sub / self.speed                  # 제어스텝당 1회 호출 기준
         if slp > 0:
@@ -346,10 +411,12 @@ def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
 
 
 def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
-              step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None):
+              step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None,
+              cmd_source=None):
     """★ 무한 연속보행: 정상상태 1사이클(us/Ks/xs)을 저장해 매스텝 SE(2) re-anchor로 무한 반복.
        절대 x,y,yaw 를 보지 않고 상대(높이·자세·관절·속도)만 추종 → 재최적화·드리프트 누적 없음.
-       (track_oneshot 의 매스텝 re-anchor 가 유한계획에서 검증된 것을 주기루프로 확장한 형태.)"""
+       cmd_source: 조작기 명령원(CommandSource). 주면 그 v/w 명령 추종(뷰어 없이 teleop 테스트 가능),
+       없으면 뷰어=키보드 / 헤드리스=자동 직선유지."""
     exec_robot = exec_robot or robot
     import sys, time, mujoco
     P = ProxModel(robot)
@@ -386,30 +453,43 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
     sub = max(1, round(dt / m.opt.timestep)); tmax = 0.0
     nsteps = int(total_T / dt); t0 = time.time()
-    # ── 상위 명령 루프: 직선(y=0) 추종. 측방 위치 → yaw 조향(steer-to-line, crab 제거),
-    #    전진 carrot(고정 전방오프셋 → 일정 전진 push). Raibert 발 디딤 없이 heading 권한만 사용. ──
-    K_LAT = float(os.environ.get('K_LAT', '1.2'))      # 측방 위치 → 조향 yaw 게인
-    K_LATD = float(os.environ.get('K_LATD', '0.4'))    # 측방 속도 댐핑
-    YAW_MAX = float(os.environ.get('YAW_MAX', '0.35'))  # 조향 한계(rad)
+    # ── 상위 명령 루프(조작기 인터페이스). 명령 = 전진 v_cmd[m/s] + 선회 w_cmd[rad/s].
+    #    뷰어=운영자 키(WASD)로 v_cmd/w_cmd, 헤드리스=자동 직선유지(steer-to-line, w 자동).
+    #    heading 적분 yaw_ref → 2D 전진 carrot(yaw_ref 방향) + lag 포화. Raibert 없이 heading 권한만. ──
+    K_LAT = float(os.environ.get('K_LAT', '1.2'))      # (헤드리스 자동) 측방 위치 → 조향 게인
+    K_LATD = float(os.environ.get('K_LATD', '0.4'))    # (헤드리스 자동) 측방 속도 댐핑
+    YAW_MAX = float(os.environ.get('YAW_MAX', '0.35'))  # (헤드리스 자동) 조향 한계(rad)
     MAXLAG = float(os.environ.get('MAXLAG', '0.06'))   # 후방 lag 포화(m) → 위치유지·runaway 방지
     LOOK_T = float(os.environ.get('LOOK_T', '0.4'))    # 전방 carrot 룩어헤드(s) → push 속도비례
     LEAD_MAX = float(os.environ.get('LEAD_MAX', '0.1'))  # 전방 carrot 상한(m) → 고속 과push 방지
-    hud = _HUD(m, d, sub) if view else None
-    y_prev = 0.0; xtgt = float(d.qpos[0])              # 전진 가상타깃(명령속도로 전진, V=0이면 위치유지)
+    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V) if view else None
+    active_cmd = hud.cmd if hud else cmd_source        # 활성 명령원(뷰어 키보드 / 외부 cmd_source)
+    y_prev = 0.0
+    yaw_ref = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])          # 명령 heading(운영자 선회 적분 / 자동 조향)
+    xtgt, ytgt = float(d.qpos[0]), float(d.qpos[1])    # 2D 전진 가상타깃
     for s in range(nsteps):
         if hud and not hud.running():
             break
         i = s % cyc
-        # 상위 명령 루프: 측방오차 y → 조향 yaw_cmd, 전진 = 가상타깃(속도전진 + lag 포화)
-        y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
-        yaw_cmd = float(np.clip(-K_LAT * y - K_LATD * vy, -YAW_MAX, YAW_MAX))
-        xtgt += V * dt                                  # 비대칭 클립: 전방 carrot(속도비례·상한) / 후방 고정 lag
-        lead = max(MAXLAG, min(V * LOOK_T, LEAD_MAX))    # lead 상한 → 고속서 과push 전복 방지
-        xtgt = float(np.clip(xtgt, d.qpos[0] - MAXLAG, d.qpos[0] + lead))
-        rx_ref = xtgt
-        ry_ref = d.qpos[1] + MAXLAG * np.sin(yaw_cmd)   # 조향 방향으로 측방 carrot
+        # 명령 결정: 명령원 있으면 운영자/외부 teleop, 없으면 헤드리스 자동 직선유지
+        if active_cmd is not None:
+            v_cmd, w_cmd = active_cmd.read()
+            yaw_ref += w_cmd * dt                       # 선회(heading 적분)
+        else:
+            v_cmd = V
+            y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
+            yaw_ref = float(np.clip(-K_LAT * y - K_LATD * vy, -YAW_MAX, YAW_MAX))  # 자동 직선유지
+        # 2D 전진 carrot(yaw_ref 방향) + lag 포화(전진력 일정·runaway 방지)
+        xtgt += v_cmd * np.cos(yaw_ref) * dt
+        ytgt += v_cmd * np.sin(yaw_ref) * dt
+        rx, ry = d.qpos[0], d.qpos[1]
+        dx, dy = xtgt - rx, ytgt - ry
+        dist = float(np.hypot(dx, dy))
+        lead = max(MAXLAG, min(abs(v_cmd) * LOOK_T, LEAD_MAX))
+        if dist > lead and dist > 1e-9:
+            xtgt = rx + dx / dist * lead; ytgt = ry + dy / dist * lead
         target = cyc_xs[i].copy()
-        _se2_reanchor([target], 0, rx_ref, ry_ref, yaw_cmd)
+        _se2_reanchor([target], 0, xtgt, ytgt, yaw_ref)
         if hud: hud.pre_step()
         for _ in range(sub):
             x = mj_to_pin(d)
@@ -628,6 +708,8 @@ if __name__ == '__main__':
     ap.add_argument('--step-h', type=float, default=0.06)
     ap.add_argument('--exec-robot', default=None, choices=[None, 'ours', 'go2', 'ours_sphere'])
     ap.add_argument('--reanchor', action='store_true', help='1단 SE(2) re-anchoring(드리프트 흡수)')
+    ap.add_argument('--cmd', default='key', choices=['key', 'json', 'ros'],
+                    help='조작기 명령원: key=뷰어키보드, json=/tmp/quad_cmd.json 폴링, ros=/cmd_vel(배포)')
     ap.add_argument('--noview', action='store_true')
     a = ap.parse_args()
     os.environ.setdefault('DISPLAY', ':0')
@@ -637,9 +719,11 @@ if __name__ == '__main__':
         track_oneshot(robot=a.robot, V=a.vel, n_cycle=a.cycles, T=a.gait_T,
                       step_h=a.step_h, view=not a.noview, exec_robot=a.exec_robot,
                       reanchor=a.reanchor)
-    elif a.test == 'loop':                        # ★ 무한 연속보행(정상사이클 + 매스텝 re-anchor)
+    elif a.test == 'loop':                        # ★ 무한 연속보행 + 조작기(teleop)
+        # key=뷰어키보드(기본). json=외부GUI/스크립트 폴링(헤드리스 teleop 가능). 자동직선=명령원없음.
+        cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_loop(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
-                  view=not a.noview, exec_robot=a.exec_robot)
+                  view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
     elif a.test == 'walk':
         walk_continuous(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h,
                         view=not a.noview, exec_robot=a.exec_robot)
