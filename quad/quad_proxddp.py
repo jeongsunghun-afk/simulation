@@ -278,7 +278,7 @@ def _se2_reanchor(xs, k0, rx, ry, ref_yaw):
 # ══════════════════════════════════════════════════════════════
 class CommandSource:
     """전진 v[m/s] + 선회 w[rad/s] 명령. read()→(v,w). 하위클래스가 소스별 구현."""
-    def __init__(self, v0=0.0, vmax=0.5, wmax=0.6):
+    def __init__(self, v0=0.0, vmax=0.5, wmax=0.25):
         self.v, self.w, self.vmax, self.wmax = v0, 0.0, vmax, wmax
 
     def read(self):
@@ -289,15 +289,17 @@ class CommandSource:
 
 
 class KeyboardCmd(CommandSource):
-    """MuJoCo 뷰어 키보드: W/S=전진±, A/D=선회±, X=정지."""
+    """MuJoCo 뷰어 키보드(화살표만 — WASD 는 뷰어 내장키와 충돌해 미사용):
+       ↑/↓=전진±, ←/→=선회±, X=정지. 화살표 GLFW 코드(↑265 ↓264 ←263 →262)."""
+    UP, DOWN, LEFT, RIGHT = 265, 264, 263, 262
     def key(self, kc):
-        if kc == ord('W'):
+        if kc == self.UP:
             self.v = min(self.vmax, self.v + 0.05)
-        elif kc == ord('S'):
+        elif kc == self.DOWN:
             self.v = max(-self.vmax, self.v - 0.05)
-        elif kc == ord('A'):
+        elif kc == self.LEFT:
             self.w = min(self.wmax, self.w + 0.1)
-        elif kc == ord('D'):
+        elif kc == self.RIGHT:
             self.w = max(-self.wmax, self.w - 0.1)
         elif kc == ord('X'):
             self.v = self.w = 0.0
@@ -310,7 +312,7 @@ class KeyboardCmd(CommandSource):
 class JsonCmd(CommandSource):
     """외부 GUI/테스트가 JSON 파일에 {\"v\":..,\"w\":..} 기록 → 매 read 시 폴링.
        (배포 전 비ROS 환경에서 웹/Qt UI 연동, 또는 스크립트 자동주행 테스트용.)"""
-    def __init__(self, path='/tmp/quad_cmd.json', v0=0.0, vmax=0.5, wmax=0.6):
+    def __init__(self, path='/tmp/quad_cmd.json', v0=0.0, vmax=0.5, wmax=0.25):
         super().__init__(v0, vmax, wmax); self.path = path
 
     def read(self):
@@ -339,13 +341,13 @@ class _HUD:
     """ProxDDP 뷰어 공통 HUD: 좌상단 sim time, 우상단 외력 N, 하단 조작기 명령,
        [/] 재생속도, Ctrl+드래그 외력, 다음 footstep 빨간점. 명령은 CommandSource(cmd) 위임."""
 
-    def __init__(self, m, d, sub=1, cmd=None, v0=0.0, vmax=0.5, wmax=0.6):
+    def __init__(self, m, d, sub=1, cmd=None, v0=0.0, vmax=0.5, wmax=0.25):
         import mujoco.viewer as mjv
         self.m, self.d, self.speed, self.sub = m, d, 1.0, sub
         self.cmd = cmd if cmd is not None else KeyboardCmd(v0, vmax, wmax)  # 조작기 명령원
         self.v = mjv.launch_passive(m, d, key_callback=self._key)
         self.v.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = 1     # 외력 박스 표시
-        print('조작기: W/S=전진±  A/D=선회±  X=정지 | [/]=재생속도  Ctrl+드래그=외력  창닫기=종료')
+        print('조작기: ↑/↓=전진±  ←/→=선회±  X=정지 | [/]=재생속도  Ctrl+드래그=외력  창닫기=종료')
 
     def _key(self, kc):
         if kc == ord(']'):
@@ -365,7 +367,7 @@ class _HUD:
         else:
             self.d.xfrc_applied[:] = 0.0
 
-    def post_step(self, markers=()):
+    def post_step(self, markers=(), arrow=None):
         m, d, v = self.m, self.d, self.v
         scn = v.user_scn; scn.ngeom = 0
         eye = np.eye(3).flatten()
@@ -375,6 +377,13 @@ class _HUD:
             mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
                                 np.array([0.03, 0, 0]), np.array([p[0], p[1], 0.012]),
                                 eye, np.array([1, 0.1, 0.1, 0.9], np.float32))
+            scn.ngeom += 1
+        if arrow is not None and scn.ngeom < scn.maxgeom:             # 조작 방향(로봇 위 노랑 화살표)
+            g = scn.geoms[scn.ngeom]
+            mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_ARROW, np.zeros(3), np.zeros(3),
+                                eye, np.array([1, 0.85, 0.1, 1.0], np.float32))
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_ARROW, 0.012,
+                                 np.asarray(arrow[0], float), np.asarray(arrow[1], float))
             scn.ngeom += 1
         fext = max((float(np.linalg.norm(d.xfrc_applied[b, :3]))
                     for b in range(1, m.nbody)), default=0.0)
@@ -465,31 +474,36 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     hud = _HUD(m, d, sub, cmd=cmd_source, v0=V) if view else None
     active_cmd = hud.cmd if hud else cmd_source        # 활성 명령원(뷰어 키보드 / 외부 cmd_source)
     y_prev = 0.0
-    yaw_ref = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])          # 명령 heading(운영자 선회 적분 / 자동 조향)
+    yaw_ref = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])          # 명령 heading(운영자 선회 / 자동 조향)
+    ax, ay = float(d.qpos[0]), float(d.qpos[1])        # course-hold rail anchor(직진 시 cross-track 고정점)
     xtgt, ytgt = float(d.qpos[0]), float(d.qpos[1])    # 2D 전진 가상타깃
     for s in range(nsteps):
         if hud and not hud.running():
             break
         i = s % cyc
-        # 명령 결정: 명령원 있으면 운영자/외부 teleop, 없으면 헤드리스 자동 직선유지
+        rx, ry = d.qpos[0], d.qpos[1]
+        # 명령 결정: 명령원=운영자/외부 teleop(+직진 course-hold), 없으면 헤드리스 자동 직선유지
         if active_cmd is not None:
             v_cmd, w_cmd = active_cmd.read()
-            yaw_ref += w_cmd * dt                       # 선회(heading 적분)
+            yaw_ref += w_cmd * dt                       # 운영자 선회(heading 적분)
+            if abs(w_cmd) > 1e-6:                        # 선회 중엔 rail 리셋(course-hold 간섭 X)
+                ax, ay = rx, ry
+            cross = -np.sin(yaw_ref) * (rx - ax) + np.cos(yaw_ref) * (ry - ay)   # heading 수직 드리프트
+            yaw_use = yaw_ref + float(np.clip(-K_LAT * cross, -YAW_MAX, YAW_MAX))  # 직진 course-hold(crab 제거)
         else:
             v_cmd = V
             y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
-            yaw_ref = float(np.clip(-K_LAT * y - K_LATD * vy, -YAW_MAX, YAW_MAX))  # 자동 직선유지
-        # 2D 전진 carrot(yaw_ref 방향) + lag 포화(전진력 일정·runaway 방지)
-        xtgt += v_cmd * np.cos(yaw_ref) * dt
-        ytgt += v_cmd * np.sin(yaw_ref) * dt
-        rx, ry = d.qpos[0], d.qpos[1]
+            yaw_ref = yaw_use = float(np.clip(-K_LAT * y - K_LATD * vy, -YAW_MAX, YAW_MAX))  # 자동 직선유지
+        # 2D 전진 carrot(yaw_use 방향) + lag 포화(전진력 일정·runaway 방지)
+        xtgt += v_cmd * np.cos(yaw_use) * dt
+        ytgt += v_cmd * np.sin(yaw_use) * dt
         dx, dy = xtgt - rx, ytgt - ry
         dist = float(np.hypot(dx, dy))
         lead = max(MAXLAG, min(abs(v_cmd) * LOOK_T, LEAD_MAX))
         if dist > lead and dist > 1e-9:
             xtgt = rx + dx / dist * lead; ytgt = ry + dy / dist * lead
         target = cyc_xs[i].copy()
-        _se2_reanchor([target], 0, xtgt, ytgt, yaw_ref)
+        _se2_reanchor([target], 0, xtgt, ytgt, yaw_use)
         if hud: hud.pre_step()
         for _ in range(sub):
             x = mj_to_pin(d)
@@ -499,7 +513,13 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
         if hud:
             mk = _footstep_markers(P, V, T, sf, s * dt, d.qpos[0], d.qpos[1],
                                    _yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
-            hud.post_step(mk)
+            # 조작 방향 화살표(로봇 위): 명령 heading yaw_ref 방향, 길이 ∝ |v_cmd|
+            zc = d.qpos[2] + 0.18
+            ln = 0.15 + 0.5 * abs(v_cmd)
+            sgn = 1.0 if v_cmd >= 0 else -1.0
+            frm = np.array([d.qpos[0], d.qpos[1], zc])
+            to = frm + sgn * ln * np.array([np.cos(yaw_ref), np.sin(yaw_ref), 0.0])
+            hud.post_step(mk, arrow=(frm, to))
         xx, yy = d.qpos[4], d.qpos[5]
         tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
         if os.environ.get('TRACE') and s % 25 == 0:
