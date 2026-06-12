@@ -449,12 +449,21 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     r = sol.results
     xs = [np.array(x) for x in r.xs]; us = [np.array(u) for u in r.us]
     Ks = [-np.array(k) for k in r.controlFeedbacks()]
-    b = settle_steps + (n_warm - 1) * cyc          # 마지막(정상상태) 사이클 시작
-    cyc_xs = [xs[b + i].copy() for i in range(cyc)]
-    cyc_us = [us[b + i].copy() for i in range(cyc)]
-    cyc_Ks = [Ks[b + i].copy() for i in range(cyc)]
-    print('계획 conv=%s iters=%d → 정상사이클 추출(b=%d,cyc=%d) → 무한루프 추종' % (
-        r.conv, r.num_iters, b, cyc))
+    if int(os.environ.get('PERIODIC', '0')):       # [실험] 하드 주기성 — pinocchio 수렴하나 MuJoCo 추종 깨짐(1s 전복)
+        # ★ 주기적 사이클: 중간(대칭) 사이클 phase-0 을 시작점으로 주기성 하드제약
+        #   x(cyc)=shift(x0)[base x만 +V·T] 로 단일사이클 재최적화 → 대칭+주기 둘 다 만족(쏠림·limp 제거).
+        b_mid = settle_steps + (n_warm // 2) * cyc
+        x_start = xs[b_mid].copy()
+        cyc_xs, cyc_us, cyc_Ks, pconv = _solve_periodic_cycle(
+            P, x_start, V, T, sf, step_h, dt, cyc, maxiter)
+        print('계획 conv=%s → 주기사이클 재최적화 conv=%s(cyc=%d) → 무한루프 추종' % (r.conv, pconv, cyc))
+    else:
+        ec = int(os.environ.get('EXTRACT_CYC', str(n_warm - 1)))
+        b = settle_steps + max(1, min(ec, n_warm - 1)) * cyc
+        cyc_xs = [xs[b + i].copy() for i in range(cyc)]
+        cyc_us = [us[b + i].copy() for i in range(cyc)]
+        cyc_Ks = [Ks[b + i].copy() for i in range(cyc)]
+        print('계획 conv=%s → 사이클 추출(b=%d,cyc=%d) → 무한루프 추종' % (r.conv, b, cyc))
     # ── MuJoCo 무한루프 추종 ──
     _a = sys.argv; sys.argv = [_a[0]]
     try:
@@ -654,6 +663,30 @@ def _swing_turn(tg, T, sf, step_h, P, px, py, pyaw, v):
         else:
             stance.append(L)
     return stance, swing
+
+
+def _solve_periodic_cycle(P, x_start, V, T, sf, step_h, dt, cyc, maxiter=100):
+    """중간(대칭) 사이클 phase-0 x_start 에서 단일 주기를 재최적화하되 **주기성 하드제약**
+       x(cyc) = shift(x_start)[base x,y 만 한 사이클 전진, 나머지(높이·자세·관절·전 속도) 동일] 부과.
+       → 대칭(중간사이클 유래) + 주기(loop 이음매 없음) 둘 다 만족 → 측방 쏠림·RL limp 제거."""
+    px0, py0, pyaw0 = x_start[0], x_start[1], _yaw_xyzw(x_start[3:7])
+    px, py, pyaw = px0, py0, pyaw0
+    stages = []
+    for k in range(cyc):
+        xr = _xref_pose(P, px, py, pyaw, V, 0.0)
+        st, sw = _swing_turn(k * dt, T, sf, step_h, P, px, py, pyaw, V)
+        stages.append(P.stage(st, xr, dt, swing=sw))
+        px += V * np.cos(pyaw) * dt; py += V * np.sin(pyaw) * dt
+    prob = aligator.TrajOptProblem(x_start, stages, P.terminal_cost(_xref_pose(P, px, py, pyaw, V, 0.0)))
+    x_tgt = x_start.copy()                              # 주기성 목표: base x,y 만 +V·T 전진
+    x_tgt[0] = px0 + V * T * np.cos(pyaw0); x_tgt[1] = py0 + V * T * np.sin(pyaw0)
+    res = aligator.StateErrorResidual(P.space, P.nu, x_tgt)
+    prob.addTerminalConstraint(res, acon.EqualityConstraintSet())
+    sol = _solver_opts(aligator.SolverProxDDP(1e-4, 1e-7, max_iters=maxiter))
+    sol.setup(prob); sol.run(prob, [x_start] * (cyc + 1), [np.zeros(P.nu)] * cyc)
+    rr = sol.results
+    return ([np.array(x) for x in rr.xs], [np.array(u) for u in rr.us],
+            [-np.array(k) for k in rr.controlFeedbacks()], rr.conv)
 
 
 def walk_replan(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
