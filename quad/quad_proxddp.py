@@ -280,6 +280,7 @@ class CommandSource:
     """전진 v[m/s] + 선회 w[rad/s] 명령. read()→(v,w). 하위클래스가 소스별 구현."""
     def __init__(self, v0=0.0, vmax=0.5, wmax=0.25):
         self.v, self.w, self.vmax, self.wmax = v0, 0.0, vmax, wmax
+        self.vy = 0.0          # 측방(strafe) 선속도[m/s] — 전방향 조작용(기본 0)
 
     def read(self):
         return self.v, self.w
@@ -322,6 +323,7 @@ class JsonCmd(CommandSource):
                 d = json.load(f)
             self.v = float(np.clip(d.get('v', self.v), -self.vmax, self.vmax))
             self.w = float(np.clip(d.get('w', self.w), -self.wmax, self.wmax))
+            self.vy = float(np.clip(d.get('vy', self.vy), -self.vmax, self.vmax))
         except Exception:
             pass
         return self.v, self.w
@@ -494,12 +496,14 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
             v_cmd = V
             y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
             yaw_ref = yaw_use = float(np.clip(-K_LAT * y - K_LATD * vy, -YAW_MAX, YAW_MAX))  # 자동 직선유지
-        # 2D 전진 carrot(yaw_use 방향) + lag 포화(전진력 일정·runaway 방지)
-        xtgt += v_cmd * np.cos(yaw_use) * dt
-        ytgt += v_cmd * np.sin(yaw_use) * dt
+        # 2D carrot: body-frame [v_cmd 전진, vy_cmd 측방] → world(yaw_use 회전) + lag 포화
+        vy_cmd = getattr(active_cmd, 'vy', 0.0) if active_cmd is not None else 0.0
+        cu, su = np.cos(yaw_use), np.sin(yaw_use)
+        xtgt += (v_cmd * cu - vy_cmd * su) * dt
+        ytgt += (v_cmd * su + vy_cmd * cu) * dt
         dx, dy = xtgt - rx, ytgt - ry
         dist = float(np.hypot(dx, dy))
-        lead = max(MAXLAG, min(abs(v_cmd) * LOOK_T, LEAD_MAX))
+        lead = max(MAXLAG, min(np.hypot(v_cmd, vy_cmd) * LOOK_T, LEAD_MAX))
         if dist > lead and dist > 1e-9:
             xtgt = rx + dx / dist * lead; ytgt = ry + dy / dist * lead
         target = cyc_xs[i].copy()
@@ -742,6 +746,110 @@ def walk_replan(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
         total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
 
 
+def walk_rti(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
+             horizon_cycles=2, total_T=30.0, dt=0.02, warm_iters=20,
+             view=False, exec_robot=None, cmd_source=None):
+    """★ RTI(Real-Time Iteration) 연속보행: 영속 솔버 + 매 제어틱 뉴턴 1스텝만 + 호라이즌 1칸 shift.
+       이산 재계획(walk_replan)의 transient·무한루프 seam 을 동시 해결 — 궤적이 연속 진화(이음매 없음).
+       구조: prob.x0_init(현재상태) → sol.run(1 iter, warm) → us[0] 적용 → replaceStageCircular+cycleProblem.
+       명령(v,w)은 호라이즌 끝 새 stage 의 기준 pose 에 반영(선회). aligator cycleProblem MPC 패턴."""
+    import sys, time, mujoco
+    exec_robot = exec_robot or robot
+    P = ProxModel(robot)
+    Hn = round(horizon_cycles * T / dt)
+    _a = sys.argv; sys.argv = [_a[0]]
+    try:
+        import quad_sim; quad_sim._ROBOT = exec_robot; q = quad_sim.QuadSim(); q.crouch_home()
+    finally:
+        sys.argv = _a
+    m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
+    sub = max(1, round(dt / m.opt.timestep))
+    K_LAT = float(os.environ.get('K_LAT', '1.0')); K_LATD = float(os.environ.get('K_LATD', '0.3'))
+
+    def mk_stage(tg, px, py, pyaw, v, w):
+        xr = _xref_pose(P, px, py, pyaw, v, w)
+        if tg < 0:
+            return P.stage(P.legs, xr, dt)
+        st, sw = _swing_turn(tg, T, sf, step_h, P, px, py, pyaw, v)
+        return P.stage(st, xr, dt, swing=sw)
+
+    # ── 초기 호라이즌 구성(현재 pose 기준 직진) + cold 워밍업 solve ──
+    x0 = mj_to_pin(d)
+    px, py, pyaw = x0[0], x0[1], _yaw_xyzw(x0[3:7])
+    gait_t = -settle; stages = []
+    for k in range(Hn):
+        stages.append(mk_stage(gait_t + k * dt, px, py, pyaw, V, 0.0))
+        px += V * np.cos(pyaw) * dt; py += V * np.sin(pyaw) * dt
+    end_px, end_py, end_pyaw = px, py, pyaw
+    end_t = gait_t + Hn * dt
+    prob = aligator.TrajOptProblem(x0, stages, P.terminal_cost(_xref_pose(P, px, py, pyaw, V, 0.0)))
+    sol = _solver_opts(aligator.SolverProxDDP(1e-3, 1e-6, max_iters=warm_iters))
+    sol.setup(prob); sol.run(prob, [x0] * (Hn + 1), [np.zeros(P.nu)] * Hn)
+    rti_iters = int(os.environ.get('RTI_ITERS', '1'))   # 틱당 뉴턴스텝(1=정통 RTI, 2~5=완화)
+    print('RTI 워밍업 conv=%s iters=%d → 매 틱 %d스텝 RTI 시작' % (
+        sol.results.conv, sol.results.num_iters, rti_iters))
+    sol.max_iters = rti_iters                           # ← RTI: 이후 매 틱 소수 뉴턴스텝
+
+    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V) if view else None
+    active_cmd = hud.cmd if hud else cmd_source
+    y_prev = 0.0; ax_, ay_ = float(d.qpos[0]), float(d.qpos[1])
+    tmax = 0.0; t0 = time.time(); nps = int(total_T / dt)
+    for ps in range(nps):
+        if hud and not hud.running():
+            break
+        # 명령(운영자/외부 teleop + 직진 course-hold, 또는 헤드리스 자동직선)
+        rx, ry = d.qpos[0], d.qpos[1]
+        if active_cmd is not None:
+            v_cmd, w_cmd = active_cmd.read()
+            if abs(w_cmd) > 1e-6:
+                ax_, ay_ = rx, ry
+            cross = -np.sin(end_pyaw) * (rx - ax_) + np.cos(end_pyaw) * (ry - ay_)
+            w_eff = w_cmd + float(np.clip(-K_LAT * cross, -0.25, 0.25)) if abs(w_cmd) < 1e-6 else w_cmd
+        else:
+            v_cmd = V
+            y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
+            w_eff = float(np.clip(-K_LAT * y - K_LATD * vy, -0.25, 0.25))
+        # ── RTI: 현재상태로 x0 갱신 → 뉴턴스텝 → us[0] 적용 ──
+        # cycleProblem 이 results 를 내부 shift → 그대로 warm-start 전달(수동 shift 금지=이중shift)
+        prob.x0_init = mj_to_pin(d)
+        sol.run(prob, list(sol.results.xs), list(sol.results.us))
+        u0 = np.array(sol.results.us[0]); xs0 = np.array(sol.results.xs[0])
+        K0 = -np.array(sol.results.controlFeedbacks()[0])
+        if hud: hud.pre_step()
+        for _ in range(sub):
+            x = mj_to_pin(d)
+            u = u0 - K0 @ P.space.difference(xs0, x)
+            umj = np.zeros(P.nu); umj[pin2mj] = u
+            d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
+        # ── 호라이즌 1칸 전진: 새 terminal stage(끝 pose 를 명령 twist 로 적분) ──
+        gait_t += dt; end_t += dt
+        end_px += v_cmd * np.cos(end_pyaw) * dt; end_py += v_cmd * np.sin(end_pyaw) * dt
+        end_pyaw += w_eff * dt
+        ns = mk_stage(end_t, end_px, end_py, end_pyaw, v_cmd, w_eff)
+        prob.replaceStageCircular(ns)
+        sol.cycleProblem(prob, ns.createData())
+        xx, yy = d.qpos[4], d.qpos[5]
+        tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
+        if hud:
+            byaw = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])
+            mk = _footstep_markers(P, v_cmd, T, sf, gait_t, d.qpos[0], d.qpos[1], byaw)
+            zc = d.qpos[2] + 0.18; ln = 0.15 + 0.5 * abs(v_cmd); sg = 1.0 if v_cmd >= 0 else -1.0
+            frm = np.array([d.qpos[0], d.qpos[1], zc])
+            to = frm + sg * ln * np.array([np.cos(byaw), np.sin(byaw), 0.0])
+            hud.post_step(mk, arrow=(frm, to))
+        if os.environ.get('TRACE') and ps % 25 == 0:
+            print('  t=%.1f tilt=%4.1f x=%.2f y=%+.3f z=%.3f' % (
+                ps * dt, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))),
+                d.qpos[0], d.qpos[1], d.qpos[2]), flush=True)
+        if d.qpos[2] < 0.15:
+            print('  RTI ❌ 전복 @%.2fs (x=%.2f, 벽시계%.0fs)' % (ps * dt, d.qpos[0], time.time() - t0))
+            if hud: hud.close()
+            return
+    if hud: hud.close()
+    print('  RTI ✅ %.1fs 완주 base_z=%.3f tilt_max=%.0f° 전진=%.2fm(평균%.2fm/s) 벽시계%.0fs' % (
+        total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
+
+
 def mpc_loop(N=20, dt=0.02, T=0.5, sf=0.5, step_h=0.06, V=0.0, settle=0.6, robot="ours",
              maxiter=8, sim_T=4.0, view=True):
     """네이티브 ProxDDP receding-horizon closed-loop (hard constraint). MuJoCo 물리."""
@@ -837,7 +945,8 @@ if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
     # track = 작동하는 표준경로(one-shot 안정계획 + DDP 추종). mpc = 폐기된 매스텝 재계획.
-    ap.add_argument('--test', default='track', choices=['stand', 'track', 'walk', 'loop', 'replan', 'mpc'])
+    ap.add_argument('--test', default='track',
+                    choices=['stand', 'track', 'walk', 'loop', 'replan', 'rti', 'mpc'])
     ap.add_argument('--total-T', type=float, default=30.0)
     ap.add_argument('--robot', default='go2', choices=['ours', 'go2', 'ours_sphere'])
     ap.add_argument('--vel', type=float, default=0.0)
@@ -863,10 +972,14 @@ if __name__ == '__main__':
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_loop(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
                   view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
-    elif a.test == 'replan':                      # ★ 재계획 연속보행 + 조작기(track 수준 매끄러움+선회)
+    elif a.test == 'replan':                      # [실험·불안정] 주기 완전수렴 재계획
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_replan(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
                     view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
+    elif a.test == 'rti':                         # ★ RTI 연속보행 + 조작기(매 틱 1스텝, seam·transient 해결)
+        cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
+        walk_rti(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
+                 view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
     elif a.test == 'walk':
         walk_continuous(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h,
                         view=not a.noview, exec_robot=a.exec_robot)
