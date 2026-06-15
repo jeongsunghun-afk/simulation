@@ -71,14 +71,17 @@ class NMPCModel:
                           for L in self.legs}
 
     def _add_foot_frames_ours(self):
-        """02_Leg: foot_contact_link 메시 sole 최저점에 {L}_foot 프레임 추가."""
+        """02_Leg: 실제 접촉점(sphere 바닥 = foot_contact_link서 70mm 아래)에 {L}_foot 프레임.
+        과거 mesh 최저정점(-54.5mm)은 실측 70mm와 불일치 → exec sphere 접촉에 정렬(planner↔exec 일관)."""
         import sys
         _a = sys.argv; sys.argv = [_a[0]]
         try:
             import quad_sim
-            quad_sim._ROBOT = 'ours'
+            quad_sim._ROBOT = 'ours_sphere'
             q = quad_sim.QuadSim()
-            sole_off = {L: q.sole_off[i].copy() for i, L in enumerate(q.legs)}
+            sole_off = {L: q.m.geom_pos[q.foot_gid[i]].copy()
+                        - np.array([0.0, 0.0, q.foot_r[i]])
+                        for i, L in enumerate(q.legs)}
         finally:
             sys.argv = _a
         for L in self.legs:
@@ -100,7 +103,8 @@ class NMPCModel:
         _a = sys.argv; sys.argv = [_a[0]]
         try:
             import quad_sim, mujoco
-            quad_sim._ROBOT = self.robot
+            # 02_Leg는 실제 접촉모델(sphere, 70mm)에서 nominal 자세 도출 → planner↔exec 일관
+            quad_sim._ROBOT = 'ours_sphere' if self.robot == 'ours' else self.robot
             q = quad_sim.QuadSim(); q.crouch_home(); mujoco.mj_forward(q.m, q.d)
             mq = q.d.qpos.copy()
             mleg = {L: list(q.legqp[i]) for i, L in enumerate(q.legs)}

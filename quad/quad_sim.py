@@ -37,11 +37,11 @@ ROBOTS = {
     'ours': dict(mjcf=os.path.join(_HERE, 'quad_real.mjcf'),
                  legs=['HL', 'HR', 'FL', 'FR'], dof=4,
                  foot_body='{L}_foot_contact_link', hip_body='{L}_hip_link',
-                 foot_kind='mesh', base_z0=0.42, mu=0.6),
+                 foot_kind='mesh', base_z0=0.42, foot_z0=0.02, mu=0.6),
     'go2':  dict(mjcf=os.path.join(_HERE, '..', 'mujoco_menagerie', 'unitree_go2', 'scene.xml'),
                  legs=['FL', 'FR', 'RL', 'RR'], dof=3,
                  foot_geom='{L}', hip_body='{L}_hip',
-                 foot_kind='sphere', base_z0=0.30, mu=0.6),
+                 foot_kind='sphere', base_z0=0.30, foot_z0=0.02, mu=0.6),
     # 02_Leg 발을 sphere 충돌로 교체(발목 자세 무관 점접촉) — box 모서리 rocking 회피 검증용
     'ours_sphere': dict(mjcf=os.path.join(_HERE, 'quad_real_sphere.mjcf'),
                         legs=['HL', 'HR', 'FL', 'FR'], dof=4,
@@ -58,6 +58,7 @@ class QuadSim:
         self.cfg = cfg
         self.legs = cfg['legs']; self.dof = cfg['dof']
         self.foot_kind = cfg['foot_kind']; self.base_z0 = cfg['base_z0']
+        self.foot_z0 = cfg.get('foot_z0', 0.0)   # nominal 자세 발바닥 목표 z(접지=0). 과거 0.02→20mm 부양 버그
         global MU; MU = cfg['mu']
         self.m = mujoco.MjModel.from_xml_path(mjcf or cfg['mjcf'])
         if _NOLIMIT:
@@ -160,7 +161,7 @@ class QuadSim:
         for _ in range(300):
             mujoco.mj_kinematics(m, d); mujoco.mj_comPos(m, d)
             for i in range(4):
-                tgt = np.array([foot_xy[i][0], foot_xy[i][1], 0.02])
+                tgt = np.array([foot_xy[i][0], foot_xy[i][1], self.foot_z0])
                 e = tgt - self.foot_point(i)
                 J = self.foot_jac(i)[:, self.legqv[i]]
                 d.qpos[self.legqp[i]] += 0.5 * (J.T @ np.linalg.solve(

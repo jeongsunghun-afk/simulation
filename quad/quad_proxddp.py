@@ -290,8 +290,8 @@ class CommandSource:
 
 
 class KeyboardCmd(CommandSource):
-    """MuJoCo 뷰어 키보드(화살표만 — WASD 는 뷰어 내장키와 충돌해 미사용):
-       ↑/↓=전진±, ←/→=선회±, X=정지. 화살표 GLFW 코드(↑265 ↓264 ←263 →262)."""
+    """MuJoCo 뷰어 키보드: ↑/↓=전진±, ←/→=측방(strafe)±, ,/.=선회(yaw)±, X=정지.
+       화살표 GLFW(↑265 ↓264 ←263 →262), ','=44 '.'=46."""
     UP, DOWN, LEFT, RIGHT = 265, 264, 263, 262
     def key(self, kc):
         if kc == self.UP:
@@ -299,14 +299,18 @@ class KeyboardCmd(CommandSource):
         elif kc == self.DOWN:
             self.v = max(-self.vmax, self.v - 0.05)
         elif kc == self.LEFT:
-            self.w = min(self.wmax, self.w + 0.1)
+            self.vy = min(self.vmax, self.vy + 0.05)        # 좌 측방(+y)
         elif kc == self.RIGHT:
-            self.w = max(-self.wmax, self.w - 0.1)
+            self.vy = max(-self.vmax, self.vy - 0.05)       # 우 측방(−y)
+        elif kc == ord(','):
+            self.w = min(self.wmax, self.w + 0.05)          # 좌 선회(+yaw)
+        elif kc == ord('.'):
+            self.w = max(-self.wmax, self.w - 0.05)         # 우 선회(−yaw)
         elif kc == ord('X'):
-            self.v = self.w = 0.0
+            self.v = self.vy = self.w = 0.0
         else:
             return False
-        print('[조작기] v_cmd=%+.2f m/s  w_cmd=%+.2f rad/s' % (self.v, self.w))
+        print('[조작기] v=%+.2f vy=%+.2f w=%+.2f' % (self.v, self.vy, self.w))
         return True
 
 
@@ -343,19 +347,31 @@ class _HUD:
     """ProxDDP 뷰어 공통 HUD: 좌상단 sim time, 우상단 외력 N, 하단 조작기 명령,
        [/] 재생속도, Ctrl+드래그 외력, 다음 footstep 빨간점. 명령은 CommandSource(cmd) 위임."""
 
-    def __init__(self, m, d, sub=1, cmd=None, v0=0.0, vmax=0.5, wmax=0.25):
+    def __init__(self, m, d, sub=1, cmd=None, v0=0.0, vmax=0.5, wmax=0.25, foot_gids=None):
         import mujoco.viewer as mjv
         self.m, self.d, self.speed, self.sub = m, d, 1.0, sub
         self.cmd = cmd if cmd is not None else KeyboardCmd(v0, vmax, wmax)  # 조작기 명령원
+        self.foot_gids = list(foot_gids) if foot_gids is not None else []   # 발 접촉(빨강 sphere) geom
+        self._foot_rgba0 = {g: m.geom_rgba[g].copy() for g in self.foot_gids}
+        self.show_contact = True
         self.v = mjv.launch_passive(m, d, key_callback=self._key)
         self.v.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = 1     # 외력 박스 표시
-        print('조작기: ↑/↓=전진±  ←/→=선회±  X=정지 | [/]=재생속도  Ctrl+드래그=외력  창닫기=종료')
+        print('조작기: ↑/↓=전진±  ←/→=측방strafe±  ,/.=선회yaw±  X=정지 | [/]=재생속도  C=접촉점표시  Ctrl+드래그=외력')
+
+    def _toggle_contact(self):
+        self.show_contact = not self.show_contact
+        for g in self.foot_gids:                 # alpha 0=숨김 / 원래색 복원
+            self.m.geom_rgba[g] = self._foot_rgba0[g] if self.show_contact \
+                else np.array([*self._foot_rgba0[g][:3], 0.0], np.float32)
+        print('[viewer] 접촉점(빨강) %s' % ('표시' if self.show_contact else '숨김'))
 
     def _key(self, kc):
         if kc == ord(']'):
             self.speed = min(16.0, self.speed * 2); print('[viewer] 재생속도 x%.3g' % self.speed)
         elif kc == ord('['):
             self.speed = max(1.0 / 16, self.speed / 2); print('[viewer] 재생속도 x%.3g' % self.speed)
+        elif kc in (ord('c'), ord('C')):
+            self._toggle_contact()
         else:
             self.cmd.key(kc)                    # 조작기 키는 CommandSource 에 위임
 
@@ -395,7 +411,7 @@ class _HUD:
             (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPRIGHT,
              'ext force', '%.0f N' % fext),
             (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
-             'cmd  v / w', '%+.2f m/s  %+.2f rad/s' % (self.cmd.v, self.cmd.w))])
+             'cmd v/vy/w', '%+.2f  %+.2f  %+.2f' % (self.cmd.v, getattr(self.cmd, 'vy', 0.0), self.cmd.w))])
         v.sync()
         slp = m.opt.timestep * self.sub / self.speed                  # 제어스텝당 1회 호출 기준
         if slp > 0:
@@ -482,7 +498,7 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     MAXLAG = float(os.environ.get('MAXLAG', '0.06'))   # 후방 lag 포화(m) → 위치유지·runaway 방지
     LOOK_T = float(os.environ.get('LOOK_T', '0.4'))    # 전방 carrot 룩어헤드(s) → push 속도비례
     LEAD_MAX = float(os.environ.get('LEAD_MAX', '0.1'))  # 전방 carrot 상한(m) → 고속 과push 방지
-    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V) if view else None
+    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V, foot_gids=q.foot_gid) if view else None
     active_cmd = hud.cmd if hud else cmd_source        # 활성 명령원(뷰어 키보드 / 외부 cmd_source)
     y_prev = 0.0
     yaw_ref = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])          # 명령 heading(운영자 선회 / 자동 조향)
@@ -547,6 +563,69 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     if hud: hud.close()
     print('  무한루프 ✅ %.1fs 완주 base_z=%.3f tilt_max=%.0f° 전진=%.2fm(평균%.2fm/s) 벽시계%.0fs' % (
         total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
+
+
+def stand_hold(robot='go2', total_T=30.0, dt=0.02, N=24, maxiter=100,
+               view=False, exec_robot=None):
+    """★ 정지 버티기: 전 다리 stance NMPC(보행 없음) + DDP게인으로 nominal 자세(x0) 둘레 능동 균형.
+       loop와 같은 컨트롤러(u=u0−K0·δx)지만 gait·전진명령 없이 제자리 유지 → 외력에 버팀(Ctrl+드래그).
+       re-anchor 안 함 = 절대 위치 station-keeping(밀리면 원위치로 복귀)."""
+    exec_robot = exec_robot or robot
+    import sys, time, mujoco
+    P = ProxModel(robot)
+    x_hold = P.x0.copy()
+    # 전 다리 stance N-스테이지 → x_hold(nominal 자세) 유지 계획(보행 스케줄 없음)
+    stages = [P.stage(P.legs, x_hold, dt) for _ in range(N)]
+    prob = aligator.TrajOptProblem(x_hold, stages, P.terminal_cost(x_hold))
+    sol = aligator.SolverProxDDP(1e-5, 1e-8, max_iters=maxiter)
+    sol.setup(prob); sol.run(prob, [x_hold] * (N + 1), [np.zeros(P.nu)] * N)
+    r = sol.results
+    u0 = np.array(r.us[0]); K0 = -np.array(r.controlFeedbacks()[0])   # 첫 스테이지 정적평형 토크+게인
+    print('정지계획 conv=%s iters=%d base_z=%.3f → MuJoCo 버티기(보행X)' % (
+        r.conv, r.num_iters, x_hold[2]))
+    # ── MuJoCo 실행(제자리 유지) ──
+    _a = sys.argv; sys.argv = [_a[0]]
+    try:
+        import quad_sim; quad_sim._ROBOT = exec_robot; q = quad_sim.QuadSim(); q.crouch_home()
+    finally:
+        sys.argv = _a
+    m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
+    sub = max(1, round(dt / m.opt.timestep)); tmax = 0.0
+    nsteps = int(total_T / dt); t0 = time.time()
+    yaw0 = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])                         # 초기 heading 유지
+    hud = _HUD(m, d, sub, foot_gids=q.foot_gid) if view else None
+    for s in range(nsteps):
+        if hud and not hud.running():
+            break
+        if hud: hud.pre_step()
+        # 매스텝 SE(2) re-anchor: base x,y는 현재위치로(수평 자유=미구동 위치복귀 안함),
+        # yaw는 초기 heading 으로 → 높이·자세·관절·속도만 추종(loop와 동일 구조, gait만 없음).
+        target = x_hold.copy()
+        _se2_reanchor([target], 0, d.qpos[0], d.qpos[1], yaw0)
+        for _ in range(sub):
+            x = mj_to_pin(d)
+            u = u0 - K0 @ P.space.difference(target, x)            # 상대(높이·자세·관절) 균형
+            umj = np.zeros(P.nu); umj[pin2mj] = u
+            d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
+        if hud: hud.post_step()
+        xx, yy = d.qpos[4], d.qpos[5]
+        tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
+        if os.environ.get('TRACE') and s % 10 == 0:
+            rpy = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])
+            print('  t=%.2f z=%.3f roll=%+.1f pit=%+.1f x=%+.3f y=%+.3f' % (
+                s * dt, d.qpos[2],
+                np.degrees(np.arctan2(2 * (d.qpos[3] * d.qpos[4] + d.qpos[5] * d.qpos[6]),
+                                      1 - 2 * (xx * xx + d.qpos[5] ** 2))),
+                np.degrees(np.arcsin(np.clip(2 * (d.qpos[3] * d.qpos[5] - d.qpos[6] * d.qpos[4]), -1, 1))),
+                d.qpos[0], d.qpos[1]), flush=True)
+        if d.qpos[2] < 0.15 or tmax > 45:
+            print('  정지 ❌ 전복 @%.2fs (tilt=%.0f° z=%.3f, 벽시계%.0fs)' % (
+                s * dt, tmax, d.qpos[2], time.time() - t0))
+            if hud: hud.close()
+            return
+    if hud: hud.close()
+    print('  정지 ✅ %.1fs 버팀 base_z=%.3f tilt_max=%.0f° 드리프트=%.3fm 벽시계%.0fs' % (
+        total_T, d.qpos[2], tmax, float(np.hypot(d.qpos[0], d.qpos[1])), time.time() - t0))
 
 
 def _solver_opts(sol):
@@ -734,7 +813,7 @@ def walk_replan(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
 
     gait_t = -settle
     xs, us, Ks = plan(gait_t, mj_to_pin(d), V, 0.0); pidx = 0
-    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V) if view else None
+    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V, foot_gids=q.foot_gid) if view else None
     active_cmd = hud.cmd if hud else cmd_source
     y_prev = 0.0; tmax = 0.0; t0 = time.time(); nps = int(total_T / dt)
     for ps in range(nps):
@@ -823,7 +902,7 @@ def walk_rti(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
         sol.results.conv, sol.results.num_iters, rti_iters))
     sol.max_iters = rti_iters                           # ← RTI: 이후 매 틱 소수 뉴턴스텝
 
-    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V) if view else None
+    hud = _HUD(m, d, sub, cmd=cmd_source, v0=V, foot_gids=q.foot_gid) if view else None
     active_cmd = hud.cmd if hud else cmd_source
     y_prev = 0.0; ax_, ay_ = float(d.qpos[0]), float(d.qpos[1])
     tmax = 0.0; t0 = time.time(); nps = int(total_T / dt)
@@ -979,7 +1058,7 @@ if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     # track = 작동하는 표준경로(one-shot 안정계획 + DDP 추종). mpc = 폐기된 매스텝 재계획.
     ap.add_argument('--test', default='track',
-                    choices=['stand', 'track', 'walk', 'loop', 'replan', 'rti', 'mpc'])
+                    choices=['stand', 'hold', 'track', 'walk', 'loop', 'replan', 'rti', 'mpc'])
     ap.add_argument('--total-T', type=float, default=30.0)
     ap.add_argument('--robot', default='go2', choices=['ours', 'go2', 'ours_sphere'])
     ap.add_argument('--vel', type=float, default=0.0)
@@ -996,6 +1075,9 @@ if __name__ == '__main__':
     os.environ.setdefault('DISPLAY', ':0')
     if a.test == 'stand':
         solve_standing(robot=a.robot)
+    elif a.test == 'hold':                         # ★ 정지 버티기(보행X, 뷰어서 외력 버팀)
+        stand_hold(robot=a.robot, total_T=a.total_T, view=not a.noview,
+                   exec_robot=a.exec_robot)
     elif a.test == 'track':                       # ★ 권장 경로
         track_oneshot(robot=a.robot, V=a.vel, n_cycle=a.cycles, T=a.gait_T,
                       step_h=a.step_h, view=not a.noview, exec_robot=a.exec_robot,
