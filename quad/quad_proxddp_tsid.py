@@ -19,6 +19,97 @@ import quad_nmpc as QN
 TAU_LIM = 80.0
 
 
+# ══════════════════════════════════════════════════════════════════════
+# sim2real 하드웨어 추상화 (RobotInterface)
+#   컨트롤러(NMPC+TSID)는 read_state()→x, apply_torque(tau) 두 함수만 본다.
+#   시뮬=MujocoInterface / 실로봇=RealRobotInterface 로 교체해도 컨트롤러 코드 불변.
+#   (CommandSource 가 '명령'의 seam 이라면, RobotInterface 는 '센서/액추에이터'의 seam.)
+# ══════════════════════════════════════════════════════════════════════
+class RobotInterface:
+    """배포 경계. 컨트롤러는 아래 추상 API만 사용 → sim↔실 무변경 교체.
+       nq/nv/nu = pinocchio 규약 차원(컨트롤러 모델 기준)."""
+    nq = nv = nu = 0
+
+    # ── 컨트롤러가 보는 상태/명령 (필수) ──
+    def read_state(self):
+        """전체 상태 x=[q_pin; v_pin] (pinocchio 규약). 실로봇=엔코더+IMU+추정."""
+        raise NotImplementedError
+
+    def apply_torque(self, tau_pin):
+        """구동관절 토크(pinocchio 순서) 적용 + 1 제어틱 진행(sim)/송신(실)."""
+        raise NotImplementedError
+
+    # ── re-anchor/낙상감지에 필요한 베이스 평면자세 (실로봇은 추정 필요) ──
+    def base_xy_yaw(self):
+        raise NotImplementedError
+
+    def base_height(self):
+        raise NotImplementedError
+
+    @property
+    def time(self):
+        raise NotImplementedError
+
+    # ── 센서 raw (상태추정 단계서 사용; 기본은 read_state가 내부 처리) ──
+    def read_imu(self):
+        """(quat[w,x,y,z], gyro[3] local) — 실로봇 IMU. sim은 ground-truth 합성."""
+        raise NotImplementedError
+
+    def read_joints(self):
+        """(q_joint[nu], v_joint[nu]) — 엔코더."""
+        raise NotImplementedError
+
+
+class MujocoInterface(RobotInterface):
+    """시뮬 구현 — QuadSim(MuJoCo) 래핑 + pinocchio 브리지. ground-truth 상태 제공.
+       (추후 read_state에 센서노이즈/지연을 주입하면 sim2real 강건성 단계로 확장)."""
+
+    def __init__(self, P, exec_robot, dt_sim=0.001):
+        self.P = P
+        self.q = _mujoco_setup(exec_robot)
+        self.m, self.d = self.q.m, self.q.d
+        self.m.opt.timestep = dt_sim
+        self.dt_sim = dt_sim
+        self.pin2mj, self._mj_to_pin = QN._bridge(P.M, self.q)
+        self.nq, self.nv, self.nu = P.nq, P.nv, P.nu
+
+    def read_state(self):
+        return self._mj_to_pin(self.d)
+
+    def apply_torque(self, tau_pin):
+        umj = np.zeros(self.nu)
+        umj[self.pin2mj] = tau_pin[:self.nu]
+        self.d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM)
+        mujoco.mj_step(self.m, self.d)
+
+    def base_xy_yaw(self):
+        d = self.d
+        return float(d.qpos[0]), float(d.qpos[1]), Q._yaw_xyzw(d.qpos[[4, 5, 6, 3]])
+
+    def base_height(self):
+        return float(self.d.qpos[2])
+
+    @property
+    def time(self):
+        return self.d.time
+
+    def read_imu(self):
+        return self.d.qpos[3:7].copy(), self.d.qvel[3:6].copy()   # quat wxyz, base gyro(local)
+
+    def read_joints(self):
+        return (self.d.qpos[7:7 + self.nu].copy(), self.d.qvel[6:6 + self.nu].copy())
+
+
+class RealRobotInterface(RobotInterface):
+    """실로봇(02_Leg) 자리표시 — ROS2 엔코더/IMU 구독 + 토크 송신 연결 지점.
+       sim2real 단계서 구현: read_state는 read_joints+read_imu+상태추정으로 조립,
+       apply_torque는 모터드라이버로 송신. base_xy_yaw는 추정기(odometry) 필요."""
+
+    def __init__(self, *a, **k):
+        raise NotImplementedError(
+            "실로봇 인터페이스 미구현 — ROS2 구독/송신 + 상태추정 연결 필요(sim2real 다음 단계)")
+
+
 class TSIDLayer:
     """우리 pinocchio 모델 위의 TSID 역동역학 QP. 발=ContactPoint, 자세·베이스 task.
        set_reference(q,v,a_ref, stance) → solve(q_meas,v_meas) → tau."""
@@ -395,19 +486,142 @@ def walk_rti_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
         total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
 
 
+def walk_teleop_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle_steps=15,
+                     n_warm=6, dt_nmpc=0.02, total_T=30.0, view=False, exec_robot=None,
+                     cmd_source=None):
+    """★ 구조2 무한 teleop 보행: NMPC 사이클 + TSID-ID 1kHz, RobotInterface 경유(sim2real seam).
+       Q._HUD/CommandSource/_se2_reanchor 재사용(구조1과 동일 조작). TSID 보행은 현재 ~5s 캡(인프라 우선)."""
+    import time
+    exec_robot = exec_robot or robot
+    P = Q.ProxModel(robot)
+    cyc = round(T / dt_nmpc)
+    cyc_xs, cyc_stance, cyc_acc, cyc_forces, conv = _solve_cycle(
+        P, V, T, sf, step_h, dt_nmpc, cyc, settle_steps, n_warm)
+    print('NMPC 사이클 conv=%s (cyc=%d) → TSID-ID teleop(RobotInterface 경유)' % (conv, cyc))
+    iface = MujocoInterface(P, exec_robot, dt_sim=0.001)
+    m, d = iface.m, iface.d
+    sub = round(dt_nmpc / iface.dt_sim)
+    tl = TSIDLayer(P, P.x0[:P.nq], iface.dt_sim)
+    hud = Q._HUD(m, d, sub, cmd=cmd_source, v0=V, foot_gids=iface.q.foot_gid) if view else None
+    active_cmd = hud.cmd if hud else cmd_source
+    # NOTE: struct1의 course-hold/carrot(2D 위치추종)은 TSID에 부적합(base x,y가 task-free).
+    #   teleop 헤딩(yaw)만 직접 반영 + 베이스를 현재 위치에 re-anchor(불연속 제거). v/vy는 표시·후속용.
+    rx, ry, yaw0 = iface.base_xy_yaw()
+    yaw_ref = yaw0
+    nouter = int(total_T / dt_nmpc); t0 = time.time(); tmax = 0.0
+    for outer in range(nouter):
+        if hud and not hud.running():
+            break
+        i = outer % cyc
+        rx, ry, _ = iface.base_xy_yaw()
+        if active_cmd is not None:
+            v_cmd, w_cmd = active_cmd.read()
+            yaw_ref += w_cmd * dt_nmpc                    # 운영자 선회(heading 적분)
+        else:
+            v_cmd, w_cmd = V, 0.0
+        vy_cmd = getattr(active_cmd, 'vy', 0.0) if active_cmd is not None else 0.0
+        turn = yaw_ref - yaw0
+        if abs(turn) > 1e-9:                 # 선회 중에만 heading 회전(플랜 자연 yaw + turn)
+            ref = cyc_xs[i].copy()
+            Q._se2_reanchor([ref], 0, rx, ry, Q._yaw_xyzw(ref[3:7]) + turn)
+        else:                               # 직진 = baseline 동일(절대 마칭 사이클 직접 → TSID 교란 없음)
+            ref = cyc_xs[i]
+        q_ref = ref[:P.nq]; v_ref = ref[P.nq:]
+        tl.set_contacts(cyc_stance[i]); tl.set_force_ref(cyc_forces[i])
+        tl.set_posture_ref(q_ref, v_ref, cyc_acc[i]); tl.set_base_ref(q_ref, v_ref); tl.set_com_ref(q_ref)
+        if hud:
+            hud.pre_step()
+        for s in range(sub):                             # 1kHz TSID-ID — RobotInterface 경유
+            x = iface.read_state()
+            tau = tl.solve(iface.time, x[:P.nq], x[P.nq:])
+            if tau is None:
+                tau = np.zeros(tl.na)
+            iface.apply_torque(tau)
+        if hud:
+            mk = Q._footstep_markers(P, v_cmd, T, sf, outer * dt_nmpc, d.qpos[0], d.qpos[1],
+                                     Q._yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
+            zc = d.qpos[2] + 0.18; ln = 0.15 + 0.5 * abs(v_cmd); sgn = 1.0 if v_cmd >= 0 else -1.0
+            frm = np.array([d.qpos[0], d.qpos[1], zc])
+            to = frm + sgn * ln * np.array([np.cos(yaw_ref), np.sin(yaw_ref), 0.0])
+            hud.post_step(mk, arrow=(frm, to))
+        xx, yy = d.qpos[4], d.qpos[5]
+        tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
+        if os.environ.get('TRACE') and outer % 25 == 0:
+            print('  t=%.2f base_z=%.3f x=%.2f y=%+.3f tilt=%.1f' % (
+                outer * dt_nmpc, d.qpos[2], d.qpos[0], d.qpos[1],
+                np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1)))), flush=True)
+        if iface.base_height() < 0.15:
+            print('  TSID teleop ❌ 전복 @%.2fs (x=%.2f)' % (outer * dt_nmpc, d.qpos[0]))
+            if hud: hud.close()
+            return
+    if hud: hud.close()
+    print('  TSID teleop ✅ %.1fs base_z=%.3f tilt_max=%.0f° 전진=%.2fm 벽시계%.0fs' % (
+        total_T, d.qpos[2], tmax, d.qpos[0], time.time() - t0))
+
+
+def hold_tsid(robot='go2', total_T=30.0, dt_nmpc=0.02, view=False, exec_robot=None):
+    """★ 정지 버티기(TSID standing) — RobotInterface 경유. 보행X, nominal 자세 유지(외력 버팀)."""
+    import time
+    exec_robot = exec_robot or robot
+    P = Q.ProxModel(robot)
+    iface = MujocoInterface(P, exec_robot, dt_sim=0.001)
+    m, d = iface.m, iface.d
+    sub = round(dt_nmpc / iface.dt_sim)
+    tl = TSIDLayer(P, P.x0[:P.nq], iface.dt_sim)
+    q0 = P.x0[:P.nq].copy()
+    tl.set_contacts(set(P.legs)); tl.set_posture_ref(q0); tl.set_base_ref(q0); tl.set_com_ref(q0)
+    print('TSID 정지 버티기(보행X) → RobotInterface 경유')
+    hud = Q._HUD(m, d, sub, foot_gids=iface.q.foot_gid) if view else None
+    nouter = int(total_T / dt_nmpc); t0 = time.time(); tmax = 0.0
+    for outer in range(nouter):
+        if hud and not hud.running():
+            break
+        if hud:
+            hud.pre_step()
+        for s in range(sub):
+            x = iface.read_state()
+            tau = tl.solve(iface.time, x[:P.nq], x[P.nq:])
+            if tau is None:
+                tau = np.zeros(tl.na)
+            iface.apply_torque(tau)
+        if hud:
+            hud.post_step()
+        xx, yy = d.qpos[4], d.qpos[5]
+        tmax = max(tmax, np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1))))
+        if iface.base_height() < 0.15 or tmax > 45:
+            print('  TSID 정지 ❌ 전복 @%.2fs (tilt=%.0f°)' % (outer * dt_nmpc, tmax))
+            if hud: hud.close()
+            return
+    if hud: hud.close()
+    print('  TSID 정지 ✅ %.1fs 버팀 base_z=%.3f tilt_max=%.0f° 벽시계%.0fs' % (
+        total_T, d.qpos[2], tmax, time.time() - t0))
+
+
 if __name__ == '__main__':
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument('--test', default='stand', choices=['stand', 'walk', 'rti'])
+    ap.add_argument('--test', default='stand', choices=['stand', 'hold', 'walk', 'loop', 'rti'])
     ap.add_argument('--robot', default='go2', choices=['go2', 'ours'])
+    ap.add_argument('--exec-robot', default=None, choices=[None, 'go2', 'ours', 'ours_sphere'])
     ap.add_argument('--vel', type=float, default=0.3)
+    ap.add_argument('--gait-T', type=float, default=0.5)
+    ap.add_argument('--step-h', type=float, default=0.06)
     ap.add_argument('--total-T', type=float, default=10.0)
+    ap.add_argument('--cmd', default='key', choices=['key', 'json', 'ros'],
+                    help='조작기 명령원(loop 모드): key=뷰어키보드, json=/tmp/quad_cmd.json, ros=/cmd_vel')
     ap.add_argument('--noview', action='store_true')
     a = ap.parse_args()
     os.environ.setdefault('DISPLAY', ':0')
     if a.test == 'stand':
-        tsid_stand(robot=a.robot, view=not a.noview)
+        tsid_stand(robot=a.robot, view=not a.noview, exec_robot=a.exec_robot)
+    elif a.test == 'hold':                        # ★ 정지 버티기(보행X)
+        hold_tsid(robot=a.robot, total_T=a.total_T, view=not a.noview, exec_robot=a.exec_robot)
+    elif a.test == 'loop':                        # ★ 무한 teleop 보행(RobotInterface 경유)
+        cs = Q.make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
+        walk_teleop_tsid(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
+                         view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
     elif a.test == 'rti':
-        walk_rti_tsid(robot=a.robot, V=a.vel, total_T=a.total_T, view=not a.noview)
-    else:
-        walk_loop_tsid(robot=a.robot, V=a.vel, total_T=a.total_T, view=not a.noview)
+        walk_rti_tsid(robot=a.robot, V=a.vel, total_T=a.total_T, view=not a.noview, exec_robot=a.exec_robot)
+    else:                                         # walk = 고정전진 검증(기존)
+        walk_loop_tsid(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h,
+                       total_T=a.total_T, view=not a.noview, exec_robot=a.exec_robot)
