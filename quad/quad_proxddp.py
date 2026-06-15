@@ -514,11 +514,12 @@ def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
 
 def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
               step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None,
-              cmd_source=None, log_path=None, plot=False):
+              cmd_source=None, log_path=None, plot=False, Vy=0.0):
     """★ 무한 연속보행: 정상상태 1사이클(us/Ks/xs)을 저장해 매스텝 SE(2) re-anchor로 무한 반복.
        절대 x,y,yaw 를 보지 않고 상대(높이·자세·관절·속도)만 추종 → 재최적화·드리프트 누적 없음.
        cmd_source: 조작기 명령원(CommandSource). 주면 그 v/w 명령 추종(뷰어 없이 teleop 테스트 가능),
-       없으면 뷰어=키보드 / 헤드리스=자동 직선유지."""
+       없으면 뷰어=키보드 / 헤드리스=자동 직선유지.
+       Vy: 측방속도(strafe) — 발이 옆으로 stepping하는 진짜 측방보행 사이클(0=전진전용)."""
     exec_robot = exec_robot or robot
     import sys, time, mujoco
     maxiter = int(os.environ.get('MAXITER', maxiter))   # 고속=계획 수렴에 더 필요
@@ -527,14 +528,15 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     cyc = round(T / dt)
     # ── warm 계획(settle + n_warm 사이클) 풀어 정상상태 1사이클 추출 ──
     N = settle_steps + n_warm * cyc
-    x_ref_fwd = P.x0.copy(); x_ref_fwd[P.nq + 0] = V
+    x_ref_fwd = P.x0.copy(); x_ref_fwd[P.nq + 0] = V; x_ref_fwd[P.nq + 1] = Vy   # 전진+측방 속도참조
     stages = []
     for k in range(N):
         tg = (k - settle_steps) * dt
         if tg < 0:
             stages.append(P.stage(P.legs, P.x0, dt))
         else:
-            st, sw = QN._trot_schedule(tg, T, sf, step_h, P.foot_home, P.legs, P.diag, V, march=V * tg)
+            st, sw = QN._trot_schedule(tg, T, sf, step_h, P.foot_home, P.legs, P.diag, V,
+                                       march=V * tg, Vy=Vy, march_y=Vy * tg)
             stages.append(P.stage(st, x_ref_fwd, dt, swing=sw))
     prob = aligator.TrajOptProblem(P.x0, stages, P.terminal_cost(x_ref_fwd))
     sol = aligator.SolverProxDDP(1e-5, 1e-8, max_iters=maxiter)
@@ -581,6 +583,7 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     active_cmd = hud.cmd if hud else cmd_source        # 활성 명령원(뷰어 키보드 / 외부 cmd_source)
     y_prev = 0.0
     yaw_ref = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])          # 명령 heading(운영자 선회 / 자동 조향)
+    yaw0 = yaw_ref                                      # 초기 heading(측방보행 시 고정용)
     ax, ay = float(d.qpos[0]), float(d.qpos[1])        # course-hold rail anchor(직진 시 cross-track 고정점)
     xtgt, ytgt = float(d.qpos[0]), float(d.qpos[1])    # 2D 전진 가상타깃
     for s in range(nsteps):
@@ -597,6 +600,9 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
                 ax, ay = rx, ry                          #   → course-hold가 strafe를 드리프트로 오인·회전 방지
             cross = -np.sin(yaw_ref) * (rx - ax) + np.cos(yaw_ref) * (ry - ay)   # heading 수직 드리프트
             yaw_use = yaw_ref + float(np.clip(-K_LAT * cross, -YAW_MAX, YAW_MAX))  # 직진 course-hold(crab 제거)
+        elif abs(Vy) > 1e-9:                            # 측방보행 사이클(헤드리스): 헤딩고정, 자동직선 OFF
+            v_cmd = V; vy_cmd = Vy
+            yaw_ref = yaw_use = yaw0
         else:
             v_cmd = V; vy_cmd = 0.0
             y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
@@ -1147,6 +1153,7 @@ if __name__ == '__main__':
     ap.add_argument('--total-T', type=float, default=30.0)
     ap.add_argument('--robot', default='go2', choices=['ours', 'go2', 'ours_sphere'])
     ap.add_argument('--vel', type=float, default=0.0)
+    ap.add_argument('--vel-y', type=float, default=0.0, help='측방속도(strafe) — 발이 옆으로 stepping하는 진짜 측방보행')
     ap.add_argument('--settle', type=float, default=0.6)
     ap.add_argument('--cycles', type=int, default=4)
     ap.add_argument('--gait-T', type=float, default=0.5)
@@ -1173,7 +1180,8 @@ if __name__ == '__main__':
         # key=뷰어키보드(기본). json=외부GUI/스크립트 폴링(헤드리스 teleop 가능). 자동직선=명령원없음.
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_loop(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
-                  view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs, log_path=a.log, plot=a.plot)
+                  view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs, log_path=a.log,
+                  plot=a.plot, Vy=getattr(a, 'vel_y'))
     elif a.test == 'replan':                      # [실험·불안정] 주기 완전수렴 재계획
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_replan(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,

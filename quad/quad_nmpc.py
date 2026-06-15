@@ -249,9 +249,11 @@ def solve_lift(lift_leg='FL', N=60, dt=0.02, hold=15, lift_h=0.08):
     return done
 
 
-def _trot_schedule(tk, T, swing_frac, step_h, foot_home, legs, diag, V=0.0, march=0.0):
+def _trot_schedule(tk, T, swing_frac, step_h, foot_home, legs, diag, V=0.0, march=0.0,
+                   Vy=0.0, march_y=0.0):
     """trot 대각쌍 교대. legs=다리목록, diag={L:위상오프셋}. tk=gait위상시각[s].
-       march=발 착지 전방오프셋 — **몸의 실제 전진량 기준**(절대시간 아님 → 발이 몸 안떠남)."""
+       march=발 착지 전방오프셋 — **몸의 실제 전진량 기준**(절대시간 아님 → 발이 몸 안떠남).
+       Vy/march_y: 측방(strafe) — 발이 옆으로 stepping(진짜 측방보행). 기본0=전진전용(하위호환)."""
     stance, swing = [], {}
     for L in legs:
         off = diag[L]
@@ -260,7 +262,8 @@ def _trot_schedule(tk, T, swing_frac, step_h, foot_home, legs, diag, V=0.0, marc
             s = ph / swing_frac
             z = 4 * step_h * s * (1 - s)              # 포물선 아치 (peak step_h)
             fwd = V * T * swing_frac * (s - 0.5)      # swing 중 전방 스윙(march 위에 추가)
-            swing[L] = foot_home[L] + np.array([march + fwd, 0, z])
+            fwd_y = Vy * T * swing_frac * (s - 0.5)   # swing 중 측방 스윙
+            swing[L] = foot_home[L] + np.array([march + fwd, march_y + fwd_y, z])
         else:
             stance.append(L)
     return stance, swing
