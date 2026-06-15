@@ -521,6 +521,8 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
        없으면 뷰어=키보드 / 헤드리스=자동 직선유지."""
     exec_robot = exec_robot or robot
     import sys, time, mujoco
+    maxiter = int(os.environ.get('MAXITER', maxiter))   # 고속=계획 수렴에 더 필요
+    n_warm = int(os.environ.get('NWARM', n_warm))        # warm 사이클↑ → 정상사이클 품질↑
     P = ProxModel(robot)
     cyc = round(T / dt)
     # ── warm 계획(settle + n_warm 사이클) 풀어 정상상태 1사이클 추출 ──
