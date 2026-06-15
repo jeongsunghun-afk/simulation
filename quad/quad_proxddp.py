@@ -343,6 +343,27 @@ def make_cmd_source(kind, v0=0.0):
     return KeyboardCmd(v0=v0)
 
 
+class DataLog:
+    """loop 중 매 제어틱(1kHz) 데이터 기록 → CSV. 각 축(관절)별 토크[Nm]와 각속도[rad/s].
+       컬럼: t, tau:<관절명>... , wj:<관절명>...  (관절명=MuJoCo actuator/joint 순서).
+       tau=실제 적용 토크(d.ctrl, 클립 후), wj=관절 각속도(d.qvel[6:]). np만 사용(의존성 X)."""
+
+    def __init__(self, m, path):
+        self.path, self.rows = path, []
+        names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ('act%d' % i)
+                 for i in range(m.nu)]
+        self.nu = m.nu
+        self.header = ','.join(['t'] + ['tau:' + n for n in names] + ['wj:' + n for n in names])
+
+    def add(self, t, ctrl, qvel_joint):
+        self.rows.append([t] + list(ctrl[:self.nu]) + list(qvel_joint[:self.nu]))
+
+    def save(self):
+        np.savetxt(self.path, np.array(self.rows), delimiter=',', header=self.header,
+                   comments='', fmt='%.6g')
+        print('[log] %d행 (각 축 토크+각속도) 저장 → %s' % (len(self.rows), self.path))
+
+
 class _HUD:
     """ProxDDP 뷰어 공통 HUD: 좌상단 sim time, 우상단 외력 N, 하단 조작기 명령,
        [/] 재생속도, Ctrl+드래그 외력, 다음 footstep 빨간점. 명령은 CommandSource(cmd) 위임."""
@@ -439,7 +460,7 @@ def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
 
 def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
               step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None,
-              cmd_source=None):
+              cmd_source=None, log_path=None):
     """★ 무한 연속보행: 정상상태 1사이클(us/Ks/xs)을 저장해 매스텝 SE(2) re-anchor로 무한 반복.
        절대 x,y,yaw 를 보지 않고 상대(높이·자세·관절·속도)만 추종 → 재최적화·드리프트 누적 없음.
        cmd_source: 조작기 명령원(CommandSource). 주면 그 v/w 명령 추종(뷰어 없이 teleop 테스트 가능),
@@ -499,6 +520,7 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     LOOK_T = float(os.environ.get('LOOK_T', '0.4'))    # 전방 carrot 룩어헤드(s) → push 속도비례
     LEAD_MAX = float(os.environ.get('LEAD_MAX', '0.1'))  # 전방 carrot 상한(m) → 고속 과push 방지
     hud = _HUD(m, d, sub, cmd=cmd_source, v0=V, foot_gids=q.foot_gid) if view else None
+    dlog = DataLog(m, log_path) if log_path else None       # 각 축 토크/각속도 기록(--log)
     active_cmd = hud.cmd if hud else cmd_source        # 활성 명령원(뷰어 키보드 / 외부 cmd_source)
     y_prev = 0.0
     yaw_ref = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])          # 명령 heading(운영자 선회 / 자동 조향)
@@ -539,6 +561,7 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
             u = cyc_us[i] - cyc_Ks[i] @ P.space.difference(target, x)
             umj = np.zeros(P.nu); umj[pin2mj] = u
             d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
+            if dlog: dlog.add(d.time, d.ctrl, d.qvel[6:])   # 각 축 토크[Nm]·각속도[rad/s]
         if hud:
             mk = _footstep_markers(P, V, T, sf, s * dt, d.qpos[0], d.qpos[1],
                                    _yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
@@ -558,8 +581,10 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
         if d.qpos[2] < 0.15:
             print('  무한루프 ❌ 전복 @%.2fs (x=%.2f, 벽시계%.0fs)' % (
                 s * dt, d.qpos[0], time.time() - t0))
+            if dlog: dlog.save()
             if hud: hud.close()
             return
+    if dlog: dlog.save()
     if hud: hud.close()
     print('  무한루프 ✅ %.1fs 완주 base_z=%.3f tilt_max=%.0f° 전진=%.2fm(평균%.2fm/s) 벽시계%.0fs' % (
         total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
@@ -1071,6 +1096,7 @@ if __name__ == '__main__':
     ap.add_argument('--cmd', default='key', choices=['key', 'json', 'ros'],
                     help='조작기 명령원: key=뷰어키보드, json=/tmp/quad_cmd.json 폴링, ros=/cmd_vel(배포)')
     ap.add_argument('--noview', action='store_true')
+    ap.add_argument('--log', default=None, help='loop 중 각 축 토크[Nm]/각속도[rad/s] CSV 저장 경로')
     a = ap.parse_args()
     os.environ.setdefault('DISPLAY', ':0')
     if a.test == 'stand':
@@ -1086,7 +1112,7 @@ if __name__ == '__main__':
         # key=뷰어키보드(기본). json=외부GUI/스크립트 폴링(헤드리스 teleop 가능). 자동직선=명령원없음.
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_loop(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
-                  view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
+                  view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs, log_path=a.log)
     elif a.test == 'replan':                      # [실험·불안정] 주기 완전수렴 재계획
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_replan(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,

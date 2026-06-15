@@ -488,7 +488,7 @@ def walk_rti_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
 
 def walk_teleop_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle_steps=15,
                      n_warm=6, dt_nmpc=0.02, total_T=30.0, view=False, exec_robot=None,
-                     cmd_source=None):
+                     cmd_source=None, log_path=None):
     """★ 구조2 무한 teleop 보행: NMPC 사이클 + TSID-ID 1kHz, RobotInterface 경유(sim2real seam).
        Q._HUD/CommandSource/_se2_reanchor 재사용(구조1과 동일 조작). TSID 보행은 현재 ~5s 캡(인프라 우선)."""
     import time
@@ -503,6 +503,7 @@ def walk_teleop_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle_step
     sub = round(dt_nmpc / iface.dt_sim)
     tl = TSIDLayer(P, P.x0[:P.nq], iface.dt_sim)
     hud = Q._HUD(m, d, sub, cmd=cmd_source, v0=V, foot_gids=iface.q.foot_gid) if view else None
+    dlog = Q.DataLog(m, log_path) if log_path else None     # 각 축 토크/각속도 기록(--log)
     active_cmd = hud.cmd if hud else cmd_source
     # NOTE: struct1의 course-hold/carrot(2D 위치추종)은 TSID에 부적합(base x,y가 task-free).
     #   teleop 헤딩(yaw)만 직접 반영 + 베이스를 현재 위치에 re-anchor(불연속 제거). v/vy는 표시·후속용.
@@ -537,6 +538,7 @@ def walk_teleop_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle_step
             if tau is None:
                 tau = np.zeros(tl.na)
             iface.apply_torque(tau)
+            if dlog: dlog.add(d.time, d.ctrl, d.qvel[6:])   # 각 축 토크[Nm]·각속도[rad/s]
         if hud:
             mk = Q._footstep_markers(P, v_cmd, T, sf, outer * dt_nmpc, d.qpos[0], d.qpos[1],
                                      Q._yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
@@ -552,8 +554,10 @@ def walk_teleop_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle_step
                 np.degrees(np.arccos(np.clip(1 - 2 * (xx * xx + yy * yy), -1, 1)))), flush=True)
         if iface.base_height() < 0.15:
             print('  TSID teleop ❌ 전복 @%.2fs (x=%.2f)' % (outer * dt_nmpc, d.qpos[0]))
+            if dlog: dlog.save()
             if hud: hud.close()
             return
+    if dlog: dlog.save()
     if hud: hud.close()
     print('  TSID teleop ✅ %.1fs base_z=%.3f tilt_max=%.0f° 전진=%.2fm 벽시계%.0fs' % (
         total_T, d.qpos[2], tmax, d.qpos[0], time.time() - t0))
@@ -610,6 +614,7 @@ if __name__ == '__main__':
     ap.add_argument('--cmd', default='key', choices=['key', 'json', 'ros'],
                     help='조작기 명령원(loop 모드): key=뷰어키보드, json=/tmp/quad_cmd.json, ros=/cmd_vel')
     ap.add_argument('--noview', action='store_true')
+    ap.add_argument('--log', default=None, help='loop 중 각 축 토크[Nm]/각속도[rad/s] CSV 저장 경로')
     a = ap.parse_args()
     os.environ.setdefault('DISPLAY', ':0')
     if a.test == 'stand':
@@ -619,7 +624,7 @@ if __name__ == '__main__':
     elif a.test == 'loop':                        # ★ 무한 teleop 보행(RobotInterface 경유)
         cs = Q.make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_teleop_tsid(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
-                         view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs)
+                         view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs, log_path=a.log)
     elif a.test == 'rti':
         walk_rti_tsid(robot=a.robot, V=a.vel, total_T=a.total_T, view=not a.noview, exec_robot=a.exec_robot)
     else:                                         # walk = 고정전진 검증(기존)
