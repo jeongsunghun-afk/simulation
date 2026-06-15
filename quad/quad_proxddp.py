@@ -364,6 +364,60 @@ class DataLog:
         print('[log] %d행 (각 축 토크+각속도) 저장 → %s' % (len(self.rows), self.path))
 
 
+class LivePlot:
+    """MuJoCo 뷰어 옆 matplotlib 실시간 그래프 — 각 축 토크[Nm]·각속도[rad/s] 롤링창(--plot).
+       제어틱마다 add() 호출하되 dt_plot(기본 50ms) 간격으로만 샘플저장+리드로(가벼움)."""
+
+    def __init__(self, m, window_s=4.0, dt_plot=0.05, tau_lim=80.0):
+        import matplotlib
+        matplotlib.use('TkAgg')
+        import matplotlib.pyplot as plt
+        from collections import deque
+        plt.ion()
+        self.nu = m.nu
+        names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ('a%d' % i)
+                 for i in range(m.nu)]
+        self.window_s, self.dt_plot, self._last = window_s, dt_plot, -1e9
+        n = int(window_s / dt_plot) + 2
+        self.t = deque(maxlen=n)
+        self.tau = [deque(maxlen=n) for _ in range(m.nu)]
+        self.w = [deque(maxlen=n) for _ in range(m.nu)]
+        self.fig, (self.ax_t, self.ax_w) = plt.subplots(2, 1, figsize=(8, 6), sharex=True)
+        colors = plt.cm.tab20(np.linspace(0, 1, max(2, m.nu)))
+        self.lt = [self.ax_t.plot([], [], lw=1.0, color=colors[i], label=names[i])[0]
+                   for i in range(m.nu)]
+        self.lw = [self.ax_w.plot([], [], lw=1.0, color=colors[i])[0] for i in range(m.nu)]
+        self.ax_t.set_ylabel('torque [Nm]'); self.ax_t.set_ylim(-tau_lim * 1.1, tau_lim * 1.1)
+        self.ax_w.set_ylabel('joint vel [rad/s]'); self.ax_w.set_xlabel('t [s]')
+        self.ax_t.grid(alpha=0.3); self.ax_w.grid(alpha=0.3)
+        self.ax_t.legend(fontsize=6, ncol=4, loc='upper right')
+        self.fig.tight_layout(); self.fig.show()
+
+    def add(self, t, ctrl, qvel):
+        if t - self._last < self.dt_plot:
+            return
+        self._last = t
+        self.t.append(t)
+        for i in range(self.nu):
+            self.tau[i].append(float(ctrl[i])); self.w[i].append(float(qvel[i]))
+        tt = np.array(self.t)
+        for i in range(self.nu):
+            self.lt[i].set_data(tt, self.tau[i]); self.lw[i].set_data(tt, self.w[i])
+        self.ax_t.set_xlim(max(0.0, tt[-1] - self.window_s), max(self.window_s, tt[-1]))
+        self.ax_w.relim(); self.ax_w.autoscale_view(scalex=False)
+        try:
+            self.fig.canvas.draw_idle(); self.fig.canvas.flush_events()
+        except Exception:
+            pass
+
+    def close(self):
+        import matplotlib.pyplot as plt
+        try:
+            plt.close(self.fig)
+        except Exception:
+            pass
+
+
 class _HUD:
     """ProxDDP 뷰어 공통 HUD: 좌상단 sim time, 우상단 외력 N, 하단 조작기 명령,
        [/] 재생속도, Ctrl+드래그 외력, 다음 footstep 빨간점. 명령은 CommandSource(cmd) 위임."""
@@ -460,7 +514,7 @@ def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
 
 def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
               step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None,
-              cmd_source=None, log_path=None):
+              cmd_source=None, log_path=None, plot=False):
     """★ 무한 연속보행: 정상상태 1사이클(us/Ks/xs)을 저장해 매스텝 SE(2) re-anchor로 무한 반복.
        절대 x,y,yaw 를 보지 않고 상대(높이·자세·관절·속도)만 추종 → 재최적화·드리프트 누적 없음.
        cmd_source: 조작기 명령원(CommandSource). 주면 그 v/w 명령 추종(뷰어 없이 teleop 테스트 가능),
@@ -521,6 +575,7 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     LEAD_MAX = float(os.environ.get('LEAD_MAX', '0.1'))  # 전방 carrot 상한(m) → 고속 과push 방지
     hud = _HUD(m, d, sub, cmd=cmd_source, v0=V, foot_gids=q.foot_gid) if view else None
     dlog = DataLog(m, log_path) if log_path else None       # 각 축 토크/각속도 기록(--log)
+    lplot = LivePlot(m) if plot else None                    # 실시간 그래프(--plot)
     active_cmd = hud.cmd if hud else cmd_source        # 활성 명령원(뷰어 키보드 / 외부 cmd_source)
     y_prev = 0.0
     yaw_ref = _yaw_xyzw(d.qpos[[4, 5, 6, 3]])          # 명령 heading(운영자 선회 / 자동 조향)
@@ -562,6 +617,7 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
             umj = np.zeros(P.nu); umj[pin2mj] = u
             d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
             if dlog: dlog.add(d.time, d.ctrl, d.qvel[6:])   # 각 축 토크[Nm]·각속도[rad/s]
+            if lplot: lplot.add(d.time, d.ctrl, d.qvel[6:])  # 실시간 그래프
         if hud:
             mk = _footstep_markers(P, V, T, sf, s * dt, d.qpos[0], d.qpos[1],
                                    _yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
@@ -582,9 +638,11 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
             print('  무한루프 ❌ 전복 @%.2fs (x=%.2f, 벽시계%.0fs)' % (
                 s * dt, d.qpos[0], time.time() - t0))
             if dlog: dlog.save()
+            if lplot: lplot.close()
             if hud: hud.close()
             return
     if dlog: dlog.save()
+    if lplot: lplot.close()
     if hud: hud.close()
     print('  무한루프 ✅ %.1fs 완주 base_z=%.3f tilt_max=%.0f° 전진=%.2fm(평균%.2fm/s) 벽시계%.0fs' % (
         total_T, d.qpos[2], tmax, d.qpos[0], d.qpos[0] / total_T, time.time() - t0))
@@ -1097,6 +1155,7 @@ if __name__ == '__main__':
                     help='조작기 명령원: key=뷰어키보드, json=/tmp/quad_cmd.json 폴링, ros=/cmd_vel(배포)')
     ap.add_argument('--noview', action='store_true')
     ap.add_argument('--log', default=None, help='loop 중 각 축 토크[Nm]/각속도[rad/s] CSV 저장 경로')
+    ap.add_argument('--plot', action='store_true', help='loop 중 뷰어 옆 실시간 그래프(각 축 토크·각속도)')
     a = ap.parse_args()
     os.environ.setdefault('DISPLAY', ':0')
     if a.test == 'stand':
@@ -1112,7 +1171,7 @@ if __name__ == '__main__':
         # key=뷰어키보드(기본). json=외부GUI/스크립트 폴링(헤드리스 teleop 가능). 자동직선=명령원없음.
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_loop(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
-                  view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs, log_path=a.log)
+                  view=not a.noview, exec_robot=a.exec_robot, cmd_source=cs, log_path=a.log, plot=a.plot)
     elif a.test == 'replan':                      # [실험·불안정] 주기 완전수렴 재계획
         cs = make_cmd_source(a.cmd, v0=a.vel) if a.cmd != 'key' else None
         walk_replan(robot=a.robot, V=a.vel, T=a.gait_T, step_h=a.step_h, total_T=a.total_T,
