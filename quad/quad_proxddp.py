@@ -591,17 +591,17 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
         # 명령 결정: 명령원=운영자/외부 teleop(+직진 course-hold), 없으면 헤드리스 자동 직선유지
         if active_cmd is not None:
             v_cmd, w_cmd = active_cmd.read()
+            vy_cmd = getattr(active_cmd, 'vy', 0.0)     # 측방(strafe) 명령
             yaw_ref += w_cmd * dt                       # 운영자 선회(heading 적분)
-            if abs(w_cmd) > 1e-6:                        # 선회 중엔 rail 리셋(course-hold 간섭 X)
-                ax, ay = rx, ry
+            if abs(w_cmd) > 1e-6 or abs(vy_cmd) > 1e-6:  # 선회/측방 중엔 rail 리셋
+                ax, ay = rx, ry                          #   → course-hold가 strafe를 드리프트로 오인·회전 방지
             cross = -np.sin(yaw_ref) * (rx - ax) + np.cos(yaw_ref) * (ry - ay)   # heading 수직 드리프트
             yaw_use = yaw_ref + float(np.clip(-K_LAT * cross, -YAW_MAX, YAW_MAX))  # 직진 course-hold(crab 제거)
         else:
-            v_cmd = V
+            v_cmd = V; vy_cmd = 0.0
             y = d.qpos[1]; vy = (y - y_prev) / dt; y_prev = y
             yaw_ref = yaw_use = float(np.clip(-K_LAT * y - K_LATD * vy, -YAW_MAX, YAW_MAX))  # 자동 직선유지
         # 2D carrot: body-frame [v_cmd 전진, vy_cmd 측방] → world(yaw_use 회전) + lag 포화
-        vy_cmd = getattr(active_cmd, 'vy', 0.0) if active_cmd is not None else 0.0
         cu, su = np.cos(yaw_use), np.sin(yaw_use)
         xtgt += (v_cmd * cu - vy_cmd * su) * dt
         ytgt += (v_cmd * su + vy_cmd * cu) * dt
