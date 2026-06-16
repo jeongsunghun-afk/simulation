@@ -259,12 +259,14 @@ class TSIDLayer:
         self.sampleCom.value(np.asarray(com))
         self.comTask.setReference(self.sampleCom)
 
-    def set_base_ref(self, q_ref, v_ref=None):
+    def set_base_ref(self, q_ref, v_ref=None, a_ref=None):
         oMi = pin.XYZQUATToSE3(q_ref[:7])
         data = np.concatenate([oMi.translation, oMi.rotation.flatten()])
         self.sampleBase.value(data)
         if v_ref is not None:
             self.sampleBase.derivative(v_ref[:6])      # 베이스 트위스트 피드포워드
+        if a_ref is not None:
+            self.sampleBase.second_derivative(a_ref[:6])   # ★베이스 가속 FF(일관성: OCP 계획가속 → 반응PD 아님)
         self.baseTask.setReference(self.sampleBase)
 
     def solve(self, t, q, v):

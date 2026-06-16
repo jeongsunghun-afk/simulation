@@ -150,7 +150,7 @@ class QuadSim:
     def crouch_home(self, base_z=None):
         """q=0(또는 keyframe) 넓은 발 위치 유지한 채 base 낮춰 무릎굽힘 → q_home/com_ref."""
         d, m = self.d, self.m
-        base_z = base_z if base_z is not None else self.base_z0
+        base_z = base_z if base_z is not None else float(os.environ.get('BASE_Z0', self.base_z0))
         if m.nkey > 0:
             mujoco.mj_resetDataKeyframe(m, d, 0)   # 모델 keyframe(home) 있으면 사용
         else:

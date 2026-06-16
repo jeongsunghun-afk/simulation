@@ -515,6 +515,21 @@ def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
     return out
 
 
+def _leg_ik(P, q, L, p_world, iters=5, damp=1e-4):
+    """다리 L 발끝을 p_world 로 보내는 관절각 — q의 해당 다리 관절만 damped-LS 수정(나머지 불변)."""
+    M = P.M; k = M.legs.index(L); dof = M.dof
+    qi = list(range(7 + k * dof, 7 + (k + 1) * dof)); vi = list(range(6 + k * dof, 6 + (k + 1) * dof))
+    fid = M.foot_fid[L]; q = q.copy()
+    for _ in range(iters):
+        pin.forwardKinematics(M.model, M.data, q); pin.updateFramePlacements(M.model, M.data)
+        e = p_world - M.data.oMf[fid].translation
+        if np.linalg.norm(e) < 1e-4:
+            break
+        J = pin.computeFrameJacobian(M.model, M.data, q, fid, pin.LOCAL_WORLD_ALIGNED)[:3][:, vi]
+        q[qi] += J.T @ np.linalg.solve(J @ J.T + damp * np.eye(3), e)
+    return q
+
+
 def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
               step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None,
               cmd_source=None, log_path=None, plot=False, Vy=0.0):
@@ -591,6 +606,8 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     MAXLAG = float(os.environ.get('MAXLAG', '0.06'))   # 후방 lag 포화(m) → 위치유지·runaway 방지
     LOOK_T = float(os.environ.get('LOOK_T', '0.4'))    # 전방 carrot 룩어헤드(s) → push 속도비례
     LEAD_MAX = float(os.environ.get('LEAD_MAX', '0.1'))  # 전방 carrot 상한(m) → 고속 과push 방지
+    K_POS = float(os.environ.get('K_POS', '0.0'))      # 위치기반 측방 발배치 게인(0=off). swing발을 측방 위치오차에 비례 이동
+    K_POSD = float(os.environ.get('K_POSD', '0.15'))   # 측방 발배치 댐핑(속도항=capture) — 진동방지(PD)
     hud = _HUD(m, d, sub, cmd=cmd_source, v0=V, foot_gids=q.foot_gid) if view else None
     dlog = DataLog(m, log_path) if log_path else None       # 각 축 토크/각속도 기록(--log)
     lplot = LivePlot(m) if plot else None                    # 실시간 그래프(--plot)
@@ -636,13 +653,20 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
             xtgt = rx + dx / dist * lead; ytgt = ry + dy / dist * lead
         target = cyc_xs[i].copy()
         _se2_reanchor([target], 0, xtgt, ytgt, yaw_use)
-        # ── 착지 마커: 사이클 실제 착지위치(cyc_land)를 로봇 SE(2)에 재anchor = 실제 발 추종지점 ──
+        # ── 착지 마커 + 위치기반 측방 발배치(K_POS>0): swing 발을 측방 위치오차에 비례 보정 ──
         cuc, suc = np.cos(yaw_use), np.sin(yaw_use)
+        lat_err = -suc * (rx - ax) + cuc * (ry - ay)       # cross-track(heading 수직) = 측방 위치오차(상태/엔코더 기반)
+        lat_vel = mj_to_pin(d)[P.nq + 1] if K_POS > 0 else 0.0   # body 측방속도(damping=capture항)
+        dy = float(np.clip(K_POS * lat_err + K_POSD * lat_vel, -0.08, 0.08))  # PD 측방 발배치(K_POS=0이면 0)
         land_marks, cur_lm = [], {}
         for L in cyc_swing[i]:
-            lx, ly = cyc_land[L][0], cyc_land[L][1]
+            lx, ly = cyc_land[L][0], cyc_land[L][1] + dy
             mxy = (rx + cuc * lx - suc * ly, ry + suc * lx + cuc * ly)
             land_marks.append(mxy); cur_lm[L] = mxy
+            if dy != 0.0:                                  # 제어: swing 발을 측방 보정만큼 이동(IK on 사이클 reference)
+                pin.forwardKinematics(P.M.model, P.M.data, target[:P.nq]); pin.updateFramePlacements(P.M.model, P.M.data)
+                fp = P.M.data.oMf[P.M.foot_fid[L]].translation.copy()
+                target[:P.nq] = _leg_ik(P, target[:P.nq], L, fp + np.array([-suc * dy, cuc * dy, 0.0]))
         if hud: hud.pre_step()
         for _ in range(sub):
             x = mj_to_pin(d)
