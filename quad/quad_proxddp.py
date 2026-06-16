@@ -515,6 +515,22 @@ def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
     return out
 
 
+def _leg_ik(P, q, L, p_world, iters=6, damp=1e-4):
+    """다리 L 발끝을 p_world(world)로 보내는 관절각 — q의 해당 다리 관절만 damped-LS 수정(나머지 불변)."""
+    M = P.M; k = M.legs.index(L); dof = M.dof
+    qi = list(range(7 + k * dof, 7 + (k + 1) * dof))
+    vi = list(range(6 + k * dof, 6 + (k + 1) * dof))
+    fid = M.foot_fid[L]; q = q.copy()
+    for _ in range(iters):
+        pin.forwardKinematics(M.model, M.data, q); pin.updateFramePlacements(M.model, M.data)
+        e = p_world - M.data.oMf[fid].translation
+        if np.linalg.norm(e) < 1e-4:
+            break
+        J = pin.computeFrameJacobian(M.model, M.data, q, fid, pin.LOCAL_WORLD_ALIGNED)[:3][:, vi]
+        q[qi] += J.T @ np.linalg.solve(J @ J.T + damp * np.eye(3), e)
+    return q
+
+
 def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
               step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None,
               cmd_source=None, log_path=None, plot=False, Vy=0.0):
@@ -551,6 +567,7 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
         # ★ 주기적 사이클: 중간(대칭) 사이클 phase-0 을 시작점으로 주기성 하드제약
         #   x(cyc)=shift(x0)[base x만 +V·T] 로 단일사이클 재최적화 → 대칭+주기 둘 다 만족(쏠림·limp 제거).
         b_mid = settle_steps + (n_warm // 2) * cyc
+        b = b_mid
         x_start = xs[b_mid].copy()
         cyc_xs, cyc_us, cyc_Ks, pconv = _solve_periodic_cycle(
             P, x_start, V, T, sf, step_h, dt, cyc, maxiter)
@@ -562,6 +579,17 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
         cyc_us = [us[b + i].copy() for i in range(cyc)]
         cyc_Ks = [Ks[b + i].copy() for i in range(cyc)]
         print('계획 conv=%s → 사이클 추출(b=%d,cyc=%d) → 무한루프 추종' % (r.conv, b, cyc))
+    # ── step planner 데이터: 위상별 swing 다리 + 각 다리 착지 발위치(body-상대, 마커·capture용) ──
+    K_CAP = float(os.environ.get('K_CAP', '0.0'))   # capture-point 게인(0=마커통일만, >0=발배치 피드백)
+    cyc_swing = [[L for L in P.legs if (((b - settle_steps + i) * dt / T + P.diag[L]) % 1.0) < sf]
+                 for i in range(cyc)]
+    cyc_land = {}
+    for L in P.legs:
+        li = next((i for i in range(cyc)
+                   if L not in cyc_swing[i] and L in cyc_swing[(i - 1) % cyc]), 0)  # swing→stance
+        xc = cyc_xs[li]
+        pin.forwardKinematics(P.M.model, P.M.data, xc[:P.M.model.nq]); pin.updateFramePlacements(P.M.model, P.M.data)
+        cyc_land[L] = (P.M.data.oMf[P.M.foot_fid[L]].translation - xc[:3]).copy()   # body-상대(base yaw≈0)
     # ── MuJoCo 무한루프 추종 ──
     _a = sys.argv; sys.argv = [_a[0]]
     try:
@@ -589,6 +617,10 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     yaw0 = yaw_ref                                      # 초기 heading(측방보행 시 고정용)
     ax, ay = float(d.qpos[0]), float(d.qpos[1])        # course-hold rail anchor(직진 시 cross-track 고정점)
     xtgt, ytgt = float(d.qpos[0]), float(d.qpos[1])    # 2D 전진 가상타깃
+    from collections import deque
+    legidx = {L: q.legs.index(L) for L in P.legs}
+    step_hist = deque(maxlen=len(P.legs))              # 과거 착지 마커(1주기=다리수 만큼)
+    prev_lm = {}
     for s in range(nsteps):
         if hud and not hud.running():
             break
@@ -621,6 +653,22 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
             xtgt = rx + dx / dist * lead; ytgt = ry + dy / dist * lead
         target = cyc_xs[i].copy()
         _se2_reanchor([target], 0, xtgt, ytgt, yaw_use)
+        # ── step planner: capture-point 발배치 보정(K_CAP>0) + 착지 마커 통일 ──
+        x_now = mj_to_pin(d)
+        v_err = x_now[P.nq:P.nq + 2] - np.array([v_cmd, vy_cmd])   # body-frame 속도오차
+        cuc, suc = np.cos(yaw_use), np.sin(yaw_use)
+        dpx = float(np.clip(K_CAP * (cuc * v_err[0] - suc * v_err[1]), -0.12, 0.12))  # body→world capture
+        dpy = float(np.clip(K_CAP * (suc * v_err[0] + cuc * v_err[1]), -0.12, 0.12))
+        land_marks = []; cur_lm = {}
+        for L in cyc_swing[i]:
+            lx, ly = cyc_land[L][0], cyc_land[L][1]
+            mxy = (rx + cuc * lx - suc * ly + dpx, ry + suc * lx + cuc * ly + dpy)
+            land_marks.append(mxy); cur_lm[L] = mxy
+            if K_CAP > 0:                                          # 제어: swing 발을 capture 만큼 이동(IK)
+                pin.forwardKinematics(P.M.model, P.M.data, target[:P.nq])
+                pin.updateFramePlacements(P.M.model, P.M.data)
+                fp = P.M.data.oMf[P.M.foot_fid[L]].translation.copy()
+                target[:P.nq] = _leg_ik(P, target[:P.nq], L, fp + np.array([dpx, dpy, 0.0]))
         if hud: hud.pre_step()
         for _ in range(sub):
             x = mj_to_pin(d)
@@ -629,9 +677,15 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
             d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
             if dlog: dlog.add(d.time, d.ctrl, d.qvel[6:])   # 각 축 토크[Nm]·각속도[rad/s]
             if lplot: lplot.add(d.time, d.ctrl, d.qvel[6:])  # 실시간 그래프
+        for L in cyc_swing[(i - 1) % cyc]:                 # 이번 스텝 착지(swing→stance) → 이력 기록
+            if L not in cyc_swing[i]:
+                fp = q.foot_point(legidx[L]); step_hist.append((float(fp[0]), float(fp[1])))
+                if os.environ.get('TRACE') and L in prev_lm:    # 예측마커↔실제발 거리
+                    print('  착지 %s: 마커-발 = %4.0fmm' % (L, 1000 * np.hypot(
+                        prev_lm[L][0] - fp[0], prev_lm[L][1] - fp[1])), flush=True)
+        prev_lm = cur_lm
         if hud:
-            mk = _footstep_markers(P, V, T, sf, s * dt, d.qpos[0], d.qpos[1],
-                                   _yaw_xyzw(d.qpos[[4, 5, 6, 3]]))
+            mk = list(step_hist) + land_marks              # 과거 1주기 착지 + 현재 swing 예측(통일된 착지 target)
             # 조작 방향 화살표(로봇 위): 명령 heading yaw_ref 방향, 길이 ∝ |v_cmd|
             zc = d.qpos[2] + 0.18
             ln = 0.15 + 0.5 * abs(v_cmd)
