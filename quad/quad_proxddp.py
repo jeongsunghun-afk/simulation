@@ -515,22 +515,6 @@ def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
     return out
 
 
-def _leg_ik(P, q, L, p_world, iters=6, damp=1e-4):
-    """다리 L 발끝을 p_world(world)로 보내는 관절각 — q의 해당 다리 관절만 damped-LS 수정(나머지 불변)."""
-    M = P.M; k = M.legs.index(L); dof = M.dof
-    qi = list(range(7 + k * dof, 7 + (k + 1) * dof))
-    vi = list(range(6 + k * dof, 6 + (k + 1) * dof))
-    fid = M.foot_fid[L]; q = q.copy()
-    for _ in range(iters):
-        pin.forwardKinematics(M.model, M.data, q); pin.updateFramePlacements(M.model, M.data)
-        e = p_world - M.data.oMf[fid].translation
-        if np.linalg.norm(e) < 1e-4:
-            break
-        J = pin.computeFrameJacobian(M.model, M.data, q, fid, pin.LOCAL_WORLD_ALIGNED)[:3][:, vi]
-        q[qi] += J.T @ np.linalg.solve(J @ J.T + damp * np.eye(3), e)
-    return q
-
-
 def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
               step_h=0.06, settle_steps=15, maxiter=100, view=False, exec_robot=None,
               cmd_source=None, log_path=None, plot=False, Vy=0.0):
@@ -579,8 +563,7 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
         cyc_us = [us[b + i].copy() for i in range(cyc)]
         cyc_Ks = [Ks[b + i].copy() for i in range(cyc)]
         print('계획 conv=%s → 사이클 추출(b=%d,cyc=%d) → 무한루프 추종' % (r.conv, b, cyc))
-    # ── step planner 데이터: 위상별 swing 다리 + 각 다리 착지 발위치(body-상대, 마커·capture용) ──
-    K_CAP = float(os.environ.get('K_CAP', '0.0'))   # capture-point 게인(0=마커통일만, >0=발배치 피드백)
+    # ── 위상별 swing 다리 + 각 다리 착지 발위치(body-상대, 착지 마커용) ──
     cyc_swing = [[L for L in P.legs if (((b - settle_steps + i) * dt / T + P.diag[L]) % 1.0) < sf]
                  for i in range(cyc)]
     cyc_land = {}
@@ -653,22 +636,13 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
             xtgt = rx + dx / dist * lead; ytgt = ry + dy / dist * lead
         target = cyc_xs[i].copy()
         _se2_reanchor([target], 0, xtgt, ytgt, yaw_use)
-        # ── step planner: capture-point 발배치 보정(K_CAP>0) + 착지 마커 통일 ──
-        x_now = mj_to_pin(d)
-        v_err = x_now[P.nq:P.nq + 2] - np.array([v_cmd, vy_cmd])   # body-frame 속도오차
+        # ── 착지 마커: 사이클 실제 착지위치(cyc_land)를 로봇 SE(2)에 재anchor = 실제 발 추종지점 ──
         cuc, suc = np.cos(yaw_use), np.sin(yaw_use)
-        dpx = float(np.clip(K_CAP * (cuc * v_err[0] - suc * v_err[1]), -0.12, 0.12))  # body→world capture
-        dpy = float(np.clip(K_CAP * (suc * v_err[0] + cuc * v_err[1]), -0.12, 0.12))
-        land_marks = []; cur_lm = {}
+        land_marks, cur_lm = [], {}
         for L in cyc_swing[i]:
             lx, ly = cyc_land[L][0], cyc_land[L][1]
-            mxy = (rx + cuc * lx - suc * ly + dpx, ry + suc * lx + cuc * ly + dpy)
+            mxy = (rx + cuc * lx - suc * ly, ry + suc * lx + cuc * ly)
             land_marks.append(mxy); cur_lm[L] = mxy
-            if K_CAP > 0:                                          # 제어: swing 발을 capture 만큼 이동(IK)
-                pin.forwardKinematics(P.M.model, P.M.data, target[:P.nq])
-                pin.updateFramePlacements(P.M.model, P.M.data)
-                fp = P.M.data.oMf[P.M.foot_fid[L]].translation.copy()
-                target[:P.nq] = _leg_ik(P, target[:P.nq], L, fp + np.array([dpx, dpy, 0.0]))
         if hud: hud.pre_step()
         for _ in range(sub):
             x = mj_to_pin(d)
