@@ -144,6 +144,20 @@ class TSIDLayer:
             self.contacts[L] = c
         self.stance = set(P.legs)
 
+        # ── swing 발 SE3 tracking task (★KinodynamicsID 구조: stance=contact, swing=발pose 직접추종) ──
+        #   기존 raw-TSID엔 없어서 swing발이 관절posture로만 간접이동 → 발배치 부정확·단일지지 불안정(~5s).
+        kp_feet = float(os.environ.get('KP_FEET', '150.0'))
+        self.w_feet = float(os.environ.get('W_FEET', '0.0'))   # 0=off(기본,raw-TSID). >0=swing발 SE3추종(KinodynamicsID식)
+        mask_pos = np.array([1, 1, 1, 0, 0, 0.0])      # 점접촉 = 위치(3D)만 추종
+        self.trackTask = {}; self.sampleFeet = {}; self.tracking = set()
+        for L in P.legs:
+            fnm = P.model.frames[P.M.foot_fid[L]].name
+            tt = tsid.TaskSE3Equality("track_" + L, self.rw, fnm)
+            tt.setKp(kp_feet * np.ones(6)); tt.setKd(2.0 * np.sqrt(kp_feet) * np.ones(6))
+            tt.setMask(mask_pos); tt.useLocalFrame(False)
+            self.trackTask[L] = tt
+            self.sampleFeet[L] = tsid.TrajectorySample(12, 6)
+
         # ── 자세(관절) task ──
         self.postureTask = tsid.TaskJointPosture("posture", self.rw)
         self.postureTask.setKp(kp_post * np.ones(self.na))
@@ -193,17 +207,34 @@ class TSIDLayer:
         return 1
 
     def set_contacts(self, stance):
-        """gait 접촉상태 갱신: stance 발만 접촉 활성."""
+        """gait 접촉상태 갱신: stance발=rigid contact, swing발=SE3 tracking task(발pose 직접추종)."""
         for L in self.P.legs:
             want = L in stance
             have = L in self.stance
-            if want and not have:
+            if want and not have:                       # swing→stance: tracking 제거, contact 추가
+                if L in self.tracking:
+                    self.formulation.removeTask("track_" + L, 0.0); self.tracking.discard(L)
                 ref = self.rw.framePosition(self.formulation.data(), self.P.M.foot_fid[L])
                 self.contacts[L].setReference(ref)
                 self.formulation.addRigidContact(self.contacts[L], 1e-3)
-            elif have and not want:
+            elif have and not want:                     # stance→swing: contact 제거 (+ W_FEET>0이면 tracking)
                 self.formulation.removeRigidContact(self.contacts[L].name, 0.0)
+                if self.w_feet > 0:
+                    ref = self.rw.framePosition(self.formulation.data(), self.P.M.foot_fid[L])  # 현재 발위치 초기화
+                    val = np.zeros(12); val[:3] = ref.translation; val[3:] = ref.rotation.flatten()
+                    self.sampleFeet[L].value(val); self.trackTask[L].setReference(self.sampleFeet[L])
+                    self.formulation.addMotionTask(self.trackTask[L], self.w_feet, 1, 0.0)
+                    self.tracking.add(L)
         self.stance = set(stance)
+
+    def set_swing_ref(self, swing_pos):
+        """swing 발 목표 위치(world 3D, NMPC 계획서 FK) → tracking task ref. 점접촉이라 위치만."""
+        for L, p in swing_pos.items():
+            if L not in self.tracking:
+                continue
+            val = np.zeros(12); val[:3] = np.asarray(p, float); val[3:] = np.eye(3).flatten()
+            self.sampleFeet[L].value(val)
+            self.trackTask[L].setReference(self.sampleFeet[L])
 
     def set_force_ref(self, forces):
         """NMPC 동적 접촉력 → TSID force ref. FZ_ONLY=1 이면 수직만(수평 NMPC력이 MuJoCo로 잘 안옮겨감)."""
@@ -367,6 +398,9 @@ def walk_loop_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle_steps=
         i = outer % cyc
         q_ref = cyc_xs[i][:P.nq]; v_ref = cyc_xs[i][P.nq:]
         tl.set_contacts(cyc_stance[i])
+        pin.forwardKinematics(P.M.model, P.M.data, q_ref); pin.updateFramePlacements(P.M.model, P.M.data)
+        tl.set_swing_ref({L: P.M.data.oMf[P.M.foot_fid[L]].translation.copy()
+                          for L in P.legs if L not in cyc_stance[i]})   # swing발 목표=사이클 발위치
         tl.set_force_ref(cyc_forces[i])                # ★ NMPC 동적 접촉력 reference
         tl.set_posture_ref(q_ref, v_ref, cyc_acc[i]); tl.set_base_ref(q_ref, v_ref); tl.set_com_ref(q_ref)
         for s in range(sub):
@@ -456,6 +490,9 @@ def walk_rti_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
         # RTI 참조 → TSID: 다음 계획상태(xs1) 추종 + 현재 stance·동적힘
         stance, forces = _stance_forces_at(P, xs0, us0, gait_t, T, sf, step_h, V, dt)
         tl.set_contacts(stance); tl.set_force_ref(forces)
+        pin.forwardKinematics(P.M.model, P.M.data, xs1[:P.nq]); pin.updateFramePlacements(P.M.model, P.M.data)
+        tl.set_swing_ref({L: P.M.data.oMf[P.M.foot_fid[L]].translation.copy()   # ★swing발 목표=계획(xs1) 발위치
+                          for L in P.legs if L not in stance})
         a_ref = (xs1[P.nq:] - xs0[P.nq:]) / dt
         tl.set_posture_ref(xs1[:P.nq], xs1[P.nq:], a_ref)
         tl.set_base_ref(xs1[:P.nq], xs1[P.nq:]); tl.set_com_ref(xs1[:P.nq])
@@ -530,6 +567,9 @@ def walk_teleop_tsid(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle_step
             ref = cyc_xs[i]
         q_ref = ref[:P.nq]; v_ref = ref[P.nq:]
         tl.set_contacts(cyc_stance[i]); tl.set_force_ref(cyc_forces[i])
+        pin.forwardKinematics(P.M.model, P.M.data, q_ref); pin.updateFramePlacements(P.M.model, P.M.data)
+        tl.set_swing_ref({L: P.M.data.oMf[P.M.foot_fid[L]].translation.copy()
+                          for L in P.legs if L not in cyc_stance[i]})   # swing발 목표=사이클 발위치
         tl.set_posture_ref(q_ref, v_ref, cyc_acc[i]); tl.set_base_ref(q_ref, v_ref); tl.set_com_ref(q_ref)
         if hud:
             hud.pre_step()
