@@ -359,6 +359,9 @@ class DataLog:
         self.rows.append([t] + list(ctrl[:self.nu]) + list(qvel_joint[:self.nu]))
 
     def save(self):
+        d = os.path.dirname(self.path)
+        if d:
+            os.makedirs(d, exist_ok=True)        # 저장 폴더 없으면 생성(quad/logs 등)
         np.savetxt(self.path, np.array(self.rows), delimiter=',', header=self.header,
                    comments='', fmt='%.6g')
         print('[log] %d행 (각 축 토크+각속도) 저장 → %s' % (len(self.rows), self.path))

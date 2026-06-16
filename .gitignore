@@ -24,3 +24,4 @@ mujoco_trace.npz
 quad/meshes/
 quad/*.log
 quad/*.out
+quad/logs/
