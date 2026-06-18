@@ -274,7 +274,7 @@ dt_mpc = 0.01
 # ★go2_fulldynamics 작동값과 정확히 일치(WBORI/WBVRT 기본 0). base 위치/자세는 penalize 안 함 → 발프레임추종(w_frame)으로 안정화
 # 02_Leg는 비대칭이라 측방(y)·yaw 모드가 약함 → 소량 위치가중으로 안정마진 보강(go2는 0이어도 대칭이라 OK)
 w_basepos = [0, float(_os.environ.get("WBY", "0")), 0, float(_os.environ.get("WBORI", "0")), float(_os.environ.get("WBORI", "0")), float(_os.environ.get("WBYAW", "0"))]
-w_basevel = [float(_os.environ.get("WBVX", "400")), float(_os.environ.get("WBVY", "200")), 10, 10, 10, float(_os.environ.get("WBWZ", "10"))]   # vx/vy/vz/wx/wy/wz 추종가중(WBVX전진·WBVY측방·WBWZ선회)
+w_basevel = [float(_os.environ.get("WBVX", "400")), float(_os.environ.get("WBVY", "200")), float(_os.environ.get("WBVZ", "10")), 10, 10, float(_os.environ.get("WBWZ", "10"))]   # vx/vy/vz/wx/wy/wz 추종가중(WBVX전진·WBVY측방·WBWZ선회). ★WBVZ=수직속도가중: flight gait는 0~낮춰 탄도운동 허용
 # 뒷발목(pin idx 9=HL_foot,13=HR_foot)은 point-foot서 floppy → posture/vel 가중치 강하게(핀고정)
 _ankw = float(_os.environ.get("ANKLE_W", "50")); _ankdw = float(_os.environ.get("ANKLE_DW", "5"))
 _wlp = [1.0] * nu; _wlv = [0.1] * nu
@@ -316,8 +316,14 @@ mpc = MPC(mpc_conf, dynproblem)
 cq = {"FL_foot": True, "FR_foot": True, "HL_foot": True, "HR_foot": True}
 cFL = {"FL_foot": False, "FR_foot": True, "HL_foot": True, "HR_foot": False}
 cFR = {"FL_foot": True, "FR_foot": False, "HL_foot": False, "HR_foot": True}
+cair = {"FL_foot": False, "FR_foot": False, "HL_foot": False, "HR_foot": False}  # 4발 비행(flight phase)
+_gait = _os.environ.get("GAIT", "trot")
 if _os.environ.get("STAND"):
     contact_phases = [cq] * (2 * T_ds + 2 * T_ss)   # 전스탠스(보행X) — base 제어 격리용
+elif _gait == "fly":
+    # ★[실험·미해결] flying trot: 더블서포트(cq)→4발 비행구간(cair). schedule+WBVZ만으론 전복(OCP가 탄도궤적 못만듦, running gait 생성기 필요). 보존용.
+    T_fly_air = int(_os.environ.get("TFLY", "4"))
+    contact_phases = [cFL] * T_ss + [cair] * T_fly_air + [cFR] * T_ss + [cair] * T_fly_air
 else:
     contact_phases = [cq] * T_ds + [cFL] * T_ss + [cq] * T_ds + [cFR] * T_ss
 mpc.generateCycleHorizon(contact_phases)
