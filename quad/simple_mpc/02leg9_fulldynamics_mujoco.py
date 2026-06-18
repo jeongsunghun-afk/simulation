@@ -315,6 +315,78 @@ import numpy as _npd
 _INF = bool(device.viewer); _MAXSTEP = int(_os.environ.get("STEPS", "300"))
 print("[MJ] FullDynamics 02_Leg _9 — %s, 초기 vx=%.2f" % ("무한(키보드 teleop)" if _INF else "STEPS=%d"%_MAXSTEP, _vx0), flush=True)
 if _INF: print("[teleop] ↑↓=전진vx  ←→=측방vy  ,/.=선회yaw  X=정지  (뷰어 닫으면 종료)", flush=True)
+
+# 공유메모리 레이아웃(비동기): [pver, stop, ms, xver] + x(NX) + vcmd(6) + plan(NP*PSTEP)
+_NX = nq + nv; _NDX = 2 * nv; _NP = int(_os.environ.get("ASYNC_NP", "16")); _PSTEP = _NX + nu + nu * _NDX
+_HDR = 4; _SHN = _HDR + _NX + 6 + _NP * _PSTEP; _XO = _HDR; _VO = _HDR + _NX; _PO = _HDR + _NX + 6
+
+# ════ MPC 워커 프로세스(WORKER env): 독립 프로세스가 자기 MPC로 iterate만 (spawn식 → fork·GIL 무관) ════
+if _os.environ.get("WORKER"):
+    import sys as _sys2, time as _tm2
+    from multiprocessing import shared_memory as _shmmod
+    _shm = _shmmod.SharedMemory(name=_os.environ["WORKER"]); _b = np.ndarray(_SHN, dtype=np.float64, buffer=_shm.buf)
+    print("[WORKER] MPC 워커 시작 — 자기 프로세스서 mpc.iterate 연속", flush=True)
+    while _b[1] == 0.0:                                   # stop 플래그
+        while True:                                       # x torn-read 방지(버전 재확인)
+            _v1 = _b[3]; _x = np.array(_b[_XO:_XO+_NX]); _vc = np.array(_b[_VO:_VO+6])
+            if _b[3] == _v1: break
+        mpc.velocity_base = _vc
+        try: _t0 = _tm2.perf_counter(); mpc.iterate(_x); _ms = (_tm2.perf_counter()-_t0)*1000.0
+        except Exception: continue
+        _o = _PO                                          # plan 쓰기
+        for i in range(_NP):
+            _b[_o:_o+_NX] = np.asarray(mpc.xs[i], float).ravel(); _o += _NX
+            _b[_o:_o+nu] = np.asarray(mpc.us[i], float).ravel(); _o += nu
+            _b[_o:_o+nu*_NDX] = np.asarray(mpc.Ks[i], float).ravel(); _o += nu*_NDX
+        _b[2] = _ms; _b[0] += 1                           # ms, pver++ (마지막=발행)
+    _shm.close(); _sys2.exit(0)
+
+# ════ 비동기 제어 프로세스(ASYNC=1): 워커 subprocess launch + 1kHz 제어 (GIL·fork 무관 진짜 동시) ════
+if _os.environ.get("ASYNC"):
+    import sys as _sys, time as _tm, subprocess as _sp
+    from multiprocessing import shared_memory as _shmmod
+    if device.viewer: print("[ASYNC] VIEW=0 에서만"); _sys.exit(1)
+    _shm = _shmmod.SharedMemory(create=True, size=_SHN*8); _b = np.ndarray(_SHN, dtype=np.float64, buffer=_shm.buf); _b[:] = 0.0
+    _b[_XO:_XO+_NX] = x_measured; _b[_VO:_VO+6] = device.sport.velocity_base(); _b[3] = 1
+    _env = dict(_os.environ); _env["WORKER"] = _shm.name
+    _wk = _sp.Popen([_sys.executable, _os.path.abspath(__file__)], env=_env)
+    print("[ASYNC-MP] MPC 워커 subprocess launch(name=%s) — 독립 프로세스" % _shm.name, flush=True)
+    while _b[0] == 0:                                     # 첫 plan 대기
+        _tm.sleep(0.01)
+        if _wk.poll() is not None: print("[ASYNC] 워커 종료됨(빌드실패?)"); _shm.close(); _shm.unlink(); _sys.exit(1)
+    def _unpack():
+        while True:
+            _v1 = _b[0]; _a = np.array(_b[_PO:_PO+_NP*_PSTEP]); _ms = _b[2]
+            if _b[0] == _v1: break
+        _xs=[]; _us=[]; _Ks=[]; _off=0
+        for i in range(_NP):
+            _xs.append(_a[_off:_off+_NX]); _off+=_NX
+            _us.append(_a[_off:_off+nu]); _off+=nu
+            _Ks.append(_a[_off:_off+nu*_NDX].reshape(nu,_NDX)); _off+=nu*_NDX
+        return _xs,_us,_Ks,_v1,_ms
+    _xs,_us,_Ks,_myver,_ms = _unpack(); _age=0; _cs=0; _NCTRL=_MAXSTEP*N_simu; _tnext=_tm.perf_counter()
+    while _cs < _NCTRL:
+        q_meas, v_meas = device.measureState(); x_measured = np.concatenate([q_meas, v_meas])
+        _b[_XO:_XO+_NX] = x_measured; _b[_VO:_VO+6] = device.sport.velocity_base(); _b[3] += 1   # 상태 발행
+        if _b[0] > _myver: _xs,_us,_Ks,_myver,_ms = _unpack(); _age=0
+        _kp = min(_age // N_simu, _NP-2); _delay = (_age % N_simu) * dt_simu
+        _xi = interpolator.interpolateState(_delay, dt_mpc, [_xs[_kp], _xs[_kp+1]])
+        _ui = interpolator.interpolateLinear(_delay, dt_mpc, [_us[_kp], _us[_kp+1]])
+        _tau = _ui - _Ks[_kp] @ model_handler.difference(x_measured, _xi)
+        _lc.q=_xi[7:7+nu]; _lc.dq=_xi[nq+6:nq+6+nu]; _lc.kp=_KP; _lc.kd=_KD; _lc.tau=_tau
+        device.write_low_cmd(_lc)
+        _age+=1; _cs+=1
+        _tnext+=dt_simu; _slp=_tnext-_tm.perf_counter()                # 1kHz 실시간 페이싱
+        if _slp>0: _tm.sleep(_slp)
+        if _cs % 300 == 0:
+            _z=device.d.qpos[2]
+            print("[ASYNC-MP] t=%.1fs base_z=%.3f MPC=%.1fms(~%.0fHz) plan_age=%d틱" % (_cs*dt_simu,_z,_ms,1000.0/max(_ms,1e-3),_age), flush=True)
+            if _z<0.15: print("[ASYNC-MP] 전복 @%.1fs"%(_cs*dt_simu)); break
+    _b[1]=1; _tm.sleep(0.1); _wk.terminate()
+    try: _shm.close(); _shm.unlink()
+    except Exception: pass
+    print('[ASYNC-MP] 종료(전복없이 완주)' if _cs>=_NCTRL else '[ASYNC-MP] 종료', flush=True); _sys.exit(0)
+
 step = 0
 while True:
     if _INF:
