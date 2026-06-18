@@ -301,9 +301,15 @@ dynproblem = FullDynamicsOCP(problem_conf, model_handler)
 dynproblem.createProblem(model_handler.getReferenceState(), T, force_size, gravity[2], False)
 
 T_ds = int(_os.environ.get("TDS", "8")); T_ss = int(_os.environ.get("TSS", "20"))   # 빠른cadence 기본=0.1~0.4 전범위 94~97%+전방향
+_apex0 = float(_os.environ.get("APEX", "0.15"))     # step height(swing_apex). GUI step_h 있으면 launch시 반영(simple-mpc는 live셋터 없음)
+if _os.environ.get("CMDFILE"):
+    try:
+        import json as _j0
+        with open(_os.environ["CMDFILE"]) as _f0: _apex0 = float(_j0.load(_f0).get('step_h', _apex0))
+    except Exception: pass
 mpc_conf = dict(support_force=-model_handler.getMass() * gravity[2], TOL=1e-4, mu_init=float(_os.environ.get("MUINIT","1e-8")),
                 max_iters=int(_os.environ.get("ITERS", "1")), num_threads=int(_os.environ.get("NTH", "8")),
-                swing_apex=float(_os.environ.get("APEX", "0.15")),
+                swing_apex=_apex0,
                 T_fly=T_ss, T_contact=T_ds, timestep=dt_mpc)
 mpc = MPC(mpc_conf, dynproblem)
 
@@ -351,6 +357,7 @@ def _ik_joints(_bz):                     # 발은 서기 위치 유지하며 bas
     return np.clip(_qi[7:7+nu], _Mp.lowerPositionLimit[7:7+nu], _Mp.upperPositionLimit[7:7+nu])
 _q_down = _ik_joints(float(_os.environ.get("STANDDOWN_Z","0.30")))
 _cmdq = _q_up.copy()                     # 자세명령(보간 상태)
+_body_h = float(_os.environ.get("BODY_H","0.52")); _last_h = -1.0; _q_target = _q_up.copy()   # 서기 높이(GUI body_h, 보행중 무시)
 _POSE_KP = float(_os.environ.get("POSE_KP","120")); _POSE_KD = float(_os.environ.get("POSE_KD","4")); _POSE_RATE = float(_os.environ.get("POSE_RATE","1.5"))
 _EST = bool(_os.environ.get("EST")); _ESTCL = bool(_os.environ.get("ESTCL"))   # EST=검증, ESTCL=추정값을 MPC에 피드(closed-loop)
 _estor = StateEstimator(model_handler.getModel(), ["FL_foot","FR_foot","HL_foot","HR_foot"], dt_simu) if (_EST or _ESTCL) else None
@@ -446,14 +453,16 @@ while True:
             import json as _json
             with open(_CMDFILE) as _f: _cj = _json.load(_f)
             device.sport.Move(float(_cj.get('v',0.0)), float(_cj.get('vy',0.0)), float(_cj.get('w',0.0)))
+            _body_h = float(_cj.get('body_h', _body_h))   # 서기 높이(★보행중엔 무시 — 자세모드서만 적용)
             _nm = _cj.get('mode','move')
             if _nm in ('balance_stand','stand_up','stand_down') and _mode == 'move':
                 _qm0,_ = device.measureState(); _cmdq = _qm0[7:7+nu].copy()   # 현재자세서 보간 시작
             _mode = 'move' if _nm in ('move','balance_stand') else _nm        # balance_stand=제자리(MPC v=0)
         except Exception: pass
-    if _mode in ('stand_up','stand_down'):  # ★자세전환: 목표자세로 PD 보간(MPC 미사용) — RBQ Ready/Ground
-        _tq = _q_down if _mode == 'stand_down' else _q_up
-        _cmdq = _cmdq + np.clip(_tq - _cmdq, -_POSE_RATE*dt_mpc, _POSE_RATE*dt_mpc)
+    if _mode in ('stand_up','stand_down'):  # ★자세전환(보행X): 목표높이로 PD보간 — RBQ Ready/Ground. body_h=서기높이(live)
+        _th = float(_os.environ.get("GROUND_Z","0.24")) if _mode == 'stand_down' else _body_h
+        if abs(_th - _last_h) > 2e-3: _q_target = _ik_joints(_th); _last_h = _th   # 높이 변경시만 IK
+        _cmdq = _cmdq + np.clip(_q_target - _cmdq, -_POSE_RATE*dt_mpc, _POSE_RATE*dt_mpc)
         _qm, _vm = device.measureState(); _qf = np.concatenate([_qm[0:7], _cmdq])
         _taug = _pin.computeGeneralizedGravity(_Mp, _Dp, _qf)[6:]
         _lc.q=_cmdq; _lc.dq=np.zeros(nu); _lc.kp=np.full(nu,_POSE_KP); _lc.kd=np.full(nu,_POSE_KD); _lc.tau=_taug
