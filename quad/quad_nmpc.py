@@ -20,6 +20,29 @@ import crocoddyl
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 LEGS_PIN = ['FL', 'FR', 'HL', 'HR']     # (기본=02_Leg; 실제는 NMPCModel.legs 사용)
+JTYPES = ['hip', 'thigh', 'calf', 'foot']   # 다리당 관절 순서(MuJoCo/URDF 공통)
+
+
+def _select_urdf():
+    """urdf/ 에서 사용할 URDF 선택. URDF_FILE env로 명시 가능, 기본=02_Leg_UFDF 최신버전(_N 최대).
+       (예: _9 는 앞발목 fixed = 14-DOF 구조축소 모델)."""
+    import re
+    if os.environ.get('URDF_FILE'):
+        return os.path.join(_HERE, 'urdf', os.environ['URDF_FILE'])
+    files = glob.glob(os.path.join(_HERE, 'urdf', '*.urdf'))
+    leg = [f for f in files if os.path.basename(f).startswith('02_Leg_UFDF')]
+    ver = lambda f: int(re.search(r'_(\d+)\.urdf$', os.path.basename(f)).group(1)) \
+        if re.search(r'_(\d+)\.urdf$', os.path.basename(f)) else -1
+    return max(leg, key=ver) if leg else sorted(files)[0]
+
+
+def _reduce_foot_joints():
+    """LOCK_FOOT_MODE=reduce → 구조축소로 freeze할 발목 조인트 이름(접미사 _joint 제외).
+       발목 DOF만 제거(buildReducedModel)하고 링크·접촉프레임은 보존. 비-reduce면 []."""
+    if os.environ.get('LOCK_FOOT_MODE') != 'reduce' or not os.environ.get('LOCK_FOOT'):
+        return []
+    ln = os.environ['LOCK_FOOT']
+    return ['FL_foot', 'FR_foot'] if ln in ('1', 'front', 'true') else [s.strip() for s in ln.split(',')]
 _GO2_XML = os.path.join(_HERE, '..', 'mujoco_menagerie', 'unitree_go2', 'go2.xml')
 ROBOTS_PIN = {
     'ours': dict(legs=['FL', 'FR', 'HL', 'HR'], dof=4,
@@ -27,7 +50,7 @@ ROBOTS_PIN = {
     'go2':  dict(legs=['FL', 'FR', 'RL', 'RR'], dof=3,
                  diag={'FL': 0.0, 'RR': 0.0, 'FR': 0.5, 'RL': 0.5}),   # 대각쌍 FL+RR / FR+RL
 }
-MU_FRIC = 0.6 * 0.707                    # elliptic cone 내접 마진(quad_sim 과 동일)
+MU_FRIC = float(os.environ.get('MU_FRIC', '0.9'))    # 마찰콘 μ(물리 sphere 1.3 cone에 내접 ≈0.92). 속도범위 0.7
 # NMPC 비용 가중 (env 튜닝)
 # 튜닝 winning config 기본값 (closed-loop trot 안정성 최적; 스윕으로 도출)
 W_ORI = float(os.environ.get('W_ORI', '150'))      # base 자세(roll/pitch) reg
@@ -51,10 +74,14 @@ class NMPCModel:
         robot = robot or os.environ.get('NMPC_ROBOT', 'ours')
         cfg = ROBOTS_PIN[robot]
         self.robot = robot; self.legs = cfg['legs']; self.dof = cfg['dof']; self.diag = cfg['diag']
+        self.lock_joints = _reduce_foot_joints()      # 구조축소 freeze 발목(예 ['FL_foot','FR_foot']) / 비-reduce면 []
+        self._mq, self._mleg = self._read_crouch()    # MuJoCo crouch 1회: q0 변환 + 발목 nominal각 소스
         if robot == 'ours':
-            urdf = sorted(glob.glob(os.path.join(_HERE, 'urdf', '*.urdf')))[0]
+            urdf = _select_urdf()
             self.model = pin.buildModelFromUrdf(urdf, pin.JointModelFreeFlyer())
-            self._add_foot_frames_ours()
+            self._add_foot_frames_ours()              # 발 프레임 추가(축소 후에도 보존됨 — 검증완료)
+            if self.lock_joints:
+                self._reduce_model()                  # 앞발목 DOF freeze(buildReducedModel)
         else:  # go2: MJCF 직접 로드(MuJoCo와 동일 모델) + 발프레임 추가
             self.model = pin.buildModelFromMJCF(_GO2_XML, pin.JointModelFreeFlyer(), 'root')[0]
             self._add_foot_frames_go2()
@@ -62,13 +89,47 @@ class NMPCModel:
         self.data = self.model.createData()
         self.state = crocoddyl.StateMultibody(self.model)
         self.actuation = crocoddyl.ActuationModelFloatingBase(self.state)
-        self.nu = self.model.nv - 6        # = legs×dof (MJCF 로드시 actuation.nu 오계산 회피)
+        self.nu = self.model.nv - 6        # 구동관절 수(축소시 비균일: 앞3+뒤4=14)
+        self.leg_dof = {L: sum(self.model.existJointName('%s_%s_joint' % (L, j)) for j in JTYPES)
+                        for L in self.legs}            # 다리별 DOF(비균일 대응)
         self.tau_lim = np.full(self.nu, 80.0)
         self.q0, self.v0, self.x0 = self._crouch_state()
         pin.forwardKinematics(self.model, self.data, self.q0)
         pin.updateFramePlacements(self.model, self.data)
         self.foot_home = {L: self.data.oMf[self.foot_fid[L]].translation.copy()
                           for L in self.legs}
+
+    def _read_crouch(self):
+        """MuJoCo crouch_home 1회 읽어 (qpos, 다리별 qpos인덱스) 반환 — q0/발목nominal 공용."""
+        import sys
+        _a = sys.argv; sys.argv = [_a[0]]
+        try:
+            import quad_sim, mujoco
+            quad_sim._ROBOT = 'ours_sphere' if self.robot == 'ours' else self.robot
+            q = quad_sim.QuadSim(); q.crouch_home(); mujoco.mj_forward(q.m, q.d)
+            mq = q.d.qpos.copy()
+            mleg = {L: list(q.legqp[i]) for i, L in enumerate(q.legs)}   # MuJoCo 16-DOF 균일
+        finally:
+            sys.argv = _a
+        return mq, mleg
+
+    def _reduce_model(self):
+        """앞발목 조인트를 crouch nominal각에 freeze → buildReducedModel(링크·프레임 보존, DOF만 제거)."""
+        q_ref = pin.neutral(self.model); lock_ids = []
+        for nm in self.lock_joints:
+            jn = nm + '_joint'
+            if not self.model.existJointName(jn):
+                continue
+            leg, jt = nm.rsplit('_', 1)
+            nom = self._mq[self._mleg[leg][JTYPES.index(jt)]]          # MuJoCo crouch 발목각
+            jid = self.model.getJointId(jn)
+            q_ref[self.model.joints[jid].idx_q] = nom
+            lock_ids.append(jid)
+        if not lock_ids:        # 이미 fixed(예 _9 URDF)면 freeze할 게 없음 → skip
+            print('[REDUCE] freeze 대상 없음(이미 fixed) → 축소 생략'); return
+        self.model = pin.buildReducedModel(self.model, lock_ids, q_ref)
+        print('[REDUCE] 발목 freeze %s → nq=%d nv=%d (링크·프레임 보존)' %
+              (self.lock_joints, self.model.nq, self.model.nv))
 
     def _add_foot_frames_ours(self):
         """02_Leg: 실제 접촉점(sphere 바닥 = foot_contact_link서 70mm 아래)에 {L}_foot 프레임.
@@ -98,25 +159,18 @@ class NMPCModel:
             self.model.addFrame(pin.Frame(L + '_foot', jid, 0, off, pin.FrameType.OP_FRAME))
 
     def _crouch_state(self):
-        """MuJoCo crouch_home 자세를 pinocchio q0/v0/x0 로 변환."""
-        import sys
-        _a = sys.argv; sys.argv = [_a[0]]
-        try:
-            import quad_sim, mujoco
-            # 02_Leg는 실제 접촉모델(sphere, 70mm)에서 nominal 자세 도출 → planner↔exec 일관
-            quad_sim._ROBOT = 'ours_sphere' if self.robot == 'ours' else self.robot
-            q = quad_sim.QuadSim(); q.crouch_home(); mujoco.mj_forward(q.m, q.d)
-            mq = q.d.qpos.copy()
-            mleg = {L: list(q.legqp[i]) for i, L in enumerate(q.legs)}
-        finally:
-            sys.argv = _a
+        """MuJoCo crouch_home 자세(16-DOF 균일)를 pinocchio q0/v0/x0 로 변환.
+           축소모델이면 freeze된 발목은 건너뜀(idx_q 직접 사용 → 관절순서에 무관)."""
+        mq, mleg = self._mq, self._mleg
         q0 = np.zeros(self.model.nq)
         q0[0:3] = mq[0:3]
         w, x, y, z = mq[3:7]; q0[3:7] = [x, y, z, w]      # wxyz→xyzw
-        ji = 7
         for L in self.legs:
-            for idx in mleg[L]:
-                q0[ji] = mq[idx]; ji += 1
+            for jt in JTYPES:
+                jn = '%s_%s_joint' % (L, jt)
+                if not self.model.existJointName(jn):     # 축소: freeze된 발목은 모델에 없음 → skip
+                    continue
+                q0[self.model.joints[self.model.getJointId(jn)].idx_q] = mq[mleg[L][JTYPES.index(jt)]]
         v0 = np.zeros(self.model.nv)
         return q0, v0, np.concatenate([q0, v0])
 
@@ -381,13 +435,21 @@ def closed_loop(M, xs, us, dt=0.02, KP=60.0, KD=2.0, loops=10, view=True):
 
 
 def _bridge(M, q):
-    """pin↔mujoco 매핑/변환 헬퍼 반환."""
+    """pin↔mujoco 매핑/변환 헬퍼 반환. ★완전 이름기반 — pin·MuJoCo 둘 다 비균일 DOF 처리.
+       (planner 14-DOF + exec 16-DOF[발목 hold] 또는 exec 14-DOF[발목 용접] 모두 동작.)"""
     import mujoco
-    pin2mj = np.zeros(M.nu, dtype=int)
-    for pi, L in enumerate(M.legs):
-        ml = q.legs.index(L)
-        for j in range(M.dof):
-            pin2mj[pi * M.dof + j] = ml * M.dof + j
+    pin2mj = []; _qp = []; _qv = []
+    for L in M.legs:                                  # pin 다리 순서로, 존재하는 관절만
+        for jt in JTYPES:
+            jn = '%s_%s_joint' % (L, jt)
+            if not M.model.existJointName(jn):        # planner(pin)에 없는 관절 skip
+                continue
+            aid = mujoco.mj_name2id(q.m, mujoco.mjtObj.mjOBJ_ACTUATOR, '%s_%s' % (L, jt))
+            jid = mujoco.mj_name2id(q.m, mujoco.mjtObj.mjOBJ_JOINT, jn)
+            pin2mj.append(aid)                        # MuJoCo 액추에이터 인덱스(이름조회)
+            _qp.append(int(q.m.jnt_qposadr[jid])); _qv.append(int(q.m.jnt_dofadr[jid]))
+    pin2mj = np.array(pin2mj, dtype=int)
+    mj_qp = np.array(_qp, dtype=int); mj_qv = np.array(_qv, dtype=int)
 
     def mj_to_pin(d):
         qp = np.zeros(M.model.nq); vp = np.zeros(M.model.nv)
@@ -396,8 +458,8 @@ def _bridge(M, q):
         R = np.zeros(9); mujoco.mju_quat2Mat(R, d.qpos[3:7]); R = R.reshape(3, 3)
         vp[0:3] = R.T @ d.qvel[0:3]      # world lin → local
         vp[3:6] = d.qvel[3:6]            # ang (mujoco free joint = local)
-        qp[7:] = d.qpos[7:7 + M.nu][pin2mj]
-        vp[6:] = d.qvel[6:6 + M.nu][pin2mj]
+        qp[7:] = d.qpos[mj_qp]
+        vp[6:] = d.qvel[mj_qv]
         return np.concatenate([qp, vp])
     return pin2mj, mj_to_pin
 

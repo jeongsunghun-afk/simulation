@@ -37,7 +37,7 @@ ROBOTS = {
     'ours': dict(mjcf=os.path.join(_HERE, 'quad_real.mjcf'),
                  legs=['HL', 'HR', 'FL', 'FR'], dof=4,
                  foot_body='{L}_foot_contact_link', hip_body='{L}_hip_link',
-                 foot_kind='mesh', base_z0=0.42, foot_z0=0.02, mu=0.6),
+                 foot_kind='mesh', base_z0=0.52, foot_z0=0.02, mu=0.6),   # _9 고정앞발목: 0.52서 무한안정(0.42=앞피칭 전복)
     'go2':  dict(mjcf=os.path.join(_HERE, '..', 'mujoco_menagerie', 'unitree_go2', 'scene.xml'),
                  legs=['FL', 'FR', 'RL', 'RR'], dof=3,
                  foot_geom='{L}', hip_body='{L}_hip',
@@ -46,7 +46,7 @@ ROBOTS = {
     'ours_sphere': dict(mjcf=os.path.join(_HERE, 'quad_real_sphere.mjcf'),
                         legs=['HL', 'HR', 'FL', 'FR'], dof=4,
                         foot_geom='{L}_sphere', hip_body='{L}_hip_link',
-                        foot_kind='sphere', base_z0=0.42, mu=0.6),
+                        foot_kind='sphere', base_z0=0.52, mu=0.6),   # _9 고정앞발목: 0.52서 무한안정(0.42=앞피칭 전복)
 }
 _ROBOT = 'ours'
 MJCF = ROBOTS['ours']['mjcf']    # (하위호환)
@@ -75,8 +75,15 @@ class QuadSim:
         N = lambda kind, nm: mujoco.mj_name2id(self.m, kind, nm)
         self.hip_bid = [N(mujoco.mjtObj.mjOBJ_BODY, cfg['hip_body'].format(L=L))
                         for L in self.legs]
-        self.legqp = [list(range(7 + i * self.dof, 7 + (i + 1) * self.dof)) for i in range(4)]
-        self.legqv = [list(range(6 + i * self.dof, 6 + (i + 1) * self.dof)) for i in range(4)]
+        # 다리별 qpos/qvel 인덱스 — 관절 이름으로 조회(비균일 DOF 대응: 앞발목 fixed면 3, 뒤 4)
+        _JT = ['hip', 'thigh', 'calf', 'foot']
+        self.legqp = []; self.legqv = []
+        for L in self.legs:
+            jids = [N(mujoco.mjtObj.mjOBJ_JOINT, '%s_%s_joint' % (L, jt)) for jt in _JT]
+            jids = [j for j in jids if j >= 0]
+            self.legqp.append([int(self.m.jnt_qposadr[j]) for j in jids])
+            self.legqv.append([int(self.m.jnt_dofadr[j]) for j in jids])
+        self.leg_dof = [len(qp) for qp in self.legqp]   # 다리별 DOF(비균일)
         # 발 접촉 geom/body + 접촉점 정의 (mesh=최저정점 / sphere=중심−반지름)
         self.foot_bid = [0] * 4; self.foot_gid = [0] * 4
         self.sole_off = [None] * 4; self.foot_r = [0.0] * 4
@@ -163,8 +170,9 @@ class QuadSim:
             for i in range(4):
                 tgt = np.array([foot_xy[i][0], foot_xy[i][1], self.foot_z0])
                 e = tgt - self.foot_point(i)
-                J = self.foot_jac(i)[:, self.legqv[i]]
-                d.qpos[self.legqp[i]] += 0.5 * (J.T @ np.linalg.solve(
+                vi = self.legqv[i][:3]; qi = self.legqp[i][:3]   # hip/thigh/calf만 — 뒷발 foot관절은 0(직선) 유지해 앞발(용접)과 대칭
+                J = self.foot_jac(i)[:, vi]
+                d.qpos[qi] += 0.5 * (J.T @ np.linalg.solve(
                     J @ J.T + 1e-4 * np.eye(3), e))
         mujoco.mj_forward(m, d)
         self.q_home = d.qpos[7:7 + self.nu].copy()

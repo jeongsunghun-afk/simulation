@@ -13,8 +13,8 @@ import sys
 import glob
 import numpy as np
 import xml.etree.ElementTree as ET
-import trimesh
 import mujoco
+# trimesh 는 decimation 시에만 필요 → 메시가 이미 처리됐으면 import 생략(lazy, 아래 루프 내)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SRC_MESH = os.path.join(HERE, 'meshes')
@@ -23,10 +23,17 @@ MJCF_OUT = os.path.join(HERE, 'quad_real.mjcf')
 TARGET = 60000          # decimation 목표 face (MuJoCo 한계 20만 이하, 시각 품질↑)
 FORCE = '--force' in sys.argv
 
-# URDF 자동 탐지 (urdf/ 안의 .urdf 1개) — 파일명 바뀌어도 동작
-_urdfs = sorted(glob.glob(os.path.join(HERE, 'urdf', '*.urdf')))
+# URDF 선택: URDF_FILE env 명시 가능, 기본=02_Leg_UFDF 최신버전(_N 최대; _9=앞발목 fixed 14-DOF)
+import re as _re
+_urdfs = glob.glob(os.path.join(HERE, 'urdf', '*.urdf'))
 assert _urdfs, 'urdf/ 폴더에 .urdf 파일이 없습니다'
-SRC_URDF = _urdfs[0]
+if os.environ.get('URDF_FILE'):
+    SRC_URDF = os.path.join(HERE, 'urdf', os.environ['URDF_FILE'])
+else:
+    _leg = [f for f in _urdfs if os.path.basename(f).startswith('02_Leg_UFDF')]
+    _ver = lambda f: int(_re.search(r'_(\d+)\.urdf$', os.path.basename(f)).group(1)) \
+        if _re.search(r'_(\d+)\.urdf$', os.path.basename(f)) else -1
+    SRC_URDF = max(_leg, key=_ver) if _leg else sorted(_urdfs)[0]
 print('URDF:', os.path.basename(SRC_URDF))
 
 # ── ① decimation (소스 메시가 더 최신인 것만 재처리; --force 면 전부) ──
@@ -36,6 +43,7 @@ for f in sorted(glob.glob(SRC_MESH + '/*.STL')):
     out = os.path.join(MESH_OUT, os.path.basename(f))
     if (not FORCE) and os.path.exists(out) and os.path.getmtime(out) >= os.path.getmtime(f):
         continue   # 최신이면 skip
+    import trimesh   # decimation 필요 시에만 로드
     mesh = trimesh.load(f, force='mesh')
     n0 = len(mesh.faces)
     if n0 > TARGET:
@@ -69,7 +77,7 @@ ET.SubElement(wb, 'light', {'pos': '0 0 3', 'dir': '0 0 -1'})
 ET.SubElement(root, 'option', {'timestep': '0.002', 'gravity': '0 0 -9.81'})
 
 dft = ET.SubElement(root, 'default')
-ET.SubElement(dft, 'geom', {'friction': '0.9 0.02 0.001', 'condim': '3'})
+ET.SubElement(dft, 'geom', {'friction': '1.3 0.02 0.001', 'condim': '3'})   # 고그립(0.9→1.3) → 속도범위 0.7
 ET.SubElement(dft, 'motor', {'ctrllimited': 'true', 'ctrlrange': '-80 80'})
 act = ET.SubElement(root, 'actuator')
 for jn in [j.get('name') for j in root.iter('joint') if j.get('name')]:

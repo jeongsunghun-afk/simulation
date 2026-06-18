@@ -114,7 +114,7 @@ class TSIDLayer:
     """우리 pinocchio 모델 위의 TSID 역동역학 QP. 발=ContactPoint, 자세·베이스 task.
        set_reference(q,v,a_ref, stance) → solve(q_meas,v_meas) → tau."""
 
-    def __init__(self, P, q0, dt, mu=0.6,
+    def __init__(self, P, q0, dt, mu=float(os.environ.get('MU_FRIC', '0.9')),   # 구조1과 동일 비보수 마찰(물리 1.3 내접)
                  w_post=float(os.environ.get('W_POST', '2.0')),       # best found(~5s)
                  w_base=float(os.environ.get('W_BASE', '10.0')),
                  w_force=float(os.environ.get('W_FORCE', '1.0')),

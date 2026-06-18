@@ -12,6 +12,7 @@ quad_nmpc.py(FDDP, crocoddyl, soft penalty) 와 달리, 마찰콘·토크를 Pro
 """
 import os
 import time
+from collections import deque
 import numpy as np
 import mujoco
 import pinocchio as pin
@@ -21,7 +22,7 @@ from aligator import constraints as acon
 import quad_nmpc as QN
 
 LEGS = QN.LEGS_PIN
-MU = 0.6 * 0.707
+MU = float(os.environ.get('MU_FRIC', '0.9'))     # 마찰콘 pyramid μ. 물리 sphere 1.3 cone에 내접(1.3*0.707≈0.92) → 속도범위 0.7
 TAU_LIM = 80.0
 # cost 가중 (env 튜닝): base z/자세(roll·pitch)/yaw, 관절, base속도, 관절속도, swing, 제어
 PW = dict(z=float(os.environ.get('PW_Z', '50')), ori=float(os.environ.get('PW_ORI', '150')),
@@ -30,9 +31,51 @@ PW = dict(z=float(os.environ.get('PW_Z', '50')), ori=float(os.environ.get('PW_OR
           sw=float(os.environ.get('PW_SW', '100')), u=float(os.environ.get('PW_U', '1e-3')))
 
 
-def _wstate(nu):
-    return np.concatenate([[0, 0, PW['z']], [PW['ori'], PW['ori'], PW['yaw']],
-                           [PW['j']] * nu, [PW['bv']] * 6, [PW['jv']] * nu])
+W_FOOT_LOCK = float(os.environ.get('W_FOOT_LOCK', '50'))   # 발목 고정(planner): posture/velocity 가중
+
+
+def _foot_lock_widx(model, nu):
+    """LOCK_FOOT_MODE=plan일 때 고정할 관절의 (posture_w_idx, vel_w_idx) 목록.
+       플래너가 해당 발목을 nominal(x_ref)에 강하게 묶어 자기일관적으로 거의 고정."""
+    if os.environ.get('LOCK_FOOT_MODE', 'pin') != 'plan' or not os.environ.get('LOCK_FOOT'):
+        return []
+    ln = os.environ['LOCK_FOOT']
+    names = ['FL_foot', 'FR_foot'] if ln in ('1', 'front', 'true') else [s.strip() for s in ln.split(',')]
+    out = []
+    for nm in names:
+        jn = nm + '_joint'
+        if model.existJointName(jn):
+            j = model.joints[model.getJointId(jn)]
+            out.append((6 + (j.idx_q - 7), 12 + nu + (j.idx_v - 6)))   # (posture, velocity) 가중 인덱스
+    if out:
+        print('[LOCK_FOOT] planner 고정:', names, 'W=%g' % W_FOOT_LOCK)
+    return out
+
+
+def _wstate(nu, lock=None):
+    w = np.concatenate([[0, 0, PW['z']], [PW['ori'], PW['ori'], PW['yaw']],
+                        [PW['j']] * nu, [PW['bv']] * 6, [PW['jv']] * nu])
+    for pidx, vidx in (lock or []):
+        w[pidx] = W_FOOT_LOCK; w[vidx] = W_FOOT_LOCK       # 발목 posture/velocity 가중 ↑
+    return w
+
+
+def _foot_lock_tangent(model, nv):
+    """LOCK_FOOT_MODE=ocp일 때 NMPC 하드 등식제약에 묶을 발목의 tangent(ndx) 인덱스.
+       각 발목: config tangent=idx_v, velocity tangent=nv+idx_v → q=nominal·v=0 강제."""
+    if os.environ.get('LOCK_FOOT_MODE', 'pin') != 'ocp' or not os.environ.get('LOCK_FOOT'):
+        return []
+    ln = os.environ['LOCK_FOOT']
+    names = ['FL_foot', 'FR_foot'] if ln in ('1', 'front', 'true') else [s.strip() for s in ln.split(',')]
+    idx = []
+    for nm in names:
+        jn = nm + '_joint'
+        if model.existJointName(jn):
+            iv = model.joints[model.getJointId(jn)].idx_v
+            idx += [iv, nv + iv]                            # 발목 위치(=nominal)·속도(=0) tangent 성분
+    if idx:
+        print('[LOCK_FOOT] OCP 하드제약 발목:', names, '(tangent idx %s)' % idx)
+    return idx
 # 마찰 pyramid A(5x3): A·f ≤ 0  (fz≥0, |fx|≤μfz, |fy|≤μfz)
 _FC_A = np.array([[0, 0, -1.0],
                   [1, 0, -MU], [-1, 0, -MU],
@@ -53,6 +96,8 @@ class ProxModel:
         self.prox = pin.ProximalSettings(1e-9, 1e-10, 10)
         self.x0 = self.M.x0
         self.foot_home = self.M.foot_home
+        self._lock_w = _foot_lock_widx(self.model, self.nu)   # LOCK_FOOT_MODE=plan 발목 고정 가중 인덱스
+        self._lock_ocp = _foot_lock_tangent(self.model, self.nv)   # LOCK_FOOT_MODE=ocp 하드제약 tangent 인덱스
         # 발별 RigidConstraintModel(3D 점접촉, 발 프레임 parent joint + placement)
         self.rcm = {}
         for L in self.legs:
@@ -79,7 +124,7 @@ class ProxModel:
         # ── cost ──
         cost = aligator.CostStack(self.space, self.nu)
         if w_state is None:
-            w_state = _wstate(self.nu)
+            w_state = _wstate(self.nu, self._lock_w)
         cost.addCost('xreg', aligator.QuadraticStateCost(
             self.space, self.nu, x_ref, np.diag(w_state ** 2)), 1.0)
         cost.addCost('ureg', aligator.QuadraticControlCost(
@@ -99,11 +144,19 @@ class ProxModel:
         ures = aligator.ControlErrorResidual(self.ndx, np.zeros(self.nu))
         stm.addConstraint(ures, acon.BoxConstraint(-TAU_LIM * np.ones(self.nu),
                                                    TAU_LIM * np.ones(self.nu)))
+        # 발목 고정(OCP 하드제약): 선택한 tangent 성분(발목 q,v) = x0(nominal,0) → 등식 0
+        if self._lock_ocp:
+            A = np.zeros((len(self._lock_ocp), self.ndx))
+            for i, k in enumerate(self._lock_ocp):
+                A[i, k] = 1.0
+            sres = aligator.linear_compose(
+                aligator.StateErrorResidual(self.space, self.nu, self.x0), A, np.zeros(len(self._lock_ocp)))
+            stm.addConstraint(sres, acon.EqualityConstraintSet())
         return stm
 
     def terminal_cost(self, x_ref, w_state=None):
         if w_state is None:
-            w_state = _wstate(self.nu)
+            w_state = _wstate(self.nu, self._lock_w)
         return aligator.QuadraticStateCost(self.space, self.nu, x_ref, np.diag((1e2 * w_state) ** 2))
 
 
@@ -432,9 +485,13 @@ class _HUD:
         self.foot_gids = list(foot_gids) if foot_gids is not None else []   # 발 접촉(빨강 sphere) geom
         self._foot_rgba0 = {g: m.geom_rgba[g].copy() for g in self.foot_gids}
         self.show_contact = True
+        _tn = int(os.environ.get('TRAIL_N', '300'))
+        self.foot_trail = [deque(maxlen=_tn) for _ in self.foot_gids]   # 발별 위치 이력(궤적 선)
+        self.base_trail = deque(maxlen=_tn)                             # base 좌표계 궤적
+        self.show_trail = True
         self.v = mjv.launch_passive(m, d, key_callback=self._key)
         self.v.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = 1     # 외력 박스 표시
-        print('조작기: ↑/↓=전진±  ←/→=측방strafe±  ,/.=선회yaw±  X=정지 | [/]=재생속도  C=접촉점표시  Ctrl+드래그=외력')
+        print('조작기: ↑/↓=전진±  ←/→=측방strafe±  ,/.=선회yaw±  X=정지 | [/]=재생속도  C=접촉점  T=발궤적  Ctrl+드래그=외력')
 
     def _toggle_contact(self):
         self.show_contact = not self.show_contact
@@ -450,6 +507,12 @@ class _HUD:
             self.speed = max(1.0 / 16, self.speed / 2); print('[viewer] 재생속도 x%.3g' % self.speed)
         elif kc in (ord('c'), ord('C')):
             self._toggle_contact()
+        elif kc in (ord('t'), ord('T')):        # 발+base 궤적 선 토글(+버퍼 비움)
+            self.show_trail = not self.show_trail
+            for tr in self.foot_trail:
+                tr.clear()
+            self.base_trail.clear()
+            print('[viewer] 궤적 %s' % ('표시' if self.show_trail else '숨김'))
         else:
             self.cmd.key(kc)                    # 조작기 키는 CommandSource 에 위임
 
@@ -467,13 +530,40 @@ class _HUD:
         m, d, v = self.m, self.d, self.v
         scn = v.user_scn; scn.ngeom = 0
         eye = np.eye(3).flatten()
-        for p in markers:                                              # 다음 footstep(빨강 지면구)
+        for p in markers:                                              # 다음 footstep(빨강 지면구, 작게)
             if scn.ngeom >= scn.maxgeom:
                 break
             mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
-                                np.array([0.03, 0, 0]), np.array([p[0], p[1], 0.012]),
+                                np.array([0.01, 0, 0]), np.array([p[0], p[1], 0.008]),
                                 eye, np.array([1, 0.1, 0.1, 0.9], np.float32))
             scn.ngeom += 1
+        # 발 궤적: 각 발 위치 이력을 선으로 연속 표시 (stance=정지점은 0길이라 자동 생략)
+        _tc = [[0.2, 0.6, 1, 1], [0.2, 1, 0.4, 1], [1, 0.6, 0.2, 1], [1, 0.3, 0.85, 1]]   # 발별 색
+        if self.show_trail:
+            for fi, gid in enumerate(self.foot_gids):
+                self.foot_trail[fi].append(d.geom_xpos[gid].copy())
+                pts = self.foot_trail[fi]; col = np.array(_tc[fi % 4], np.float32)
+                for k in range(1, len(pts)):
+                    if scn.ngeom >= scn.maxgeom:
+                        break
+                    if np.linalg.norm(pts[k] - pts[k - 1]) < 1e-4:      # 정지(stance) 구간 생략
+                        continue
+                    g = scn.geoms[scn.ngeom]
+                    mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_LINE, np.zeros(3), np.zeros(3), eye, col)
+                    mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_LINE, 0.004, pts[k - 1], pts[k])
+                    scn.ngeom += 1
+            # base 좌표계 궤적 (흰색 선)
+            self.base_trail.append(d.qpos[0:3].copy())
+            bp = self.base_trail; bcol = np.array([1, 1, 1, 1], np.float32)
+            for k in range(1, len(bp)):
+                if scn.ngeom >= scn.maxgeom:
+                    break
+                if np.linalg.norm(bp[k] - bp[k - 1]) < 1e-4:
+                    continue
+                g = scn.geoms[scn.ngeom]
+                mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_LINE, np.zeros(3), np.zeros(3), eye, bcol)
+                mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_LINE, 0.006, bp[k - 1], bp[k])
+                scn.ngeom += 1
         if arrow is not None and scn.ngeom < scn.maxgeom:             # 조작 방향(로봇 위 노랑 화살표)
             g = scn.geoms[scn.ngeom]
             mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_ARROW, np.zeros(3), np.zeros(3),
@@ -517,8 +607,11 @@ def _footstep_markers(P, V, T, sf, gait_t, bx, by, byaw):
 
 def _leg_ik(P, q, L, p_world, iters=5, damp=1e-4):
     """다리 L 발끝을 p_world 로 보내는 관절각 — q의 해당 다리 관절만 damped-LS 수정(나머지 불변)."""
-    M = P.M; k = M.legs.index(L); dof = M.dof
-    qi = list(range(7 + k * dof, 7 + (k + 1) * dof)); vi = list(range(6 + k * dof, 6 + (k + 1) * dof))
+    M = P.M
+    # 다리 L의 실제 존재 관절 q/v 인덱스(축소모델 비균일 대응 — idx_q/idx_v 직접)
+    jids = [M.model.getJointId('%s_%s_joint' % (L, jt)) for jt in QN.JTYPES
+            if M.model.existJointName('%s_%s_joint' % (L, jt))]
+    qi = [M.model.joints[j].idx_q for j in jids]; vi = [M.model.joints[j].idx_v for j in jids]
     fid = M.foot_fid[L]; q = q.copy()
     for _ in range(iters):
         pin.forwardKinematics(M.model, M.data, q); pin.updateFramePlacements(M.model, M.data)
@@ -528,6 +621,18 @@ def _leg_ik(P, q, L, p_world, iters=5, damp=1e-4):
         J = pin.computeFrameJacobian(M.model, M.data, q, fid, pin.LOCAL_WORLD_ALIGNED)[:3][:, vi]
         q[qi] += J.T @ np.linalg.solve(J @ J.T + damp * np.eye(3), e)
     return q
+
+
+def _gait_for_speed(V, Vy=0.0):
+    """속도별 gait 파라미터. ★우리 NMPC는 step길이가 march=V·T로 자동스케일 → 주파수(gait_T)를
+       바꿀 필요 없음(표의 주파수스케일링과 반대). 마찰0.63 기준 상수 gait_T=0.35가 0.1~0.6 m/s 검증.
+       step_h만 속도에 따라 완만히 ↑(swing 빨라질수록 clearance). 상한 ~0.6(이상은 Floquet 전복)."""
+    spd = float(np.hypot(V, Vy))
+    gait_T = 0.35
+    step_h = float(np.clip(0.05 + 0.05 * spd, 0.05, 0.08))    # 0.1→0.055 0.3→0.065 0.6→0.08
+    if spd > 0.62:
+        print('[AUTO_GAIT] ⚠ |v|=%.2f > 0.6 한계 근처 — 전복 위험' % spd)
+    return gait_T, step_h
 
 
 def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5,
@@ -540,9 +645,15 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
        Vy: 측방속도(strafe) — 발이 옆으로 stepping하는 진짜 측방보행 사이클(0=전진전용)."""
     exec_robot = exec_robot or robot
     import sys, time, mujoco
-    maxiter = int(os.environ.get('MAXITER', maxiter))   # 고속=계획 수렴에 더 필요
-    n_warm = int(os.environ.get('NWARM', n_warm))        # warm 사이클↑ → 정상사이클 품질↑
+    if os.environ.get('AUTO_GAIT'):              # 속도별 적절한 주기·발높이 자동 (gait-T/step-h 무시)
+        T, step_h = _gait_for_speed(V, Vy)
+        print('[AUTO_GAIT] |v|=%.2f → gait_T=%.3f step_h=%.3f' % (np.hypot(V, Vy), T, step_h))
     P = ProxModel(robot)
+    # 발목 축소모델(_9 URDF 앞발목 fixed, 또는 LOCK_FOOT_MODE=reduce)=비균일 14-DOF → 수렴에 더 필요
+    _reduce = any(d < 4 for d in P.M.leg_dof.values()) or \
+        (os.environ.get('LOCK_FOOT_MODE') == 'reduce' and os.environ.get('LOCK_FOOT'))
+    maxiter = int(os.environ.get('MAXITER', 400 if _reduce else maxiter))
+    n_warm = int(os.environ.get('NWARM', 10 if _reduce else n_warm))         # warm 사이클↑ → 정상사이클 품질↑
     cyc = round(T / dt)
     # ── warm 계획(settle + n_warm 사이클) 풀어 정상상태 1사이클 추출 ──
     N = settle_steps + n_warm * cyc
@@ -597,6 +708,28 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
     m, d = q.m, q.d; pin2mj, mj_to_pin = QN._bridge(P.M, q)
     sub = max(1, round(dt / m.opt.timestep)); tmax = 0.0
     nsteps = int(total_T / dt); t0 = time.time()
+    # LOCK_FOOT: 지정 발목 관절을 nominal 각도에 고정. LOCK_FOOT=1/front → 앞다리 FL/FR foot
+    #   LOCK_FOOT_MODE=pin(기본): kinematic 핀(qpos/qvel 리셋). =limit: 관절 range를 nominal±eps로 좁혀 물리제약(솔버 운동량보존)
+    lock_idx = []; lock_mode = os.environ.get('LOCK_FOOT_MODE', 'pin'); lock_eps = float(os.environ.get('LOCK_EPS', '0.01'))
+    KP_LOCK = float(os.environ.get('KP_LOCK', '150')); KD_LOCK = float(os.environ.get('KD_LOCK', '8'))   # reduce 발목 수동스프링(K/D)
+    #   =plan: 플래너 posture 가중(_foot_lock_widx) + 물리 limit 둘 다 → 플랜·물리 일관 고정
+    #   =ocp: 플래너 하드 등식제약만(exec 표준 — 발목은 계획토크+피드백이 잡음). exec 핀 안 함
+    if os.environ.get('LOCK_FOOT') and lock_mode != 'ocp':
+        _ln = os.environ['LOCK_FOOT']
+        _names = ['FL_foot', 'FR_foot'] if _ln in ('1', 'front', 'true') else [s.strip() for s in _ln.split(',')]
+        for nm in _names:
+            aid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, nm)
+            if aid >= 0:
+                qnom = float(q.q_home[aid]); lock_idx.append((aid, 7 + aid, 6 + aid, qnom))   # (act, qpos, qvel, nominal)
+                if lock_mode == 'limit':                    # 관절 range를 nominal±eps로 좁힘(물리 제약)
+                    jid = int(m.actuator_trnid[aid, 0]); m.jnt_limited[jid] = 1
+                    m.jnt_range[jid] = [qnom - lock_eps, qnom + lock_eps]
+                elif lock_mode == 'reduce':                 # 수동 스프링(damping은 MuJoCo가 implicit 적분 — 안정)으로 nominal 홀드
+                    jid = int(m.actuator_trnid[aid, 0])
+                    m.jnt_stiffness[jid] = KP_LOCK; m.dof_damping[6 + aid] += KD_LOCK; m.qpos_spring[7 + aid] = qnom
+        print('[LOCK_FOOT] 고정:', [l[0] for l in lock_idx], '(%s) mode=%s%s' %
+              (_names, lock_mode, (' ±%.3frad' % lock_eps) if lock_mode == 'limit'
+               else (' spring K=%g D=%g' % (KP_LOCK, KD_LOCK)) if lock_mode == 'reduce' else ''))
     # ── 상위 명령 루프(조작기 인터페이스). 명령 = 전진 v_cmd[m/s] + 선회 w_cmd[rad/s].
     #    뷰어=운영자 키(WASD)로 v_cmd/w_cmd, 헤드리스=자동 직선유지(steer-to-line, w 자동).
     #    heading 적분 yaw_ref → 2D 전진 carrot(yaw_ref 방향) + lag 포화. Raibert 없이 heading 권한만. ──
@@ -671,16 +804,23 @@ def walk_loop(robot='go2', V=0.3, total_T=30.0, n_warm=6, dt=0.02, T=0.5, sf=0.5
         for _ in range(sub):
             x = mj_to_pin(d)
             u = cyc_us[i] - cyc_Ks[i] @ P.space.difference(target, x)
-            umj = np.zeros(P.nu); umj[pin2mj] = u
-            d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM); mujoco.mj_step(m, d)
+            umj = np.zeros(m.nu); umj[pin2mj] = u          # MuJoCo 액추에이터 크기(축소시 P.nu≠m.nu, 앞foot=0)
+            if lock_mode in ('pin', 'plan', 'ocp', 'reduce'):   # 앞발목 액추에이터 토크 0(reduce는 수동 스프링이 홀드)
+                for aid, _, _, _ in lock_idx:
+                    umj[aid] = 0.0
+            d.ctrl[:] = np.clip(umj, -TAU_LIM, TAU_LIM)
+            mujoco.mj_step(m, d)
+            if lock_mode in ('pin', 'plan', 'ocp'):         # kinematic 리셋(reduce는 PD가, limit는 물리range가 처리)
+                for _, qadr, vadr, qnom in lock_idx:        # 발목 kinematic 고정: nominal 각도에 핀(qpos/qvel 리셋)
+                    d.qpos[qadr] = qnom; d.qvel[vadr] = 0.0
             if dlog: dlog.add(d.time, d.ctrl, d.qvel[6:])   # 각 축 토크[Nm]·각속도[rad/s]
             if lplot: lplot.add(d.time, d.ctrl, d.qvel[6:])  # 실시간 그래프
         for L in cyc_swing[(i - 1) % cyc]:                 # 이번 스텝 착지(swing→stance) → 이력 기록
             if L not in cyc_swing[i]:
                 fp = q.foot_point(legidx[L]); step_hist.append((float(fp[0]), float(fp[1])))
-                if os.environ.get('TRACE') and L in prev_lm:    # 예측마커↔실제발 거리
-                    print('  착지 %s: 마커-발 = %4.0fmm' % (L, 1000 * np.hypot(
-                        prev_lm[L][0] - fp[0], prev_lm[L][1] - fp[1])), flush=True)
+                if os.environ.get('TRACE') and L in prev_lm:    # 예측마커↔실제발 거리(x/y 분해)
+                    print('  착지 %s: 마커-발 dx=%+4.0f dy=%+4.0f mm (발 y=%+.3f)' % (
+                        L, 1000 * (prev_lm[L][0] - fp[0]), 1000 * (prev_lm[L][1] - fp[1]), fp[1]), flush=True)
         prev_lm = cur_lm
         if hud:
             mk = list(step_hist) + land_marks              # 과거 1주기 착지 + 현재 swing 예측(통일된 착지 target)
@@ -784,6 +924,10 @@ def _solver_opts(sol):
             pass
     try:
         sol.filter.beta = 1e-5
+    except Exception:
+        pass
+    try:
+        sol.setNumThreads(int(os.environ.get('NUM_THREADS', '1')))   # OCP stage 병렬(RTI 속도↑). 기본1, RTI=8~16 권장
     except Exception:
         pass
     return sol
@@ -1041,9 +1185,10 @@ def walk_rti(robot='go2', V=0.3, T=0.5, sf=0.5, step_h=0.06, settle=0.3,
     end_px, end_py, end_pyaw = px, py, pyaw
     end_t = gait_t + Hn * dt
     prob = aligator.TrajOptProblem(x0, stages, P.terminal_cost(_xref_pose(P, px, py, pyaw, V, 0.0)))
+    warm_iters = int(os.environ.get('RTI_WARM', '100'))   # ★워밍업 수렴 필수(cold start, 20=미수렴→전복)
     sol = _solver_opts(aligator.SolverProxDDP(1e-3, 1e-6, max_iters=warm_iters))
     sol.setup(prob); sol.run(prob, [x0] * (Hn + 1), [np.zeros(P.nu)] * Hn)
-    rti_iters = int(os.environ.get('RTI_ITERS', '1'))   # 틱당 뉴턴스텝(1=정통 RTI, 2~5=완화)
+    rti_iters = int(os.environ.get('RTI_ITERS', '3'))   # 틱당 뉴턴스텝(3=sweet spot; 1=거침,5=과보정)
     print('RTI 워밍업 conv=%s iters=%d → 매 틱 %d스텝 RTI 시작' % (
         sol.results.conv, sol.results.num_iters, rti_iters))
     sol.max_iters = rti_iters                           # ← RTI: 이후 매 틱 소수 뉴턴스텝

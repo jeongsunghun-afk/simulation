@@ -300,7 +300,8 @@ pip install pin                   # Phase 6 (pinocchio)
 ---
 
 ## 참고 문헌
-#ANYmal
-- Kim et al., "Highly Dynamic Quadruped Locomotion via Whole-Body Impulse Control and Model Predictive Control", IROS 2019 (MIT Cheetah 3)
 - Di Carlo et al., "Dynamic Locomotion in the MIT Cheetah 3 Through Convex Model-Predictive Control", IROS 2018
+- Kim et al., "Highly Dynamic Quadruped Locomotion via Whole-Body Impulse Control and Model Predictive Control", IROS 2019 (MIT Cheetah 3)
+- Kim et al., "Contact-Implicit MPC: Controlling Diverse Quadruped Motions Without Pre-Planned Contact Modes", SAGE 2023
 - Wensing & Orin, "Generation of Dynamic Humanoid Behaviors through Task-Space Control with Conic Optimization", ICRA 2013
+- Sleiman et al., "A Unified MPC Framework for Whole-Body Dynamic Locomotion and Manipulation", IEEE Robotics and Automation Letters 6(3), 2021(ETHzürich)

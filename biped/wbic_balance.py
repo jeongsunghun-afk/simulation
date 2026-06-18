@@ -49,6 +49,9 @@ class BipedWBIC:
         self.z_ref = None
         self.com_x_ref = None
         self.q_home = np.zeros(8)   # crouch posture ref (settle 에서 채움)
+        self.com_mode = 0           # 0:OFF 1:전체CoM만 2:파트별CoM만 (뷰어 '1' 키로 순환)
+        self.show_com = False       # com_mode 에서 파생
+        self.show_part_com = False
 
     # ---- model quantities ----
     def M_full(self):
@@ -91,6 +94,40 @@ class BipedWBIC:
         jp = np.zeros((3, self.nv))
         mujoco.mj_jacSubtreeCom(self.m, self.d, jp, 0)
         return jp
+
+    # ---- 전신 CoM 모니터링 (뷰어) ----
+    def _key_callback(self, keycode):
+        """뷰어 '1' 키: CoM 표시 순환  OFF → 전체CoM만 → 파트별CoM만 → OFF.
+        ('M'은 MuJoCo 내장 mjVIS_COM 단축키라 충돌 → '1' 사용)."""
+        if keycode == ord('1'):
+            self.com_mode = (self.com_mode + 1) % 3
+            self.show_com = (self.com_mode == 1)
+            self.show_part_com = (self.com_mode == 2)
+            print('[viewer] CoM 표시: %s' % ['OFF', '전체CoM만', '파트별CoM만'][self.com_mode])
+
+    def draw_com_marker(self, viewer):
+        """전신 CoM(주황 구, show_com) + 각 파트 CoM(시안 구, show_part_com).
+        draw_grf_arrows 뒤에 호출(ngeom 이어붙임)."""
+        scn = viewer.user_scn
+        eye = np.eye(3).flatten()
+        # 전신 질량중심 (주황 구)
+        if getattr(self, 'show_com', False) and scn.ngeom < scn.maxgeom:
+            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                                np.array([0.016, 0, 0]), self.d.subtree_com[0].copy(), eye,
+                                np.array([1.0, 0.55, 0.0, 1.0], np.float32))
+            scn.ngeom += 1
+        # 각 파트(link) CoM (시안 구, 질량 비례 크기)
+        if getattr(self, 'show_part_com', False):
+            masses = self.m.body_mass
+            mmax = float(masses[1:].max()) if self.m.nbody > 1 else 1.0
+            for b in range(1, self.m.nbody):
+                if masses[b] <= 0 or scn.ngeom >= scn.maxgeom:
+                    continue
+                r = 0.008 + 0.020 * (masses[b] / max(mmax, 1e-9))
+                mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                                    np.array([r, 0, 0]), self.d.xipos[b].copy(), eye,
+                                    np.array([0.1, 0.7, 1.0, 0.9], np.float32))
+                scn.ngeom += 1
 
     # ---- WBIC stance QP ----
     def wbic_stance(self, contacts, com_ref=None, kp=(120, 120, 160), kd=(22, 22, 25),
@@ -166,6 +203,7 @@ class BipedWBIC:
         P = 0.5 * (P + P.T) + 1e-8 * np.eye(nz)
         z = solve_qp(P, qv, G, hg, A, b, lb, ub, solver='quadprog')
         if z is None:
+            self.last_lam = None
             return None, None, False
         ddq = z[:nv]
         lam = [z[sl_lam(k)] for k in range(K)]
@@ -174,6 +212,7 @@ class BipedWBIC:
         for k, J in enumerate(Js):
             tau -= J[:, 6:14].T @ lam[k]
         tau = np.clip(tau, -TAU_MAX, TAU_MAX)
+        self.last_lam = lam   # GRF 화살표 표시용
         return tau, lam, True
 
 
@@ -381,7 +420,9 @@ class BipedMarch(BipedWBIC):
         omega = np.sqrt(9.81 / self.z_ref)
         nom = {0: self.foot_world(0)[:2].copy(), 1: self.foot_world(1)[:2].copy()}
         liftoff = {0: nom[0].copy(), 1: nom[1].copy()}
-        v = mujoco.viewer.launch_passive(m, d) if viewer else None
+        v = mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) if viewer else None
+        if v is not None:
+            v.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0   # 내장 CoM 마커 OFF (커스텀과 중복 방지)
         if viewer:
             print('viewer open (march) — 창 닫으면 종료.')
         nfall = 0
@@ -448,6 +489,7 @@ class BipedMarch(BipedWBIC):
                 if d.qpos[2] < 0.15 or d.qpos[2] > 0.9 or abs(d.qpos[3]) < 0.6:
                     settle_and_set_ref(self); self.scratch.qpos[:] = d.qpos[:]; com_y_prev = 0.0
                 self.draw_grf_arrows(v, used_feet, lam if ok else [None] * len(used_feet))
+                self.draw_com_marker(v)
                 v.sync()
                 dt = m.opt.timestep - (time.time() - t0)
                 if dt > 0:
@@ -474,7 +516,9 @@ class BipedMarch(BipedWBIC):
         omega = np.sqrt(9.81 / self.z_ref)
         nom = {0: self.foot_world(0)[:2].copy(), 1: self.foot_world(1)[:2].copy()}
         liftoff = {0: nom[0].copy(), 1: nom[1].copy()}
-        v = mujoco.viewer.launch_passive(m, d) if viewer else None
+        v = mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) if viewer else None
+        if v is not None:
+            v.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0   # 내장 CoM 마커 OFF (커스텀과 중복 방지)
         if viewer:
             print('viewer open (mpc) — 창 닫으면 종료.')
         nfail = 0
@@ -535,6 +579,7 @@ class BipedMarch(BipedWBIC):
                 if d.qpos[2] < 0.15 or d.qpos[2] > 0.9 or abs(d.qpos[3]) < 0.6:
                     settle_and_set_ref(self); self.scratch.qpos[:] = d.qpos[:]
                 self.draw_grf_arrows(v, stance_feet, lam if ok else [None] * len(stance_feet))
+                self.draw_com_marker(v)
                 v.sync()
                 dt = m.opt.timestep - (time.time() - t0)
                 if dt > 0:
@@ -552,7 +597,8 @@ class BipedMarch(BipedWBIC):
         return d.qpos[2], d.qpos[3]
 
     # ───────────────────── LIPM / ICP 풋스텝 플래너 ─────────────────────
-    def run_lipm(self, seconds=8.0, T_step=0.34, viewer=False, push=None):
+    def run_lipm(self, seconds=8.0, T_step=0.34, viewer=False, push=None,
+                 clamp_y=0.05, clamp_x=0.12):
         """LIPM + Capture-Point 풋스텝 안정화.
 
         핵심: 스탠스 WBIC 는 높이+직립만 유지(수평 CoM 규제 0 → CoM 이 LIPM 진자처럼
@@ -568,7 +614,9 @@ class BipedMarch(BipedWBIC):
         liftoff = {0: self.foot_world(0).copy(), 1: self.foot_world(1).copy()}
         swing_tgt = {0: self.foot_world(0).copy(), 1: self.foot_world(1).copy()}
         planned = -1
-        v = mujoco.viewer.launch_passive(m, d) if viewer else None
+        v = mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) if viewer else None
+        if v is not None:
+            v.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0   # 내장 CoM 마커 OFF (커스텀과 중복 방지)
         if viewer:
             print('viewer open (lipm) — 창 닫으면 종료.')
         nfall = 0
@@ -586,8 +634,8 @@ class BipedMarch(BipedWBIC):
                 p_st = self.foot_world(stance)[:2]
                 xi0 = com[:2] + vcom[:2] / omega
                 xi_end = p_st + (xi0 - p_st) * np.exp(omega * T_step)   # 종료 시 ICP
-                tx = np.clip(xi_end[0], foot_x_nom - 0.12, foot_x_nom + 0.12)
-                ty = foot_y[swing] + np.clip(xi_end[1] - foot_y[swing], -0.05, 0.05)
+                tx = np.clip(xi_end[0], foot_x_nom - clamp_x, foot_x_nom + clamp_x)
+                ty = foot_y[swing] + np.clip(xi_end[1] - foot_y[swing], -clamp_y, clamp_y)
                 swing_tgt[swing] = np.array([tx, ty, GROUND_Z])
 
             # 스윙 발 궤적 (gait_sim baseline)
@@ -618,6 +666,7 @@ class BipedMarch(BipedWBIC):
                 if d.qpos[2] < 0.15 or d.qpos[2] > 0.9 or abs(d.qpos[3]) < 0.6:
                     settle_and_set_ref(self); self.scratch.qpos[:] = d.qpos[:]; planned = -1
                 self.draw_grf_arrows(v, [stance], [lam[0]] if ok else [None])
+                self.draw_com_marker(v)
                 v.sync()
                 dt = m.opt.timestep - (time.time() - t0)
                 if dt > 0:
@@ -683,7 +732,7 @@ def run(seconds=5.0, viewer=False):
         return ok, (sum(l[2] for l in lam) if ok else 0.0)
 
     if viewer:
-        _viewer_loop(m, d, control, seconds, ctrl)
+        _viewer_loop(m, d, control, seconds, ctrl, draw_grf=True, feet=[0, 1])
     else:
         for step in range(int(seconds / m.opt.timestep)):
             ok, lamz = control(); mujoco.mj_step(m, d)
@@ -695,16 +744,29 @@ def run(seconds=5.0, viewer=False):
         print('done. final base_z=%.3f upright_w=%.3f' % (d.qpos[2], d.qpos[3]))
 
 
-def _viewer_loop(m, d, control_fn, seconds, ctrl):
-    """passive viewer 에서 control_fn() 호출하며 실시간 step. 넘어지면 reset."""
+def _viewer_loop(m, d, control_fn, seconds, ctrl, draw_grf=False, feet=(0, 1)):
+    """passive viewer 에서 control_fn() 호출하며 실시간 step. 넘어지면 reset.
+
+    draw_grf=True 면 매 프레임 ctrl.last_lam 을 발바닥에서 GRF 화살표로 표시.
+    """
     import time
     # (mujoco.viewer imported at module top)
-    with mujoco.viewer.launch_passive(m, d) as v:
-        print('viewer open — 창 닫으면 종료. 넘어지면 자동 리셋.')
+    with mujoco.viewer.launch_passive(m, d, key_callback=ctrl._key_callback) as v:
+        v.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0   # 내장 CoM 마커 OFF (커스텀과 중복 방지)
+        print('viewer open — 창 닫으면 종료. 넘어지면 자동 리셋.'
+              + ('  (GRF 화살표 ON)' if draw_grf else ''))
         while v.is_running():
             t0 = time.time()
             control_fn()
             mujoco.mj_step(m, d)
+            # GRF 화살표 (control_fn 이 ctrl.last_lam 갱신) + CoM 마커
+            if draw_grf:
+                lam = getattr(ctrl, 'last_lam', None)
+                ctrl.draw_grf_arrows(v, list(feet),
+                                     lam if lam is not None else [None] * len(feet))
+            else:
+                v.user_scn.ngeom = 0
+            ctrl.draw_com_marker(v)
             # auto-reset on fall
             if d.qpos[2] < 0.15 or d.qpos[2] > 0.9 or abs(d.qpos[3]) < 0.6:
                 settle_and_set_ref(ctrl)
@@ -721,25 +783,36 @@ def run_march_viewer(seconds=1e9, **kw):
     ctrl.run_march(seconds=seconds, viewer=True, **kw)
 
 
+# ────────────────────────────────────────────────────────────────
+# Stage 0: 모델/동역학 정합 검증 (WBIC 게인과 무관한 sanity check)
+#   A 낙하   : MJCF 물리(중력/질량/지면)        — τ=0 시 자연 붕괴
+#   B Jac FD : 접촉점·foot_jac 정합             — ‖J_fd−J‖ < 1e-4
+#   C 무게   : GRF 부호·접촉 모델                — Σλz ≈ mg ±2%
+#   D 잔차   : M,h,J,τ 운동방정식 정합          — base6 잔차 ≈ 0
+# ────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     import os
     import argparse
     os.environ.setdefault('DISPLAY', ':0')           # GUI 자동
     ap = argparse.ArgumentParser(description='biped WBIC balance — 인자 없이 실행하면 viewer')
-    ap.add_argument('--mode', choices=['stance', 'march', 'mpc', 'lipm'], default='stance')
+    # 단계 순서: stance(1) → lipm(2.a) → march(2.b) → mpc(3)
+    ap.add_argument('--mode', choices=['stance', 'lipm', 'march', 'mpc'], default='stance')
     ap.add_argument('--headless', action='store_true', help='창 없이 콘솔 로그만')
     ap.add_argument('--seconds', type=float, default=5.0)
+    ap.add_argument('--tstep', type=float, default=0.34, help='lipm 스텝시간 [s] (기본 0.34, 수정안 0.18)')
+    ap.add_argument('--yclamp', type=float, default=0.05, help='lipm 측면 풋스텝 클램프 [m] (기본 0.05, 수정안 0.20)')
     a = ap.parse_args()
     use_viewer = not a.headless                       # 기본 = viewer ON
     secs = 1e9 if use_viewer else a.seconds
     if a.mode == 'stance':
         run(seconds=secs, viewer=use_viewer)
+    elif a.mode == 'lipm':
+        BipedMarch('biped_wrapper.mjcf').run_lipm(seconds=secs, viewer=use_viewer,
+                                                  T_step=a.tstep, clamp_y=a.yclamp)
     elif a.mode == 'march':
         BipedMarch('biped_wrapper.mjcf').run_march(seconds=secs, viewer=use_viewer)
-    elif a.mode == 'mpc':
+    else:  # mpc
         BipedMarch('biped_wrapper.mjcf').run_mpc(seconds=secs, viewer=use_viewer)
-    else:
-        BipedMarch('biped_wrapper.mjcf').run_lipm(seconds=secs, viewer=use_viewer)
     # Wayland/glfw 종료단계 teardown segfault 회피 — 즉시 클린 종료
     sys.stdout.flush()
     if use_viewer:

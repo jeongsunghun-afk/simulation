@@ -1,0 +1,144 @@
+════════════════════════════════════════════════════════════════════
+★★★ 현재 최선 = 구조1(full-body walk_loop). go2·02_Leg 전방향(전진·측방·대각·선회) 무한보행 ★★★
+────────────────────────────────────────────────────────────────────
+[결론] full-body NMPC + DDP게인 + re-anchor 가 sim 최선. simple-mpc(kinodynamics 축약)는
+  실시간 RTI용 타협일 뿐 품질우위 아님. 하드웨어 갈 땐 구조2(TSID-ID + RobotInterface)를 얹음.
+[공통] aligator는 conda env(proxddp) 전용 → 경로: /home/jsh/miniforge3/envs/proxddp/bin/python
+       작업폴더: cd /home/jsh/문서/jsh/simulation/quad   (아래 스크립트는 전부 이 폴더)
+────────────────────────────────────────────────────────────────────
+[파일 — 무엇이 어디]  (모두 /home/jsh/문서/jsh/simulation/quad/ 안)
+ quad_proxddp.py        ★구조1 메인: walk_loop(--test loop)·hold·track + DataLog(--log)·LivePlot(--plot)·--vel-y측방
+ quad_proxddp_tsid.py   구조2: TSID-ID 1kHz + RobotInterface(sim2real seam) — hold/loop/stand/walk
+ quad_nmpc.py           NMPC 모델(ProxModel)·_trot_schedule(전진+측방 Vy/march_y)
+ quad_sim.py            MuJoCo 통합: WBIC stance/stand/mpc + QuadSim(crouch·foot_point·sphere발 처리)
+ teleop_gui.py          GUI 제어패널(Dear PyGui, Unitree SportClient: Move/StopMove/BalanceStand…) → /tmp/quad_cmd.json
+ plot_log.py            로그 CSV → 그래프 + 최대 토크/각속도(모터한계 대비%) → logs/*.png
+ quad_real_sphere.mjcf  02_Leg MuJoCo 모델(sphere발 70mm, --exec-robot ours_sphere)  | quad_real.mjcf=mesh발
+ urdf/02_Leg_UFDF_260610_8.urdf   02_Leg URDF(planner pinocchio, --robot ours)
+ logs/                  로그 출력(CSV/PNG, gitignore)
+ (구조3) /home/jsh/simple-mpc/                     simple-mpc 레퍼런스(별도 pixi env)
+ (biped) /home/jsh/문서/jsh/simulation/biped/wbic_balance.py
+ (메모리) /home/jsh/.claude/projects/-home-jsh----jsh/memory/   프로젝트·02leg-motor-spec·rbq-sdk-reference
+ (GitHub) simulation = jeongsunghun-afk/simulation  브랜치 biped-wbic-mpc
+════════════════════════════════════════════════════════════════════
+
+[★ 주력 — 무한보행 + 조작기]  뷰어키: ↑↓전진  ←→측방  ,/.선회  X정지 | [/]배속  C접촉점토글  Ctrl+드래그=외력
+# go2
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test loop --robot go2 --vel 0.3 --total-T 120
+# 02_Leg 전진 (sphere발 70mm 충실접지 + 측방가중). 전진0.3 → 0.32m/s, tilt~1°, 무한
+cd /home/jsh/문서/jsh/simulation/quad && PW_ORI=250 PW_BV=5 /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.3 --gait-T 0.35 --step-h 0.05 --total-T 120
+cd /home/jsh/문서/jsh/simulation/quad && BASE_Z0=0.52 PW_ORI=250 PW_BV=5 /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.3 --gait-T 0.35 --step-h 0.05 --total-T 120
+# 02_Leg 측방보행 (--vel-y, 발이 옆으로 stepping). 측방0.3 → 0.33m/s tilt2°. +좌 / −우. 대각선=--vel 0.2 --vel-y 0.2
+cd /home/jsh/문서/jsh/simulation/quad && PW_ORI=250 PW_BV=5 /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.0 --vel-y 0.3 --gait-T 0.35 --step-h 0.05 --total-T 120
+# 헤드리스 외부 teleop: echo '{"v":0.3,"vy":0.0,"w":0.0}' > /tmp/quad_cmd.json (v전진 vy측방 w선회) 후 위 명령에 --cmd json 추가
+# ★ GUI 제어패널(Dear PyGui, Unitree SportClient 시그니처): 별창 슬라이더 vx/vy/w + Move/STOP/BalanceStand 버튼.
+#   ① 컨트롤러를 --cmd json 으로 실행(위 명령에 --cmd json 추가)  ② 다른 터미널서 GUI:
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
+# ※속도범위: 마찰 0.63(MU_FRIC, 덜 보수적) 적용 후 ★0.1~0.6 m/s 무한안정(이전 ~0.4 한계 확장). 0.7+ 전복(Floquet).
+cd /home/jsh/문서/jsh/simulation/quad && BASE_Z0=0.52 PW_ORI=250 PW_BV=5 /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.3 --gait-T 0.35 --step-h 0.05 --total-T 30
+
+[★ 정지/기립 — 보행X. 뷰어 Ctrl+드래그로 밀어 버팀 확인]
+# (A) proxDDP hold: go2 ✅무한 tilt1°.  ※02_Leg는 1.7s 전복(pin↔MuJoCo 불일치) → 02_Leg 정적은 (B)
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test hold --robot go2 --total-T 120
+# (B) TSID hold (구조2, full-QP): ★02_Leg ✅tilt2° (구조1 hold가 못잡던걸 잡음). go2도 가능
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp_tsid.py --test hold --robot ours --exec-robot ours_sphere --total-T 30
+# (C) WBIC stance (quad_sim, full QP): 02_Leg·go2 정적기립. 모드: stance=WBIC / stand=중력보상PD / mpc=MPC+WBIC / view
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode stance
+
+[데이터 로깅 — loop에 --log PATH 추가. 매 제어틱 각 축(관절) 토크[Nm]·각속도[rad/s] CSV / --plot=실시간그래프]
+#  헤더=관절명(tau:HL_hip.. / wj:HL_hip..), 구조1≈500Hz·구조2=1kHz, 전복/완주 양쪽 저장. --noview·뷰어 모두.
+cd /home/jsh/문서/jsh/simulation/quad && PW_ORI=250 PW_BV=5 /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.3 --gait-T 0.35 --step-h 0.05 --total-T 10 --noview --log logs/quad_log.csv
+# 불러오기: python -c "import numpy as np; d=np.genfromtxt('logs/quad_log.csv',delimiter=',',names=True); print(d['t'], d['tauHL_thigh'], d['wjHL_thigh'])"
+# ★ 그래프+최대토크/각속도 체크(모터한계 대비%) → logs/*.png + 콘솔 요약표
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python plot_log.py logs/quad_log.csv
+
+[옵션 의미]
+--test loop  무한보행+조작기(권장). track=유한검증 / hold=정지버티기 / stand=정지계획만(뷰어X) / 실험불안정=replan,rti
+--robot ours        계획(NMPC) 모델 = 02_Leg (pinocchio/URDF).  go2=레퍼런스
+--exec-robot ours_sphere  실행(MuJoCo) 모델 = 02_Leg + sphere발(메시발 대신 깨끗한 점접촉, 70mm 충실)
+--vel / --vel-y     전진 / 측방 속도명령[m/s] (둘 다 0 = 제자리 trot)
+--gait-T 0.35       gait 주기[s] (작을수록 빠른 발놀림).   --step-h 0.05  swing 발높이[m]
+--total-T 120       시뮬 총 시간[s].   --noview 헤드리스.   --cmd json  /tmp/quad_cmd.json 폴링
+[게인 env] PW_ORI=250 PW_BV=5 (02_Leg 측방안정).  고속탐색용: MAXITER NWARM PW_YAW
+[마찰 env] MU_FRIC=0.9 (기본, 물리 sphere 1.3 cone에 내접 0.92). 물리 sphere geom=1.3(build_real_quad 기본). 0.42→0.63→0.9 단계적 비보수화 → ★속도범위 0.4→0.6→0.7 확장.
+[속도별 gait] AUTO_GAIT=1: 속도에 맞춰 gait_T·step_h 자동(--gait-T/--step-h 무시). ★우리 NMPC는 step길이=V·T 자동스케일이라 gait_T 상수0.35가 0.1~0.6 전범위 최적(표의 주파수스케일링 불필요), step_h만 0.05→0.08 완만↑.
+   예: AUTO_GAIT=1 PW_ORI=250 PW_BV=5 ...python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.5 --total-T 30
+[몸체 높이] BASE_Z0=0.52 (기본0.42, +100mm). 다리 reach 충분, tilt1° 안정. 예: BASE_Z0=0.52 ...python quad_proxddp.py --test loop ...
+[측방 발배치 env(실험)] K_POS=0.3 K_POSD=0.15 (기본0=off): swing발을 측방 위치오차에 PD 비례 이동.
+   → 측방 오프셋(limp) −91→−5mm 보정 입증. 단 IK가 피드포워드 불일치 누적 → 30s서 전복(미해결).
+[★_9 URDF = 앞발목 fixed 구조축소 (현재 기본)] urdf/02_Leg_UFDF_260610_9.urdf 가 앞발목(FL/FR foot) fixed → planner·exec 둘 다 네이티브 14-DOF.
+   URDF 선택: _select_urdf()가 02_Leg_UFDF 최신버전 자동(URDF_FILE env로 명시 가능). exec MJCF도 _9 재생성(quad_real*.mjcf 14-DOF, 옛 _8=*.bak8 백업).
+   구현: quad_sim legqp/legqv·_bridge·_crouch_state·_leg_ik 전부 이름기반 비균일(FL/FR=3,HL/HR=4). MAXITER 자동상향. round-trip 0오차·foot 지면정합 검증.
+   기본실행(LOCK_FOOT 불필요, base_z0=0.52 자동): python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.3 --gait-T 0.35 --step-h 0.05 --total-T 40
+   → ★★성공: 고정-앞발목 무한안정 보행(40s tilt1°·전진0.30추종). ★핵심: base_z0=0.52 필수(0.42=stiff 앞다리 앞피칭 전복). 이전 "구조1 벽" 진단은 오진—진짜병목=body높이.
+   [_8 free-ankle 베이스라인 복귀] cp quad_real.mjcf.bak8 quad_real.mjcf; cp quad_real_sphere.mjcf.bak8 quad_real_sphere.mjcf; URDF_FILE=02_Leg_UFDF_260610_8.urdf BASE_Z0=0.42 로 실행
+[발목 고정(실험, _8용)] LOCK_FOOT=1 (또는 'FL_foot,HR_foot' 직접지정): 앞발목 고정. LOCK_FOOT_MODE=
+   pin(kinematic핀) | limit(관절range) | plan(posture가중+핀) | ocp(NMPC 하드제약) | ★reduce(구조 14-DOF 축소)
+   ★reduce 예: LOCK_FOOT=1 LOCK_FOOT_MODE=reduce PW_ORI=250 PW_BV=5 ...quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.3 --gait-T 0.35 --step-h 0.05 --total-T 12
+     (MAXITER=400 NWARM=10 자동, 발목 수동스프링 KP_LOCK=150 KD_LOCK=8 자동)
+   → 구현: pinocchio buildReducedModel로 앞발목 freeze(링크·접촉프레임 보존, DOF만 제거) → 진짜 14-DOF NMPC. _bridge 이름기반 비균일(FL/FR=3,HL/HR=4) round-trip 0오차. MuJoCo는 16-DOF유지(앞발목 스프링홀드).
+   → ★플래너 완벽: reduced 계획궤적 tilt 0.0°·base_z 일정·전진 0.28m/s 추종(고정-발목 보행이 존재!). baseline 무회귀.
+   → ★exec 미해결: 구조1(고정사이클+DDP게인)이 fragile 고정-발목 사이클 못 버팀 → ~12s서 붕괴(스프링=가라앉음/핀=발사). 안정 실행엔 RTI/WBC 필요.
+   → 참고결론: pin/limit/plan/ocp 전부 ~5s. 정상보행 앞발목 max45·평균4.4rad/s = 발배치 필수 DOF.
+[모터 Peak토크] hip/thigh 84, calf 126, foot 168 Nm (actuatorfrcrange, Rated×3). 적용 후 tilt18°→1°.
+[로그 분석] python plot_log.py logs/quad_log.csv → 그래프+최대 토크/각속도(모터한계 대비%). ★발목 각속도 한계초과 발견.
+
+════════════════════════════════════════════════════════════════════
+[구조2 — quad_proxddp_tsid.py: 우리 NMPC + TSID 1kHz + sim2real RobotInterface]
+# ★ sim2real 기반 = RobotInterface(Mujoco/Real): 컨트롤러는 read_state()/apply_torque()만 → sim↔실 무변경 교체.
+#   (CommandSource=명령 seam, RobotInterface=센서/액추 seam). hold/loop 모두 이 경계 경유.
+# teleop 보행 (RobotInterface 경유) — ※보행은 ~2.5s 붕괴(TSID 정식화 한계, 인프라 우선). 정지(hold)는 우수.
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp_tsid.py --test loop --robot go2 --vel 0.3
+# TSID standing 검증(NMPC없이 ID만, 5초 tilt0.9°) / trot 검증(고정전진)=--test walk
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp_tsid.py --test stand --robot go2
+cd /home/jsh/문서/jsh/simulation/quad && W_FORCE=1 KP_POST=30 W_POST=2 KP_CONTACT=50 /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp_tsid.py --test walk --robot go2 --vel 0.3
+#  게인 env: W_POST/W_BASE/W_FORCE/KP_*.  W_FEET=1(기본0): swing발 SE3 tracking(KinodynamicsID식, opt-in) — RTI 4.6→5.3s 미미.
+# RTI: --test rti (매틱 재계획+TSID). 구조1 RTI(quad_proxddp --test rti)는 게인추종이나 ~2s 전복.
+#  ★결론: RTI 양쪽 다 불안정(구조1 per-tick 기준품질 ~2s / 구조2 TSID base가라앉음 ~5s). step추종/limp 미해결.
+#  근본: raw-TSID < KinodynamicsID(centroidal 정식화 격차). 일관 발배치엔 KinodynamicsID 재현 또는 WBC 필요.
+
+[구조3 — simple-mpc 레퍼런스 (점접촉 addPointFoot, force_size=3). pixi env(/home/jsh/simple-mpc, py3.14 격리)]
+# 빌드(1회): cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi install && ~/.pixi/bin/pixi run build && ~/.pixi/bin/pixi run install
+cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi run python examples/go2_kinodynamics_patched.py          # pybullet(강체접촉 0.089m/s)
+cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 STEPS=1000 VIEW=1 ~/.pixi/bin/pixi run python examples/go2_kinodynamics_mujoco.py  # MuJoCo(접촉맞춤 0.097m/s)
+# ★발견: simple-mpc 부진=접촉모델 불일치(컨트롤러 강체가정 vs MuJoCo elliptic soft). 맞추면 정상. 02_Leg는 pybullet서도 발산.
+# ★go2 kinodynamics+MuJoCo = 안정보행·limp없음 검증완료(NMPC+KinodynamicsID 구조 건전). RTI가 limp 해결 입증.
+# ★_9 02_Leg(NMPC+KinodynamicsID, MuJoCo). 게인튜닝중 — 서기/보행 launch. (FullDynamics가 성공했으니 이쪽 우선순위↓)
+cd /home/jsh/simple-mpc && VIEW=1 STEPS=300 VX=0.2 ~/.pixi/bin/pixi run python examples/02leg9_kinodynamics_mujoco.py
+#   튜닝 env: KP_BASE/KP_POSTURE/KP_CONTACT/W_BASE(KinodynamicsID), WBORI/WBVX(OCP). VX=0서기부터.
+
+# ★★★[성공·강건] _9 02_Leg FullDynamics(full-body MPC + RTI, TSID없이 토크직접). 안정무한보행·limp완전소멸·thread-robust.
+# ★뷰어=무한루프+키보드 teleop(↑↓=vx ←→=vy측방 ,/.=yaw X=정지). 헤드리스(VIEW=0)=STEPS 유한. 초기속도 VX/VY/WZ.
+# ★★Unitree SDK 계층구조 구현: 고수준 SportClient.Move(vx,vy,vyaw)/StopMove → MPC(full-body RTI) → 저수준 RobotInterface(read_low_state→LowState q/dq/IMU, write_low_cmd→LowCmd kp/kd/tau, τ=kp(q-q_meas)+kd(dq-dq_meas)+tau). 실로봇=MujocoRobot만 RealRobot로 교체.
+#   ★실시간성(TIMING=1): mpc.iterate T별 ~14ms(T30)~18ms(T50,FCONE off), NTH=4최적. env T(호라이즌,기본50)/MPC_DECIM(비동기 재계획률; 1=100Hz동기, 2=50Hz, 4=25Hz)/KP/KD(저수준PD).
+#   ★★비동기 검증(MPC_DECIM으로 stale plan 모사): 순수토크는 50Hz도 전복. ★해결구성 = force_cone OFF + T=40 + 50Hz(DECIM=2) + 관절PD KP=100 KD=2 → 전방향 안정(전진2.6°·측방7.5°·선회1.4°·대각8°), solve15.6ms<20ms 실시간OK.
+#     발견: ①force_cone OFF가 비동기 안정성↑(50Hz 전진 tilt7→1.8) ②측방=약축이라 KP=100 필요(전진은60) ③25Hz는 PD로도 전복(50Hz가 하한) ④T30은 너무짧아 불안정, T40~50 적정.
+#     실배포 권장: 50Hz MPC + 1kHz 관절PD(KP100). 100Hz면 순수토크로도 되나 solve<10ms 필요(T·스레드 추가최적). 비동기 실제 스레드분리·상태추정은 다음.
+cd /home/jsh/simple-mpc && VIEW=1 NTH=8 VX=0.2 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
+#   ★★핵심수정 2가지: ①뒷발목(articulated) point-foot서 floppy→ANKLE_W=50 posture핀고정. ②★접촉불일치: 기본 MJCF는 발=MESH라 발당 GRF 2개(다점)인데 OCP는 단일점접촉(addPointFoot).
+#     → quad_real_pt.mjcf(발=단일구, 구바닥=OCP접촉점 정렬, 비발링크 충돌끔) 생성·기본. 이게 thread-카오스(안정마진0)의 진짜원인이었고 해결→NTH1~8 전부 robust + WBVX=400 94%추종 동시달성.
+#   + go2가중치일치(w_basepos=0·발프레임추종w_frame=1000) + Peak토크(×3) + STIFF=0.005 접촉.
+#   env: MJCF(기본 quad_real_pt.mjcf), STIFF=0.005, ANKLE_W=50, NTH(기본8;1~8 robust,16은 oversubscription 전복), CROUCHZ, STAND=1, VX/VY/WZ(초기cmd), STEPS/VIEW.
+#   ★전방향 추종가중: WBVX(전진,기본400=94%)·WBVY(측방,기본200=69%)·WBWZ(선회,기본10=80%). teleop상한 VMAX_X/Y·WMAX.
+#   ★전방향 확인완료: 전진94%·측방69%·선회80%(yaw 37°/2.7s)·대각동시, 모두 thread-robust·전복없음.
+#   성능: VX 0.1~0.3 추종 93~94%·tilt<2.3°·limp없음(y±0.008)·NTH1~8 robust.
+#   ★속도상한 정리: 기본 cadence를 TSS=20/TDS=8로 변경 → VX 0.1~0.4 전범위 94~97%추종·thread-robust·전방향OK. (구 TSS30은 0.3한계). 0.5+는 전복(추후 접촉/가중 튜닝).
+#   ★시각화(뷰어, quad_proxddp 참고): 빨강구=타겟footstep(swing발만), 발별색선=발궤적, ★마젠타=base궤적(3D+지면투영), 노랑구+수직선=CoM지면투영,
+#     청록선=지지다각형(접지발 연결, CoM투영 벗어남 확인), 노랑화살표=명령방향, 파란콘+초록화살표=마찰콘+GRF(콘밖이면 슬립). env TRAIL_N(300)/NOCONE/CONE_MU/SLIP.
+#   ★슬립진단(SLIP=1): 뒷발 궤적 움직임은 마찰 아님(마찰↑면 오히려↑). 단일구가 접촉점축 피벗/롤링한 구중심 이동(뒷발 articulated발목이라 더큼). 접촉점 자체는 안미끄러짐.
+#   ★텍스트 오버레이(좌상=sim time, 우상=외력N, 좌하=cmd vx/vy/wz): launch_passive Handle.set_texts로 구현(quad_proxddp 동일). + Ctrl+드래그 외력(mjv_applyPerturbForce, 강건성 테스트용).
+#   ★force_cone·land_cstr 기본 ON(표준; FCONE=0/LAND=0로 끔). thread-robust 유지. 단 stance 슬립은 못줄임(슬립=점접촉 구 롤링, force/제약 문제 아님). 발을 캡슐/평발로 바꾸면 줄듬.
+#   ★뷰어 수정: 매 서브스텝 sync+sleep이 지터로 교란→발산이었음. RENDER_EVERY=10(틱당1회 sync+묶은sleep)로 안정. 이제 VIEW=1 NTH=8 뷰어 정상. env: RENDER_EVERY(기본10), NOSLEEP.
+#   ★quad_real_pt.mjcf 재생성: quad_real.mjcf서 foot_contact_link 메시충돌→단일구 치환 + 비발링크 contype/conaffinity=0.
+#     ★구 중심 = sole_offset − r·단위(sole) (r=0.01): 접촉점(sole=GRF발생점)에 구의 *표면*이 닿게. 각도(방향)유지·거리만 r축소. (중심을 접촉점에 두면 틀림)
+
+[3구조 비교 (go2, 같은 MuJoCo)] 구조1 > 구조3 > 구조2
+  구조1 proxDDP(full-body+DDP게인+re-anchor)  → 무한안정, 전방향   ← 최선
+  구조3 simple-mpc(kinodyn RTI+TSID, 접촉맞춤)  → 0.097 m/s tilt1° (OCP 보수성, 명령의 ~45%)
+  구조2 차용(우리NMPC+raw TSID-ID)             → 보행~2.5s(정식화 미달, 정지는 우수) + sim2real 인프라
+
+[기타]
+cd /home/jsh/문서/jsh/simulation/biped && python3 wbic_balance.py --mode mpc        # biped MPC+WBIC
+cd /home/jsh/문서/jsh/simulation/quad && python3 quad_sim.py --robot go2 --mode trot # quad_sim 자체 trot(WBIC)
+# [MCX<>Rviz] source ~/ros2_ws/install/setup.bash ; ros2 launch motorcortex_bridge motorcortex_sim.launch.py
+════════════════════════════════════════════════════════════════════
