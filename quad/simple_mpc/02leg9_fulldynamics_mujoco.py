@@ -23,6 +23,30 @@ class LowCmd:
 class LowState:
     """Unitree 저수준 상태(unitree_sdk2py LowState) 흉내 — 관절 q/dq/tau_est + IMU(quat,gyro)."""
     def __init__(self): self.q=None; self.dq=None; self.tau_est=None; self.quat=None; self.gyro=None
+class StateEstimator:
+    """상태추정: IMU(자세·각속도) + 관절(q,dq) + 접촉 → base pose/vel 추정(leg odometry).
+       ★절대 base는 안 씀(실로봇과 동일). stance 발이 정지란 가정: v_base = -(ω×Rp_foot + R·J_foot·dq) 평균."""
+    def __init__(self, model, foot_names, dt):
+        self._m = model; self._d = model.createData(); self._dt = dt
+        self._fids = [model.getFrameId(n) for n in foot_names]
+        self.p = np.zeros(3); self.v = np.zeros(3)
+    def reset(self, p0): self.p = np.array(p0, float); self.v = np.zeros(3)
+    def estimate(self, qj, dqj, quat_xyzw, gyro, contacts, alpha=0.4):
+        _q = np.concatenate([np.zeros(3), [0,0,0,1.0], qj])      # base 원점·단위 → 상대 운동학
+        _dv = np.concatenate([np.zeros(6), dqj])
+        import pinocchio as _p2
+        _p2.forwardKinematics(self._m, self._d, _q, _dv); _p2.updateFramePlacements(self._m, self._d)
+        R = _p2.Quaternion(float(quat_xyzw[3]), float(quat_xyzw[0]), float(quat_xyzw[1]), float(quat_xyzw[2])).matrix()
+        omw = R @ np.asarray(gyro, float)                        # 동체 각속도 → 월드
+        _vbs = []
+        for k, fid in enumerate(self._fids):
+            if not contacts[k]: continue                         # stance 발만
+            pfb = self._d.oMf[fid].translation                  # 발 위치(base 기준)
+            vfb = _p2.getFrameVelocity(self._m, self._d, fid, _p2.LOCAL_WORLD_ALIGNED).linear  # 발 속도(관절기여, base기준)
+            _vbs.append(-(np.cross(omw, R @ pfb) + R @ vfb))    # 발 정지 → base 월드속도
+        if _vbs: self.v = (1-alpha)*self.v + alpha*np.mean(_vbs, axis=0)   # 접촉 평균 + 저역통과
+        self.p = self.p + self.v * self._dt                     # 위치 적분
+        return self.p.copy(), self.v.copy()
 class MujocoRobot:
     """simple-mpc device(BulletRobot) 인터페이스를 MuJoCo로 구현. 토크는 KinodynamicsID(TSID) 출력.
        pin↔mujoco: go2 관절 순서 동일(재정렬 X), 베이스 quat [w,x,y,z]↔[x,y,z,w], lin world→local(R^T)."""
@@ -307,6 +331,9 @@ mpc.velocity_base = v
 _SLIP=bool(_os.environ.get("SLIP")); _slipacc=[0.0]*4; _netx=[0.0]*4; _prevf=[None]*4   # 발 슬립진단(접촉중 수평이동)
 _itms=[]   # mpc.iterate 시간(ms) — 실시간성 측정
 _lc = LowCmd(nu); _KP = np.full(nu, float(_os.environ.get("KP","0"))); _KD = np.full(nu, float(_os.environ.get("KD","0")))  # 저수준 LowCmd(기본 kp=kd=0=순수토크)
+_EST = bool(_os.environ.get("EST"))   # 상태추정 검증(leg odometry vs ground-truth)
+_estor = StateEstimator(model_handler.getModel(), ["FL_foot","FR_foot","HL_foot","HR_foot"], dt_mpc) if _EST else None
+if _EST: _estor.reset(device.d.qpos[0:3])
 # ★비동기 모사: MPC를 K 제어주기(10ms)마다 풀고, 그 사이 plan을 advance하며 재사용 (K=4→25Hz, K=2→50Hz). 1=동기(매주기)
 _DECIM = int(_os.environ.get("MPC_DECIM","1")); _pk = 0
 print("[MJ] MPC_DECIM=%d → 재계획 %.0fHz (제어 %.0fHz)" % (_DECIM, 100.0/_DECIM, 100.0*N_simu), flush=True)
@@ -394,12 +421,24 @@ while True:
     elif step >= _MAXSTEP: break
     v = device.sport.velocity_base()        # 고수준 SportClient → cmd_vel
     mpc.velocity_base = v
+    if _EST:                                # 상태추정: IMU+관절+접촉 → base 추정 (절대 base 안씀)
+        _ls = device.read_low_state()
+        _ct = [False]*len(device.foot_gids)   # 실제 접촉력으로 stance 판별(실로봇=발 force센서)
+        for _ci in range(device.d.ncon):
+            _c = device.d.contact[_ci]
+            for _fi,_g in enumerate(device.foot_gids):
+                if _c.geom1==_g or _c.geom2==_g: _ct[_fi]=True
+        _ep, _ev = _estor.estimate(_ls.q, _ls.dq, _ls.quat, _ls.gyro, _ct)
     if step % 30 == 0:
         _z = device.d.qpos[2]; _x = device.d.qpos[0]; _y = device.d.qpos[1]
         _t = _npd.degrees(_npd.arccos(_npd.clip(1 - 2 * (device.d.qpos[4]**2 + device.d.qpos[5]**2), -1, 1)))
         _qw,_qx,_qy,_qz = device.d.qpos[3:7]
         _yaw = _npd.degrees(_npd.arctan2(2*(_qw*_qz+_qx*_qy), 1-2*(_qy*_qy+_qz*_qz)))
         print("[MJ] step=%3d t=%.2f base_z=%.3f x=%+.3f y=%+.3f yaw=%+.1f tilt=%.1f" % (step, step * dt_mpc, _z, _x, _y, _yaw, _t), flush=True)
+        if _EST and step > 0:              # 추정 vs ground-truth 오차
+            _tp = np.array(device.d.qpos[0:3]); _tv = np.array(device.d.qvel[0:3])
+            print("[EST] 위치오차=%.3fm(드리프트) 속도오차=%.3fm/s | 추정v=(%.2f,%.2f,%.2f) 참v=(%.2f,%.2f,%.2f)" % (
+                np.linalg.norm(_ep-_tp), np.linalg.norm(_ev-_tv), _ev[0],_ev[1],_ev[2], _tv[0],_tv[1],_tv[2]), flush=True)
         if _SLIP and step > 0:
             print("[SLIP] 누적|이동| FL=%.3f FR=%.3f HL=%.3f HR=%.3f | 순dx(앞+/뒤-) FL=%+.3f FR=%+.3f HL=%+.3f HR=%+.3f" % (tuple(_slipacc)+tuple(_netx)), flush=True)
         if _os.environ.get("TIMING") and step>0 and _itms:
