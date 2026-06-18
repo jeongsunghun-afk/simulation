@@ -8,7 +8,7 @@ biped wbic_balance.py 와 동일한 '단일 파일 + --mode' 관리 방식.
   (향후) stance(WBIC) → lipm → march → mpc → nmpc
   ※ check(모델/동역학 정합)는 stance(WBIC) 동작 시 자동 검증되므로 별도 단계 없음
 
-뷰어 키:  '1' → CoM 마커 순환(OFF→전체→파트별).  'F' → MuJoCo 내장 contact force(GRF).
+시각화: 구조3(02leg9_fulldynamics) 스타일 — footstep타겟·지지다각형·CoM투영·명령화살표·base/발궤적·마찰콘+GRF·텍스트. 항상표시.
 """
 import os
 import sys
@@ -112,10 +112,12 @@ class QuadSim:
         self.foot_geoms = [[self.foot_gid[i]] for i in range(4)]
         self._foot_rgba0 = {g: self.m.geom_rgba[g].copy()
                             for gs in self.foot_geoms for g in gs}
-        # CoM 마커 토글 (0:OFF 1:전체 2:파트별) — '1' 키
-        self.com_mode = 0
-        self.show_com = False
-        self.show_part_com = False
+        # ── 시각화 궤적(구조3 02leg9_fulldynamics 스타일 통일) ──
+        from collections import deque as _deque
+        _tn = int(os.environ.get('TRAIL_N', '300'))
+        self.cmd_v = np.zeros(6)                          # 명령속도(화살표·텍스트용; mode가 설정)
+        self.base_trail = _deque(maxlen=_tn)              # base 궤적(마젠타)
+        self.foot_trail = [_deque(maxlen=_tn) for _ in range(4)]   # 발별 궤적
 
     # ── 운동학/동역학 헬퍼 ────────────────────────────
     def fullM(self):
@@ -425,57 +427,81 @@ class QuadSim:
 
     # ── 뷰어 오버레이 ─────────────────────────────────
     def _key_callback(self, keycode):
-        if keycode == ord('1'):
-            self.com_mode = (self.com_mode + 1) % 3
-            self.show_com = (self.com_mode == 1)
-            self.show_part_com = (self.com_mode == 2)
-            print('[viewer] CoM 표시: %s'
-                  % ['OFF', '전체CoM만', '파트별CoM만'][self.com_mode])
+        pass                                            # 시각화는 항상 표시(구조3 스타일). 토글 없음.
 
     def draw_overlay(self, v):
-        # GRF 는 MuJoCo 내장 contact force 옵션('F'키). 여기선 접촉링색+발위치+CoM+착지목표.
-        scn = v.user_scn
-        scn.ngeom = 0
-        eye = np.eye(3).flatten()
-        # 발 접촉링: 접촉(contact_state)이면 빨강, 아니면 원래색
+        # ★구조3(02leg9_fulldynamics_mujoco.py) 스타일로 시각화 통일:
+        #   빨강구=타겟footstep(swing) / 청록선=지지다각형 / 노랑구+선=CoM지면투영 / 노랑화살표=명령방향
+        #   마젠타=base궤적 / 파란콘+초록화살표=마찰콘+GRF / 발별색선=발궤적
+        d = self.d; m = self.m
+        scn = v.user_scn; scn.ngeom = 0; eye = np.eye(3).flatten()
+        def _sph(p, r, c):
+            if scn.ngeom >= scn.maxgeom: return
+            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
+                                np.array([r, 0, 0]), np.asarray(p, float), eye, np.asarray(c, np.float32))
+            scn.ngeom += 1
+        def _ln(a, b, w, c, typ=mujoco.mjtGeom.mjGEOM_LINE):
+            if scn.ngeom >= scn.maxgeom: return
+            g = scn.geoms[scn.ngeom]
+            mujoco.mjv_initGeom(g, typ, np.zeros(3), np.zeros(3), eye, np.asarray(c, np.float32))
+            mujoco.mjv_connector(g, typ, w, np.asarray(a, float), np.asarray(b, float)); scn.ngeom += 1
+        ZC = 0.02                                            # 발 접지판별(발끝 z<ZC=접지)
+        fp = [self.foot_point(i).copy() for i in range(4)]; fz = [p[2] for p in fp]
+        # 발 접촉링: 접지면 빨강
         RED = np.array([0.9, 0.1, 0.1, 1.0], np.float32)
         for i in range(4):
             for g in self.foot_geoms[i]:
-                self.m.geom_rgba[g] = RED if self.contact_state[i] else self._foot_rgba0[g]
-        # 현재 발끝 위치 point (초록 작은 구)
+                self.m.geom_rgba[g] = RED if fz[i] < ZC else self._foot_rgba0[g]
+        # ── 타겟 footstep(swing 발만, 빨강구) ──
         for i in range(4):
-            if scn.ngeom >= scn.maxgeom:
-                break
-            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
-                                np.array([0.02, 0, 0]), self.foot_point(i).copy(),
-                                eye, np.array([0.1, 1.0, 0.3, 1.0], np.float32))
-            scn.ngeom += 1
-        # 다음 착지 목표 (빨강 구 + 지면 표시) — swing 발의 capture 목표
-        for ft in self.foot_targets:
-            if ft is None or scn.ngeom >= scn.maxgeom:
-                continue
-            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
-                                np.array([0.03, 0, 0]), np.array([ft[0], ft[1], 0.012]),
-                                eye, np.array([1, 0.1, 0.1, 0.9], np.float32))
-            scn.ngeom += 1
-        # 전체 CoM (주황)
-        if self.show_com and scn.ngeom < scn.maxgeom:
-            mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
-                                np.array([0.025, 0, 0]), self.d.subtree_com[0].copy(),
-                                eye, np.array([1, 0.55, 0, 1], np.float32))
-            scn.ngeom += 1
-        # 파트별 CoM (시안)
-        if self.show_part_com:
-            mm = self.m.body_mass
-            mmax = float(mm[1:].max())
-            for b in range(1, self.m.nbody):
-                if mm[b] <= 0 or scn.ngeom >= scn.maxgeom:
-                    continue
-                r = 0.01 + 0.025 * (mm[b] / mmax)
-                mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
-                                    np.array([r, 0, 0]), self.d.xipos[b].copy(), eye,
-                                    np.array([0.1, 0.7, 1, 0.9], np.float32))
-                scn.ngeom += 1
+            ft = self.foot_targets[i]
+            if ft is not None and fz[i] > ZC:
+                _sph([ft[0], ft[1], 0.008], 0.012, [1, 0.1, 0.1, 0.9])
+        # ── 지지다각형(접지 발 연결, 청록 지면선) ──
+        _ord = [2, 3, 1, 0]                                  # FL,FR,HR,HL 둘레순(quad_sim legs=HL,HR,FL,FR)
+        sp = [fp[i] for i in _ord if fz[i] < ZC]
+        for k in range(len(sp)):
+            if len(sp) < 2: break
+            a = sp[k].copy(); a[2] = 0.003; b = sp[(k + 1) % len(sp)].copy(); b[2] = 0.003
+            _ln(a, b, 0.006, [0.1, 0.9, 0.9, 1])
+        # ── CoM 지면투영(노랑구+수직선) ──
+        com = d.subtree_com[0].copy()
+        _sph([com[0], com[1], 0.004], 0.020, [1, 0.9, 0.1, 0.95]); _ln([com[0], com[1], 0.0], com, 0.003, [1, 0.9, 0.1, 0.6])
+        # ── 명령방향 화살표(로봇 위 노랑) ──
+        cv = self.cmd_v
+        if float(np.hypot(cv[0], cv[1])) > 1e-3:
+            frm = d.qpos[0:3].copy() + np.array([0, 0, 0.20]); to = frm + np.array([cv[0], cv[1], 0.0]) * 0.4
+            _ln(frm, to, 0.015, [1, 0.85, 0.1, 1], mujoco.mjtGeom.mjGEOM_ARROW)
+        # ── base 궤적(마젠타·굵게) ──
+        self.base_trail.append(d.qpos[0:3].copy()); bp = self.base_trail
+        for k in range(1, len(bp)):
+            if np.linalg.norm(bp[k] - bp[k - 1]) < 1e-4: continue
+            _ln(bp[k - 1], bp[k], 0.010, [1, 0.15, 0.9, 1])
+        # ── 마찰콘(파랑) + GRF(초록 화살표): GRF가 콘 벗어나면 슬립 ──
+        mu = float(os.environ.get('CONE_MU', str(m.geom_friction[self.foot_gid[0]][0])))
+        hh = 0.10; Ncn = 8
+        if not os.environ.get('NOCONE'):
+            for i in range(d.ncon):
+                c = d.contact[i]
+                if c.geom1 not in self.foot_gid and c.geom2 not in self.foot_gid: continue
+                p = c.pos.copy()
+                for k in range(Ncn):
+                    a1 = 2 * np.pi * k / Ncn; a2 = 2 * np.pi * (k + 1) / Ncn
+                    r1 = np.array([np.cos(a1), np.sin(a1), 0]) * hh * mu + np.array([0, 0, hh])
+                    r2 = np.array([np.cos(a2), np.sin(a2), 0]) * hh * mu + np.array([0, 0, hh])
+                    _ln(p, p + r1, 0.0015, [0.3, 0.5, 1, 0.5]); _ln(p + r1, p + r2, 0.0015, [0.3, 0.5, 1, 0.5])
+                f6 = np.zeros(6); mujoco.mj_contactForce(m, d, i, f6)
+                fw = c.frame.reshape(3, 3).T @ f6[:3]
+                if fw[2] < 0: fw = -fw
+                mag = np.linalg.norm(fw)
+                if mag > 1.0: _ln(p, p + fw / mag * min(mag / 250.0, 0.15), 0.008, [0.1, 1, 0.2, 1], mujoco.mjtGeom.mjGEOM_ARROW)
+        # ── 발 궤적(발별 색선) ──
+        _tc = [[0.2, 0.6, 1, 1], [0.2, 1, 0.4, 1], [1, 0.6, 0.2, 1], [1, 0.3, 0.85, 1]]
+        for i in range(4):
+            self.foot_trail[i].append(fp[i].copy()); pts = self.foot_trail[i]
+            for k in range(1, len(pts)):
+                if np.linalg.norm(pts[k] - pts[k - 1]) < 1e-4: continue
+                _ln(pts[k - 1], pts[k], 0.004, _tc[i % 4])
 
     def run_viewer(self, control_fn, reset_on_fall=True, reset_fn=None):
         m, d = self.m, self.d
@@ -498,7 +524,7 @@ class QuadSim:
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
             v.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0
             v.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = 1     # 외란 박스 ON
-            print('viewer open — 창 닫으면 종료. (1:CoM 토글, 더블클릭+Ctrl+우드래그=외란)')
+            print('viewer open — 창 닫으면 종료. (더블클릭+Ctrl+우드래그=외란)')
             while v.is_running():
                 t0 = time.time()
                 control_fn()
@@ -510,11 +536,14 @@ class QuadSim:
                 # 좌상단: 시뮬 시간 / 우상단: 외란 힘 N
                 fext = max((float(np.linalg.norm(d.xfrc_applied[b, :3]))
                             for b in range(1, m.nbody)), default=0.0)
-                v.set_texts([
+                cv = self.cmd_v
+                v.set_texts([                                    # 구조3와 동일: 좌상=시간 우상=외력 좌하=명령
                     (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPLEFT,
                      'sim time', '%.2f s' % d.time),
                     (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPRIGHT,
-                     '외란 force', '%.0f N' % fext)])
+                     'ext force', '%.0f N' % fext),
+                    (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
+                     'cmd vx/vy/wz', '%+.2f %+.2f %+.2f' % (cv[0], cv[1], cv[5]))])
                 v.sync()
                 dt = m.opt.timestep - (time.time() - t0)
                 if dt > 0:
@@ -703,6 +732,7 @@ def mode_trot():
         tg = t - S['t0']                     # 3) trot
         V_eff = V * min(1.0, tg / V_RAMP) if V_RAMP > 1e-6 else V   # 시작 속도램프(첫사이클 휘청 완화)
         S['x_ref'][9] = V_eff                # MPC 속도참조도 램프(매틱 갱신 → 다음 재계획 반영)
+        q.cmd_v[0] = V_eff                   # 시각화 명령화살표/텍스트용
         # ★ Di Carlo 식: gait 스케줄=primary, detect_contact=조기/지연 착지 보정.
         #   스케줄 stance → 힘제어. 스케줄 swing 후반(>0.7)+접촉감지 → 조기착지로 stance 승격.
         #   그 외 swing → 들어올림. (USE_DETECT=False 면 순수 스케줄, A/B 비교용)
