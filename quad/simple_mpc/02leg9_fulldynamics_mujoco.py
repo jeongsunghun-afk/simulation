@@ -331,9 +331,10 @@ mpc.velocity_base = v
 _SLIP=bool(_os.environ.get("SLIP")); _slipacc=[0.0]*4; _netx=[0.0]*4; _prevf=[None]*4   # 발 슬립진단(접촉중 수평이동)
 _itms=[]   # mpc.iterate 시간(ms) — 실시간성 측정
 _lc = LowCmd(nu); _KP = np.full(nu, float(_os.environ.get("KP","0"))); _KD = np.full(nu, float(_os.environ.get("KD","0")))  # 저수준 LowCmd(기본 kp=kd=0=순수토크)
-_EST = bool(_os.environ.get("EST"))   # 상태추정 검증(leg odometry vs ground-truth)
-_estor = StateEstimator(model_handler.getModel(), ["FL_foot","FR_foot","HL_foot","HR_foot"], dt_mpc) if _EST else None
-if _EST: _estor.reset(device.d.qpos[0:3])
+_EST = bool(_os.environ.get("EST")); _ESTCL = bool(_os.environ.get("ESTCL"))   # EST=검증, ESTCL=추정값을 MPC에 피드(closed-loop)
+_estor = StateEstimator(model_handler.getModel(), ["FL_foot","FR_foot","HL_foot","HR_foot"], dt_simu) if (_EST or _ESTCL) else None
+if _estor: _estor.reset(device.d.qpos[0:3])
+_ep = np.array(device.d.qpos[0:3]); _ev = np.zeros(3)
 # ★비동기 모사: MPC를 K 제어주기(10ms)마다 풀고, 그 사이 plan을 advance하며 재사용 (K=4→25Hz, K=2→50Hz). 1=동기(매주기)
 _DECIM = int(_os.environ.get("MPC_DECIM","1")); _pk = 0
 print("[MJ] MPC_DECIM=%d → 재계획 %.0fHz (제어 %.0fHz)" % (_DECIM, 100.0/_DECIM, 100.0*N_simu), flush=True)
@@ -421,14 +422,6 @@ while True:
     elif step >= _MAXSTEP: break
     v = device.sport.velocity_base()        # 고수준 SportClient → cmd_vel
     mpc.velocity_base = v
-    if _EST:                                # 상태추정: IMU+관절+접촉 → base 추정 (절대 base 안씀)
-        _ls = device.read_low_state()
-        _ct = [False]*len(device.foot_gids)   # 실제 접촉력으로 stance 판별(실로봇=발 force센서)
-        for _ci in range(device.d.ncon):
-            _c = device.d.contact[_ci]
-            for _fi,_g in enumerate(device.foot_gids):
-                if _c.geom1==_g or _c.geom2==_g: _ct[_fi]=True
-        _ep, _ev = _estor.estimate(_ls.q, _ls.dq, _ls.quat, _ls.gyro, _ct)
     if step % 30 == 0:
         _z = device.d.qpos[2]; _x = device.d.qpos[0]; _y = device.d.qpos[1]
         _t = _npd.degrees(_npd.arccos(_npd.clip(1 - 2 * (device.d.qpos[4]**2 + device.d.qpos[5]**2), -1, 1)))
@@ -458,6 +451,16 @@ while True:
         x_interp = interpolator.interpolateState(delay, dt_mpc, xss)
         u_interp = interpolator.interpolateLinear(delay, dt_mpc, uss)
         q_meas, v_meas = device.measureState()
+        if _estor is not None:              # 상태추정(1kHz): base pos/vel만 추정값으로(자세·각속도·관절은 IMU·엔코더 직접)
+            _ct = [False]*len(device.foot_gids)
+            for _ci in range(device.d.ncon):
+                _c = device.d.contact[_ci]
+                for _fi,_g in enumerate(device.foot_gids):
+                    if _c.geom1==_g or _c.geom2==_g: _ct[_fi]=True
+            _ep, _ev = _estor.estimate(q_meas[7:], v_meas[6:], q_meas[3:7], v_meas[3:6], _ct)
+            if _ESTCL:                      # closed-loop: 추정 base를 MPC 입력으로(절대 base 안씀)
+                _Rb = _pin.Quaternion(q_meas[6],q_meas[3],q_meas[4],q_meas[5]).matrix()
+                q_meas[0:3] = _ep; v_meas[0:3] = _Rb.T @ _ev   # 위치=추정, 선속도=추정(월드→동체)
         x_measured = np.concatenate([q_meas, v_meas])
         mpc.getDataHandler().updateInternalData(x_measured, True)
         current_torque = u_interp - 1.0 * _Ksk @ model_handler.difference(x_measured, x_interp)
