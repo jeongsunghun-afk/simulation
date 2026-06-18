@@ -480,6 +480,18 @@ class QuadSim:
     def run_viewer(self, control_fn, reset_on_fall=True, reset_fn=None):
         m, d = self.m, self.d
         reset_fn = reset_fn or self.set_home
+        if os.environ.get('HEADLESS'):                       # 헤드리스 정량테스트(뷰어 없이 N스텝)
+            nsteps = int(os.environ.get('STEPS', '1500'))
+            falls = 0
+            for s in range(nsteps):
+                control_fn(); mujoco.mj_step(m, d)
+                if reset_on_fall and d.qpos[2] < 0.2:
+                    falls += 1; mujoco.mj_resetData(m, d); reset_fn()
+                if s % 100 == 0:
+                    print('[hl] s=%d t=%.2f base_z=%.3f x=%+.3f y=%+.3f falls=%d'
+                          % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], falls), flush=True)
+            print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f' % (nsteps, falls, d.qpos[0]), flush=True)
+            return
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
             v.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0
             v.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = 1     # 외란 박스 ON
