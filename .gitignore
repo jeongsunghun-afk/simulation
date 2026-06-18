@@ -29,3 +29,7 @@ quad/logs/
 # 외부 레포·백업
 mujoco_menagerie/
 *.bak*
+
+# RBQ GUI AppImage·추출물(대용량 참고자료)
+squashfs-root/
+*.AppImage

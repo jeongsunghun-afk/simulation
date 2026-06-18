@@ -332,6 +332,24 @@ _SLIP=bool(_os.environ.get("SLIP")); _slipacc=[0.0]*4; _netx=[0.0]*4; _prevf=[No
 _itms=[]   # mpc.iterate 시간(ms) — 실시간성 측정
 _lc = LowCmd(nu); _KP = np.full(nu, float(_os.environ.get("KP","0"))); _KD = np.full(nu, float(_os.environ.get("KD","0")))  # 저수준 LowCmd(기본 kp=kd=0=순수토크)
 _CMDFILE = _os.environ.get("CMDFILE")   # GUI(teleop_gui.py)가 발행하는 JSON 명령 채널 → SportClient.Move (별도 프로세스, env무관)
+_mode = 'move'                          # 현재 모드(move/balance_stand/stand_up/stand_down)
+# ── 자세제어(StandUp/StandDown): 목표자세로 PD 보간. stand_up=서기(qstand), stand_down=낮은 crouch(IK) ──
+_q_up = _qstand[7:7+nu].copy()
+_Mp = model_handler.getModel(); _Dp = _Mp.createData(); _fp = [_Mp.getFrameId(n) for n in ["FL_foot","FR_foot","HL_foot","HR_foot"]]
+def _ik_joints(_bz):                     # 발은 서기 위치 유지하며 base만 _bz로 → 관절각
+    _pin.forwardKinematics(_Mp,_Dp,_qstand); _pin.updateFramePlacements(_Mp,_Dp)
+    _tg = [_Dp.oMf[f].translation.copy() for f in _fp]; _qi = _qstand.copy(); _qi[2] = _bz
+    _qx = [[7,8,9],[10,11,12],[13,14,15],[17,18,19]]
+    for _ in range(200):
+        _pin.forwardKinematics(_Mp,_Dp,_qi); _pin.updateFramePlacements(_Mp,_Dp); _pin.computeJointJacobians(_Mp,_Dp,_qi)
+        for _k,_f in enumerate(_fp):
+            _J = _pin.getFrameJacobian(_Mp,_Dp,_f,_pin.LOCAL_WORLD_ALIGNED)[:3]
+            _dq = np.linalg.lstsq(_J[:,[i-1 for i in _qx[_k]]], _tg[_k]-_Dp.oMf[_f].translation, rcond=None)[0]
+            for _kk,_c in enumerate(_qx[_k]): _qi[_c]+=_dq[_kk]
+    return np.clip(_qi[7:7+nu], _Mp.lowerPositionLimit[7:7+nu], _Mp.upperPositionLimit[7:7+nu])
+_q_down = _ik_joints(float(_os.environ.get("STANDDOWN_Z","0.30")))
+_cmdq = _q_up.copy()                     # 자세명령(보간 상태)
+_POSE_KP = float(_os.environ.get("POSE_KP","120")); _POSE_KD = float(_os.environ.get("POSE_KD","4")); _POSE_RATE = float(_os.environ.get("POSE_RATE","1.5"))
 _EST = bool(_os.environ.get("EST")); _ESTCL = bool(_os.environ.get("ESTCL"))   # EST=검증, ESTCL=추정값을 MPC에 피드(closed-loop)
 _estor = StateEstimator(model_handler.getModel(), ["FL_foot","FR_foot","HL_foot","HR_foot"], dt_simu) if (_EST or _ESTCL) else None
 if _estor: _estor.reset(device.d.qpos[0:3])
@@ -421,12 +439,25 @@ while True:
     if _INF:
         if not device.viewer.is_running(): break
     elif step >= _MAXSTEP: break
-    if _CMDFILE and step % 5 == 0:          # GUI JSON 채널 소비(20Hz) → 고수준 SportClient.Move
+    if _CMDFILE and step % 5 == 0:          # GUI JSON 채널 소비(20Hz) → 고수준 SportClient.Move + mode
         try:
             import json as _json
             with open(_CMDFILE) as _f: _cj = _json.load(_f)
             device.sport.Move(float(_cj.get('v',0.0)), float(_cj.get('vy',0.0)), float(_cj.get('w',0.0)))
+            _nm = _cj.get('mode','move')
+            if _nm in ('balance_stand','stand_up','stand_down') and _mode == 'move':
+                _qm0,_ = device.measureState(); _cmdq = _qm0[7:7+nu].copy()   # 현재자세서 보간 시작
+            _mode = 'move' if _nm in ('move','balance_stand') else _nm        # balance_stand=제자리(MPC v=0)
         except Exception: pass
+    if _mode in ('stand_up','stand_down'):  # ★자세전환: 목표자세로 PD 보간(MPC 미사용) — RBQ Ready/Ground
+        _tq = _q_down if _mode == 'stand_down' else _q_up
+        _cmdq = _cmdq + np.clip(_tq - _cmdq, -_POSE_RATE*dt_mpc, _POSE_RATE*dt_mpc)
+        _qm, _vm = device.measureState(); _qf = np.concatenate([_qm[0:7], _cmdq])
+        _taug = _pin.computeGeneralizedGravity(_Mp, _Dp, _qf)[6:]
+        _lc.q=_cmdq; _lc.dq=np.zeros(nu); _lc.kp=np.full(nu,_POSE_KP); _lc.kd=np.full(nu,_POSE_KD); _lc.tau=_taug
+        for _j in range(N_simu): device.write_low_cmd(_lc)
+        if step % 30 == 0: print("[MODE] %s base_z=%.3f" % (_mode, device.d.qpos[2]), flush=True)
+        step += 1; continue
     v = device.sport.velocity_base()        # 고수준 SportClient → cmd_vel
     mpc.velocity_base = v
     if step % 30 == 0:

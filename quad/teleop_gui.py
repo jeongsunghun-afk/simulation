@@ -1,193 +1,193 @@
-"""teleop_gui — 02_Leg/go2 제어 GUI 패널 (Dear PyGui).
+"""teleop_gui — 02_Leg 제어 GUI (RBQ 스타일: dual 조이스틱 + 모션 버튼).
 
-GUI는 컨트롤러와 분리된 '명령 발행측'. **Unitree SportClient 시그니처 그대로** 따른다
-(Move/StopMove/BalanceStand/StandUp/StandDown/BodyHeight/Euler/SwitchGait).
-명령을 채널(현재 JSON 파일)로 발행 → 컨트롤러는 `--cmd json` 으로 소비(sim/실 동일).
-배포 시 SportClient._publish 백엔드만 ROS2/DDS(LowCmd 상위) 로 교체하면 됨.
+Rainbow Robotics RBQ GUI 참고(JoystickThumbPad + motionStaticReady/Ground/DynamicWalk).
+명령을 JSON 채널(/tmp/quad_cmd.json)로 발행 → 컨트롤러는 CMDFILE 로 소비(sim/실 동일).
+배포 시 SportClient._pub 백엔드만 ROS2/DDS(또는 RBQ setPosRef/setTorqueRef 상위)로 교체.
 
 사용:
-  ① 컨트롤러: python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --cmd json --gait-T 0.35 --step-h 0.05
-  ② GUI:      python teleop_gui.py
-키: ↑↓=vx  ←→=vy  ,/. =w  X(또는 Space)=STOP
+  ① GUI:    python teleop_gui.py
+  ② 컨트롤러: cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
+좌스틱=전후/측방, 우스틱=선회. 버튼: Ready(서기)/Ground(눕기)/Walk(보행)/STOP.
 """
 import os
 import json
+import math
 import dearpygui.dearpygui as dpg
 
 CMD_PATH = os.environ.get('QUAD_CMD', '/tmp/quad_cmd.json')
-VMAX = float(os.environ.get('VMAX', '0.5'))      # 컨트롤러 JsonCmd vmax 와 동일
-WMAX = float(os.environ.get('WMAX', '0.25'))
-STEP_V, STEP_W = 0.05, 0.05
-JR = 95; JCX = 110; JCY = 110           # 조이스틱 반경·중심(드로잉 좌표)
-_jdrag = {'on': False}
+VMAX = float(os.environ.get('VMAX', '0.4'))
+WMAX = float(os.environ.get('WMAX', '0.3'))
 
 
 class SportClient:
-    """Unitree SportClient 시그니처 그대로의 명령 발행기.
-       백엔드=JSON 원자적쓰기(배포시 ROS2/DDS LowCmd 상위로 교체).
-       컨트롤러(JsonCmd)는 v/vy/w 소비. mode/body_height/euler 는 프로토콜 준비(추후 컨트롤러 연동)."""
+    """명령 발행기(JSON 원자적 쓰기). RBQ 모션명 별칭 포함(motionStaticReady/Ground/DynamicWalk)."""
 
     def __init__(self, path=CMD_PATH):
         self.path = path
         self.cmd = {'v': 0.0, 'vy': 0.0, 'w': 0.0, 'mode': 'move',
                     'body_height': 0.0, 'euler': [0.0, 0.0, 0.0], 'gait': 0}
-        self._publish()
+        self._pub()
 
-    def _publish(self):
+    def _pub(self):
         tmp = self.path + '.tmp'
         with open(tmp, 'w') as f:
             json.dump(self.cmd, f)
-        os.replace(tmp, self.path)              # 원자적 교체(컨트롤러가 부분쓰기 안 읽게)
+        os.replace(tmp, self.path)
 
-    # ── Unitree SportClient API (이름 그대로) ──
     def Move(self, vx, vy, vyaw):
-        self.cmd.update(v=vx, vy=vy, w=vyaw, mode='move'); self._publish()
+        self.cmd.update(v=vx, vy=vy, w=vyaw); self._pub()
 
     def StopMove(self):
-        self.cmd.update(v=0.0, vy=0.0, w=0.0); self._publish()
+        self.cmd.update(v=0.0, vy=0.0, w=0.0); self._pub()
 
-    def BalanceStand(self):
-        self.cmd.update(v=0.0, vy=0.0, w=0.0, mode='balance_stand'); self._publish()
+    def SetMode(self, m):
+        self.cmd['mode'] = m
+        if m != 'move':
+            self.cmd.update(v=0.0, vy=0.0, w=0.0)      # 자세전환 = 속도 0
+        self._pub()
 
-    def StandUp(self):
-        self.cmd.update(mode='stand_up'); self._publish()
-
-    def StandDown(self):
-        self.cmd.update(mode='stand_down'); self._publish()
-
-    def RecoveryStand(self):
-        self.cmd.update(mode='recovery_stand'); self._publish()
-
-    def BodyHeight(self, h):
-        self.cmd.update(body_height=float(h)); self._publish()
-
-    def Euler(self, roll, pitch, yaw):
-        self.cmd.update(euler=[float(roll), float(pitch), float(yaw)]); self._publish()
-
-    def SwitchGait(self, d):
-        self.cmd.update(gait=int(d)); self._publish()
+    # ── RBQ 모션 API 별칭(이름 그대로) ──
+    def motionDynamicWalk(self):  self.SetMode('move')
+    def motionStaticReady(self):  self.SetMode('stand_up')     # 서기
+    def motionStaticGround(self): self.SetMode('stand_down')   # 눕기
 
 
 sc = SportClient()
 
 
-def _clamp(x, lo, hi):
-    return max(lo, min(hi, x))
+class JoyPad:
+    """가상 조이스틱(RBQ JoystickThumbPad 참고): 드래그=축[-1,1], 놓으면 center 복귀."""
+
+    def __init__(self, tag, size, on_change, x_only=False):
+        self.tag = tag; self.sz = size; self.R = size * 0.5 - 16; self.c = size / 2
+        self.on_change = on_change; self.x_only = x_only; self.active = False
+
+    def build(self):
+        with dpg.drawlist(width=self.sz, height=self.sz, tag=self.tag):
+            dpg.draw_circle([self.c, self.c], self.R, color=(80, 90, 120), fill=(28, 30, 42), thickness=2)
+            dpg.draw_line([self.c - self.R, self.c], [self.c + self.R, self.c], color=(58, 62, 84))
+            dpg.draw_line([self.c, self.c - self.R], [self.c, self.c + self.R], color=(58, 62, 84))
+            dpg.draw_circle([self.c, self.c], self.R * 0.5, color=(52, 56, 76))
+            dpg.draw_circle([self.c, self.c], self.sz * 0.15, color=(250, 195, 75),
+                            fill=(238, 178, 58), tag=self.tag + '_k')
+
+    def _loc(self):
+        m = dpg.get_mouse_pos(local=False); r = dpg.get_item_rect_min(self.tag)
+        return m[0] - r[0], m[1] - r[1]
+
+    def press(self):
+        if dpg.is_item_hovered(self.tag):
+            self.active = True; self.move()
+
+    def move(self):
+        if not self.active:
+            return
+        lx, ly = self._loc(); dx = lx - self.c; dy = ly - self.c; d = math.hypot(dx, dy)
+        if d > self.R and d > 0:
+            dx *= self.R / d; dy *= self.R / d
+        if self.x_only:
+            dy = 0
+        dpg.configure_item(self.tag + '_k', center=[self.c + dx, self.c + dy])
+        self.on_change(dx / self.R, -dy / self.R)      # ax 우=+, ay 위=+
+
+    def release(self):
+        if self.active:
+            self.active = False
+            dpg.configure_item(self.tag + '_k', center=[self.c, self.c])
+            self.on_change(0.0, 0.0)
 
 
-def _send_move():
-    vx = dpg.get_value('vx'); vy = dpg.get_value('vy'); w = dpg.get_value('vyaw')
-    sc.Move(vx, vy, w)
-    dpg.set_value('status', 'Move   vx=%+.2f  vy=%+.2f  w=%+.2f   | mode=%s' %
-                  (vx, vy, w, sc.cmd['mode']))
+def _status():
+    dpg.set_value('status', 'v=%+.2f  vy=%+.2f  w=%+.2f   |  mode=%s'
+                  % (sc.cmd['v'], sc.cmd['vy'], sc.cmd['w'], sc.cmd['mode']))
 
 
-def _set_vel(vx=None, vy=None, w=None):
-    if vx is not None:
-        dpg.set_value('vx', _clamp(vx, -VMAX, VMAX))
-    if vy is not None:
-        dpg.set_value('vy', _clamp(vy, -VMAX, VMAX))
-    if w is not None:
-        dpg.set_value('vyaw', _clamp(w, -WMAX, WMAX))
-    _send_move()
+def _left(ax, ay):                                     # 좌스틱: 전후(ay)/측방(ax)
+    sc.Move(ay * VMAX, -ax * VMAX, sc.cmd['w']); _status()
 
 
-def _stop():
-    dpg.set_value('vx', 0.0); dpg.set_value('vy', 0.0); dpg.set_value('vyaw', 0.0)
-    sc.StopMove()
-    dpg.set_value('status', 'STOP   (모든 속도 0)')
+def _right(ax, ay):                                    # 우스틱: 선회(ax)
+    sc.Move(sc.cmd['v'], sc.cmd['vy'], -ax * WMAX); _status()
 
 
-def _mode(fn, label):
-    fn()
-    dpg.set_value('status', label + '   | mode=%s' % sc.cmd['mode'])
+left = JoyPad('joyL', 200, _left)
+right = JoyPad('joyR', 200, _right, x_only=True)
 
 
-# ── 키보드(↑↓ vx, ←→ vy, ,/. w, X/Space STOP) ──
-def _key(sender, app_data):
-    k = app_data
-    if k == dpg.mvKey_Up:      _set_vel(vx=dpg.get_value('vx') + STEP_V)
-    elif k == dpg.mvKey_Down:  _set_vel(vx=dpg.get_value('vx') - STEP_V)
-    elif k == dpg.mvKey_Left:  _set_vel(vy=dpg.get_value('vy') + STEP_V)
-    elif k == dpg.mvKey_Right: _set_vel(vy=dpg.get_value('vy') - STEP_V)
-    elif k == dpg.mvKey_Comma:  _set_vel(w=dpg.get_value('vyaw') + STEP_W)
-    elif k == dpg.mvKey_Period: _set_vel(w=dpg.get_value('vyaw') - STEP_W)
-    elif k in (dpg.mvKey_X, dpg.mvKey_Spacebar): _stop()
+def _mode_btn(m):
+    sc.SetMode(m); _status()
 
 
-# ── 가상 조이스틱(드래그=전후/측방, 놓으면 정지) ──
-def _joy_apply(dx, dy):
-    import math
-    d = math.hypot(dx, dy)
-    if d > JR: dx *= JR / d; dy *= JR / d          # 패드 안으로 클램프
-    dpg.configure_item('knob', center=[JCX + dx, JCY + dy])
-    _set_vel(vx=-dy / JR * VMAX, vy=-dx / JR * VMAX)   # 위=전진, 좌=+측방
-
-def _joy_press(sender, app_data):
-    if dpg.is_item_hovered('joydraw'):
-        _jdrag['on'] = True
-        mp = dpg.get_drawing_mouse_pos(); _joy_apply(mp[0] - JCX, mp[1] - JCY)
-
-def _joy_move(sender, app_data):
-    if _jdrag['on']:
-        mp = dpg.get_drawing_mouse_pos(); _joy_apply(mp[0] - JCX, mp[1] - JCY)
-
-def _joy_release(sender, app_data):
-    if _jdrag['on']:
-        _jdrag['on'] = False
-        dpg.configure_item('knob', center=[JCX, JCY])
-        _set_vel(vx=0.0, vy=0.0)                    # 놓으면 정지(전후/측방만; 선회는 슬라이더 유지)
+def _key(sender, app_data):                            # 키보드 백업: 화살표=이동, ,/. =선회, X=STOP
+    k = app_data; s = 0.05
+    if k == dpg.mvKey_Up:      sc.Move(min(VMAX, sc.cmd['v'] + s), sc.cmd['vy'], sc.cmd['w'])
+    elif k == dpg.mvKey_Down:  sc.Move(max(-VMAX, sc.cmd['v'] - s), sc.cmd['vy'], sc.cmd['w'])
+    elif k == dpg.mvKey_Left:  sc.Move(sc.cmd['v'], min(VMAX, sc.cmd['vy'] + s), sc.cmd['w'])
+    elif k == dpg.mvKey_Right: sc.Move(sc.cmd['v'], max(-VMAX, sc.cmd['vy'] - s), sc.cmd['w'])
+    elif k == dpg.mvKey_Comma:  sc.Move(sc.cmd['v'], sc.cmd['vy'], min(WMAX, sc.cmd['w'] + s))
+    elif k == dpg.mvKey_Period: sc.Move(sc.cmd['v'], sc.cmd['vy'], max(-WMAX, sc.cmd['w'] - s))
+    elif k in (dpg.mvKey_X, dpg.mvKey_Spacebar): sc.StopMove()
+    else: return
+    _status()
 
 
 dpg.create_context()
 
-# STOP 버튼용 빨강 테마
-with dpg.theme() as stop_theme:
+# 한글 폰트(없으면 ??로 표기)
+_FONT = os.environ.get('GUI_FONT', '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc')
+_kf = None
+if os.path.exists(_FONT):
+    with dpg.font_registry():
+        _kf = dpg.add_font(_FONT, 18)
+
+# 다크 테마(RBQ 느낌)
+with dpg.theme() as _dark:
+    with dpg.theme_component(dpg.mvAll):
+        dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (22, 24, 32))
+        dpg.add_theme_color(dpg.mvThemeCol_Button, (46, 52, 74))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (66, 74, 104))
+        dpg.add_theme_color(dpg.mvThemeCol_Text, (220, 224, 235))
+with dpg.theme() as _stop_theme:
     with dpg.theme_component(dpg.mvButton):
-        dpg.add_theme_color(dpg.mvThemeCol_Button, (170, 40, 40))
-        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (210, 60, 60))
+        dpg.add_theme_color(dpg.mvThemeCol_Button, (170, 45, 45))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (210, 65, 65))
 
 with dpg.window(tag='main'):
-    dpg.add_text('가상 조이스틱 — 드래그=전후(↕)/측방(↔), 놓으면 정지')
-    with dpg.drawlist(width=2*JR+30, height=2*JR+30, tag='joydraw'):
-        dpg.draw_circle([JCX, JCY], JR, color=(90, 90, 120), fill=(38, 38, 52), thickness=2)   # 패드
-        dpg.draw_line([JCX-JR, JCY], [JCX+JR, JCY], color=(70, 70, 95))                          # 십자
-        dpg.draw_line([JCX, JCY-JR], [JCX, JCY+JR], color=(70, 70, 95))
-        dpg.draw_circle([JCX, JCY], JR*0.5, color=(60, 60, 85))
-        dpg.draw_circle([JCX, JCY], 24, color=(245, 190, 70), fill=(235, 175, 55), tag='knob')   # 노브
-    dpg.add_separator()
-    dpg.add_text('속도 명령 (슬라이더 드래그 = 실시간 발행)')
-    dpg.add_slider_float(label='vx 전진 [m/s]', tag='vx', min_value=-VMAX, max_value=VMAX,
-                         default_value=0.0, callback=lambda s, a: _send_move())
-    dpg.add_slider_float(label='vy 측방 [m/s]  (+좌/−우)', tag='vy', min_value=-VMAX, max_value=VMAX,
-                         default_value=0.0, callback=lambda s, a: _send_move())
-    dpg.add_slider_float(label='w 선회 [rad/s]', tag='vyaw', min_value=-WMAX, max_value=WMAX,
-                         default_value=0.0, callback=lambda s, a: _send_move())
+    dpg.add_text('02_Leg Teleop   (RBQ 스타일 · SportClient)')
     dpg.add_separator()
     with dpg.group(horizontal=True):
-        dpg.add_button(label='  Move  ', callback=_send_move)
-        b = dpg.add_button(label='  STOP  ', callback=_stop); dpg.bind_item_theme(b, stop_theme)
-        dpg.add_button(label='BalanceStand', callback=lambda: _mode(sc.BalanceStand, 'BalanceStand'))
-    with dpg.group(horizontal=True):
-        dpg.add_button(label='StandUp', callback=lambda: _mode(sc.StandUp, 'StandUp'))
-        dpg.add_button(label='StandDown', callback=lambda: _mode(sc.StandDown, 'StandDown'))
-        dpg.add_button(label='RecoveryStand', callback=lambda: _mode(sc.RecoveryStand, 'RecoveryStand'))
-    dpg.add_slider_float(label='BodyHeight [m]', tag='bh', min_value=-0.1, max_value=0.1,
-                         default_value=0.0, callback=lambda s, a: sc.BodyHeight(a))
+        with dpg.group():
+            dpg.add_text('이동  (좌스틱: ↕전후 / ↔측방)')
+            left.build()
+        dpg.add_spacer(width=20)
+        with dpg.group():
+            dpg.add_text('선회  (우스틱: ↔좌우)')
+            right.build()
     dpg.add_separator()
-    dpg.add_text('키: ↑↓=vx  ←→=vy  ,/.=w  X/Space=STOP', color=(150, 150, 150))
+    dpg.add_text('모션', color=(170, 175, 195))
+    with dpg.group(horizontal=True):
+        dpg.add_button(label='Ready 서기', width=120, callback=lambda: _mode_btn('stand_up'))
+        dpg.add_button(label='Ground 눕기', width=120, callback=lambda: _mode_btn('stand_down'))
+        dpg.add_button(label='Walk 보행', width=120, callback=lambda: _mode_btn('move'))
+        _b = dpg.add_button(label='STOP', width=90, callback=lambda: (sc.StopMove(), _status()))
+        dpg.bind_item_theme(_b, _stop_theme)
+    dpg.add_separator()
+    dpg.add_text('키: ↑↓=전후  ←→=측방  ,/.=선회  X/Space=STOP', color=(140, 140, 155))
     dpg.add_text('', tag='status')
-    dpg.add_text('채널: ' + CMD_PATH + '  (컨트롤러는 --cmd json 으로 소비)', color=(130, 130, 130))
+    dpg.add_text('채널: ' + CMD_PATH, color=(115, 118, 130))
 
 with dpg.handler_registry():
     dpg.add_key_press_handler(callback=_key)
-    dpg.add_mouse_down_handler(callback=_joy_press)      # 조이스틱 드래그
-    dpg.add_mouse_drag_handler(callback=_joy_move)
-    dpg.add_mouse_release_handler(callback=_joy_release)
+    dpg.add_mouse_down_handler(callback=lambda s, a: (left.press(), right.press()))
+    dpg.add_mouse_drag_handler(callback=lambda s, a: (left.move(), right.move()))
+    dpg.add_mouse_release_handler(callback=lambda s, a: (left.release(), right.release()))
 
-dpg.set_value('status', 'Move   vx=+0.00  vy=+0.00  w=+0.00   | mode=move')
-dpg.create_viewport(title='02_Leg Teleop  (SportClient)', width=500, height=470)
+_status()
+dpg.create_viewport(title='02_Leg Teleop (RBQ style)', width=500, height=510)
 dpg.setup_dearpygui()
+if _kf is not None:
+    dpg.bind_font(_kf)
+dpg.bind_theme(_dark)
 dpg.show_viewport()
 dpg.set_primary_window('main', True)
 dpg.start_dearpygui()
