@@ -103,6 +103,16 @@ class QuadSim:
                 gid = N(mujoco.mjtObj.mjOBJ_GEOM, cfg['foot_geom'].format(L=L))
                 fb = self.m.geom_bodyid[gid]; self.foot_r[i] = float(self.m.geom_size[gid][0])
             self.foot_bid[i] = fb; self.foot_gid[i] = gid
+        # ★접촉 강성(구조3와 동일 STIFF): 기본 soft(solref 0.02s)이라 발이 땅에 파고듦
+        #   (특히 뒷발=articulated 4DoF라 더 깊이). 발 sphere+floor solref 시정수↓ → 단단한 접촉. STIFF=0=끄기.
+        _stiff = float(os.environ.get('STIFF', '0.005'))
+        if _stiff > 0:
+            _tc = max(_stiff, 2.0 * self.m.opt.timestep)       # 안정조건 ≥2*dt
+            _fl = N(mujoco.mjtObj.mjOBJ_GEOM, 'floor')
+            _gids = [self.foot_gid[i] for i in range(4)] + ([_fl] if _fl >= 0 else [])
+            for g in _gids:
+                self.m.geom_solref[g] = [_tc, 1.0]
+                self.m.geom_solimp[g] = [0.95, 0.99, 0.001, 0.5, 2.0]
         self.q_home = None
         self.com_ref = None
         self.last_lam = None
@@ -517,8 +527,16 @@ class QuadSim:
                 if s % pe == 0:
                     w, x, y, z = d.qpos[3:7]                  # base quat [w,x,y,z] → tilt(수직과의 각)
                     tilt = np.degrees(np.arccos(max(-1, min(1, 1 - 2 * (x * x + y * y)))))
-                    print('[hl] s=%d t=%.2f base_z=%.3f x=%+.3f y=%+.3f tilt=%.1f falls=%d'
-                          % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], tilt, falls), flush=True)
+                    pen = [0.0] * 4                           # 발별 접촉침투(mm, 음수=파고듦)
+                    for ci in range(d.ncon):
+                        c = d.contact[ci]
+                        for fi, g in enumerate(self.foot_gid):
+                            if c.geom1 == g or c.geom2 == g:
+                                pen[fi] = min(pen[fi], c.dist)
+                    # quad_sim legs=[HL,HR,FL,FR] → 뒤=pen[0,1], 앞=pen[2,3]
+                    print('[hl] s=%d t=%.2f base_z=%.3f x=%+.3f tilt=%.1f 침투[mm] 뒤HL/HR=%.1f/%.1f 앞FL/FR=%.1f/%.1f falls=%d'
+                          % (s, d.time, d.qpos[2], d.qpos[0], tilt,
+                             pen[0]*1000, pen[1]*1000, pen[2]*1000, pen[3]*1000, falls), flush=True)
             print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f' % (nsteps, falls, d.qpos[0]), flush=True)
             return
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
