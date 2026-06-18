@@ -177,6 +177,13 @@ class QuadSim:
         d.qpos[2] = 0.60; mujoco.mj_forward(m, d)
         foot_xy = [self.foot_point(i)[:2].copy() for i in range(4)]
         d.qpos[2] = base_z
+        # ★뒷다리(4DoF) 발목을 REAR_ANKLE로 두고 hip/thigh/calf로 같은 발 위치 IK
+        #   → 같은 발 궤적, 더 웅크린 자세(발목 꺾고 thigh 펴짐). 4-DoF 여유(redundancy) 해소.
+        _ra = float(os.environ.get('REAR_ANKLE', '0.0'))
+        if _ra != 0.0:
+            for i in range(4):
+                if self.leg_dof[i] == 4:
+                    d.qpos[self.legqp[i][3]] = _ra
         for _ in range(300):
             mujoco.mj_kinematics(m, d); mujoco.mj_comPos(m, d)
             for i in range(4):

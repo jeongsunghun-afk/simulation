@@ -63,6 +63,7 @@ cd /home/jsh/문서/jsh/simulation/quad && TROT_V=0.5 /home/jsh/miniforge3/envs/
 #   헤드리스 정량:  HEADLESS=1 STEPS=3000 PRINT_EVERY=500 ...  (z·x·y·yaw·tilt·발침투·falls 출력; 1kHz라 STEPS=시간/0.001)
 #   정지/기립:  --mode stance(WBIC) / stand(중력보상PD) / mpc(MPC+WBIC) / view
 #   env:  TROT_V/VY/WZ(전진·측방·선회 속도)  TROT_ACC(명령 가속도제한, 기본0.6=시작램프+GUI 급조작 완화)  CMDFILE(GUI JSON 폴링)  TROT_T(주기)  TROT_KCAP(capture게인)
+#   ★REAR_ANKLE(뒷발목 각도[rad], 기본0): 4-DoF 여유 해소 — 같은 발 궤적에 자세만 변경(웅크림). +0.4=발목꺾고 thigh폄, +0.7=더 웅크림. 보행유지.
 #   ★물리환경 = 구조3(02leg9_fulldynamics)와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단; 발침투 -37mm→-2mm)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
 
 
