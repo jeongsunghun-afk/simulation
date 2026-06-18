@@ -2,14 +2,15 @@
 ★★★ 02_Leg 본선 = 구조3(simple-mpc FullDynamics MPC+RTI). 전방향 0.1~0.5m/s·thread-robust·배포인프라(SDK·비동기·상태추정·GUI) 완성 ★★★
 ────────────────────────────────────────────────────────────────────
 [결론] 02_Leg 배포 본선 = 구조3 FullDynamics(full-body MPC+RTI, TSID없이 토크직접): limp소멸·thread-robust·전방향·0.1~0.5m/s + SDK계층·비동기·상태추정·GUI 완성.
-  구조1(full-body walk_loop+DDP게인+re-anchor)=초기 full-body 베이스라인(02_Leg 0.32m/s 무한안정). 구조2(TSID-ID+RobotInterface)=02_Leg 정적기립 우수·sim2real seam. 셋 다 보존.
-  (구조3는 초기 kinodynamics 축약버전→현 FullDynamics로 발전. 옛 "kinodyn 0.097m/s"는 대체됨.)
+  구조1(우리 full-body NMPC Python + DDP게인 + re-anchor)=초기 베이스라인(02_Leg 0.32m/s 무한안정).
+  구조2(simple-mpc Kinodynamics=축약 centroidal NMPC + TSID-ID 2계층). 우리 차용본 quad_proxddp_tsid(NMPC+raw TSID+RobotInterface)=02_Leg 정적기립 우수·sim2real seam. 셋 다 보존.
+  ★정식화 구분: 구조1=우리 Python NMPC / 구조2·3=둘 다 simple-mpc 라이브러리(구조2=Kinodynamics+TSID, 구조3=FullDynamics+RTI·TSID없음).
 [공통] aligator는 conda env(proxddp) 전용 → 경로: /home/jsh/miniforge3/envs/proxddp/bin/python
        작업폴더: cd /home/jsh/문서/jsh/simulation/quad   (아래 스크립트는 전부 이 폴더)
 ────────────────────────────────────────────────────────────────────
 [파일 — 무엇이 어디]  (모두 /home/jsh/문서/jsh/simulation/quad/ 안)
  quad_proxddp.py        ★구조1 메인: walk_loop(--test loop)·hold·track + DataLog(--log)·LivePlot(--plot)·--vel-y측방
- quad_proxddp_tsid.py   구조2: TSID-ID 1kHz + RobotInterface(sim2real seam) — hold/loop/stand/walk
+ quad_proxddp_tsid.py   구조2 차용본(우리 NMPC + raw TSID 1kHz) + RobotInterface(sim2real seam) — hold/loop/stand/walk. (정식 구조2=simple-mpc Kinodynamics)
  quad_nmpc.py           NMPC 모델(ProxModel)·_trot_schedule(전진+측방 Vy/march_y)
  quad_sim.py            MuJoCo 통합: WBIC stance/stand/mpc + QuadSim(crouch·foot_point·sphere발 처리)
  teleop_gui.py          GUI 제어패널(Dear PyGui, Unitree SportClient: Move/StopMove/BalanceStand…) → /tmp/quad_cmd.json
@@ -18,7 +19,7 @@
  quad_real_sphere.mjcf  구조1 sphere발 70mm(--exec-robot ours_sphere, quad_sim ours_sphere)  | quad_real.mjcf=mesh발
  urdf/02_Leg_UFDF_260610_9.urdf   02_Leg URDF(앞발목 fixed _9, 기본; planner pinocchio, --robot ours)
  logs/                  로그 출력(CSV/PNG, gitignore)
- (구조3) /home/jsh/simple-mpc/                     simple-mpc 레퍼런스(별도 pixi env)
+ (구조2·3) /home/jsh/simple-mpc/                   simple-mpc 레퍼런스=Kinodynamics(구조2)+FullDynamics(구조3) (별도 pixi env)
  (biped) /home/jsh/문서/jsh/simulation/biped/wbic_balance.py
  (메모리) /home/jsh/.claude/projects/-home-jsh----jsh/memory/   프로젝트·02leg-motor-spec·rbq-sdk-reference
  (GitHub) simulation = jeongsunghun-afk/simulation  브랜치 biped-wbic-mpc
@@ -42,13 +43,13 @@ cd /home/jsh/문서/jsh/simulation/quad && BASE_Z0=0.52 PW_ORI=250 PW_BV=5 /home
 [★ 정지/기립 — 보행X. 뷰어 Ctrl+드래그로 밀어 버팀 확인]
 # (A) proxDDP hold: go2 ✅무한 tilt1°.  ※02_Leg는 1.7s 전복(pin↔MuJoCo 불일치) → 02_Leg 정적은 (B)
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test hold --robot go2 --total-T 120
-# (B) TSID hold (구조2, full-QP): ★02_Leg ✅tilt2° (구조1 hold가 못잡던걸 잡음). go2도 가능
+# (B) TSID hold (구조2 차용본 quad_proxddp_tsid, full-QP): ★02_Leg ✅tilt2° (구조1 hold가 못잡던걸 잡음). go2도 가능
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp_tsid.py --test hold --robot ours --exec-robot ours_sphere --total-T 30
 # (C) WBIC stance (quad_sim, full QP): 02_Leg·go2 정적기립. 모드: stance=WBIC / stand=중력보상PD / mpc=MPC+WBIC / view
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode stance
 
 [데이터 로깅 — loop에 --log PATH 추가. 매 제어틱 각 축(관절) 토크[Nm]·각속도[rad/s] CSV / --plot=실시간그래프]
-#  헤더=관절명(tau:HL_hip.. / wj:HL_hip..), 구조1≈500Hz·구조2=1kHz, 전복/완주 양쪽 저장. --noview·뷰어 모두.
+#  헤더=관절명(tau:HL_hip.. / wj:HL_hip..), 구조1≈500Hz·구조2차용본(TSID)=1kHz, 전복/완주 양쪽 저장. --noview·뷰어 모두.
 cd /home/jsh/문서/jsh/simulation/quad && PW_ORI=250 PW_BV=5 /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.3 --gait-T 0.35 --step-h 0.05 --total-T 10 --noview --log logs/quad_log.csv
 # 불러오기: python -c "import numpy as np; d=np.genfromtxt('logs/quad_log.csv',delimiter=',',names=True); print(d['t'], d['tauHL_thigh'], d['wjHL_thigh'])"
 # ★ 그래프+최대토크/각속도 체크(모터한계 대비%) → logs/*.png + 콘솔 요약표
@@ -86,7 +87,7 @@ cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin
 [로그 분석] python plot_log.py logs/quad_log.csv → 그래프+최대 토크/각속도(모터한계 대비%). ★발목 각속도 한계초과 발견.
 
 ════════════════════════════════════════════════════════════════════
-[구조2 — quad_proxddp_tsid.py: 우리 NMPC + TSID 1kHz + sim2real RobotInterface]
+[구조2 차용본 — quad_proxddp_tsid.py: 우리 NMPC + raw TSID 1kHz + sim2real RobotInterface]  (정식 구조2=simple-mpc Kinodynamics, 아래 [구조2·3] 블록)
 # ★ sim2real 기반 = RobotInterface(Mujoco/Real): 컨트롤러는 read_state()/apply_torque()만 → sim↔실 무변경 교체.
 #   (CommandSource=명령 seam, RobotInterface=센서/액추 seam). hold/loop 모두 이 경계 경유.
 # teleop 보행 (RobotInterface 경유) — ※보행은 ~2.5s 붕괴(TSID 정식화 한계, 인프라 우선). 정지(hold)는 우수.
@@ -99,7 +100,8 @@ cd /home/jsh/문서/jsh/simulation/quad && W_FORCE=1 KP_POST=30 W_POST=2 KP_CONT
 #  ★결론: RTI 양쪽 다 불안정(구조1 per-tick 기준품질 ~2s / 구조2 TSID base가라앉음 ~5s). step추종/limp 미해결.
 #  근본: raw-TSID < KinodynamicsID(centroidal 정식화 격차). 일관 발배치엔 KinodynamicsID 재현 또는 WBC 필요.
 
-[구조3 — simple-mpc 레퍼런스 (점접촉 addPointFoot, force_size=3). pixi env(/home/jsh/simple-mpc, py3.14 격리)]
+[구조2·3 — simple-mpc 레퍼런스 (점접촉 addPointFoot, force_size=3). pixi env(/home/jsh/simple-mpc, py3.14 격리)]
+#  ※구조2=Kinodynamics(축약 centroidal NMPC + TSID-ID 2계층) / 구조3=FullDynamics(전신 NMPC + RTI, TSID없음) — 둘 다 이 라이브러리. ★본선=구조3.
 # ╔═══════════════ [구조3 = 02_Leg 본선·완성 현황 2026-06] ═══════════════╗
 #  ✅ FullDynamics MPC+RTI(TSID없이): limp소멸·thread-robust(NTH1~8)·전방향(전진94%·측방·선회·대각)·속도 0.1~0.4(빠른cadence 0.5)
 #  ✅ Unitree SDK 계층: SportClient.Move(고수준) → MPC → RobotInterface LowCmd/LowState(저수준). 실로봇=MujocoRobot만 RealRobot 교체
@@ -109,6 +111,7 @@ cd /home/jsh/문서/jsh/simulation/quad && W_FORCE=1 KP_POST=30 W_POST=2 KP_CONT
 #  ★대표 실행(GUI+뷰어): 아래 [배포 인프라] 블록의 터미널1(GUI)+터미널2(뷰어) 참조
 # ╚════════════════════════════════════════════════════════════════════╝
 # 빌드(1회): cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi install && ~/.pixi/bin/pixi run build && ~/.pixi/bin/pixi run install
+# ── 구조2 (Kinodynamics: 축약 centroidal NMPC + TSID-ID) ── 레퍼런스·비교용 ──
 cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi run python examples/go2_kinodynamics_patched.py          # pybullet(강체접촉 0.089m/s)
 cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 STEPS=1000 VIEW=1 ~/.pixi/bin/pixi run python examples/go2_kinodynamics_mujoco.py  # MuJoCo(접촉맞춤 0.097m/s)
 # ★발견: simple-mpc 부진=접촉모델 불일치(컨트롤러 강체가정 vs MuJoCo elliptic soft). 맞추면 정상. 02_Leg는 pybullet서도 발산.
@@ -117,7 +120,8 @@ cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 STEPS=1000 VIEW=1 ~/.pixi/b
 cd /home/jsh/simple-mpc && VIEW=1 STEPS=300 VX=0.2 ~/.pixi/bin/pixi run python examples/02leg9_kinodynamics_mujoco.py
 #   튜닝 env: KP_BASE/KP_POSTURE/KP_CONTACT/W_BASE(KinodynamicsID), WBORI/WBVX(OCP). VX=0서기부터.
 
-# ★★★[성공·강건] _9 02_Leg FullDynamics(full-body MPC + RTI, TSID없이 토크직접). 안정무한보행·limp완전소멸·thread-robust.
+# ── 구조3 (FullDynamics: 전신 NMPC + RTI, TSID없음) ── ★02_Leg 본선 ──
+# ★★★[성공·강건] _9 02_Leg FullDynamics(full-body MPC + RTI, TSID없이 토크직접; Ks 게인이 TSID역할 대체). 안정무한보행·limp완전소멸·thread-robust.
 # ★뷰어=무한루프+키보드 teleop(↑↓=vx ←→=vy측방 ,/.=yaw X=정지). 헤드리스(VIEW=0)=STEPS 유한. 초기속도 VX/VY/WZ.
 # ★★GUI teleop(RBQ 스타일, teleop_gui.py): Rainbow Robotics RBQ GUI(squashfs-root, JoystickThumbPad+motionStaticReady/Ground/DynamicWalk) 참고.
 #   dual 조이스틱(좌=전후/측방, 우=선회) + 모션버튼(Ready=서기/Ground=눕기/Walk=보행/STOP) + 한글폰트(NotoSansCJK). JSON(/tmp/quad_cmd.json) 발행 → 컨트롤러 CMDFILE 소비.
