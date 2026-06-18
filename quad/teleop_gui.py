@@ -18,6 +18,8 @@ CMD_PATH = os.environ.get('QUAD_CMD', '/tmp/quad_cmd.json')
 VMAX = float(os.environ.get('VMAX', '0.5'))      # 컨트롤러 JsonCmd vmax 와 동일
 WMAX = float(os.environ.get('WMAX', '0.25'))
 STEP_V, STEP_W = 0.05, 0.05
+JR = 95; JCX = 110; JCY = 110           # 조이스틱 반경·중심(드로잉 좌표)
+_jdrag = {'on': False}
 
 
 class SportClient:
@@ -113,6 +115,30 @@ def _key(sender, app_data):
     elif k in (dpg.mvKey_X, dpg.mvKey_Spacebar): _stop()
 
 
+# ── 가상 조이스틱(드래그=전후/측방, 놓으면 정지) ──
+def _joy_apply(dx, dy):
+    import math
+    d = math.hypot(dx, dy)
+    if d > JR: dx *= JR / d; dy *= JR / d          # 패드 안으로 클램프
+    dpg.configure_item('knob', center=[JCX + dx, JCY + dy])
+    _set_vel(vx=-dy / JR * VMAX, vy=-dx / JR * VMAX)   # 위=전진, 좌=+측방
+
+def _joy_press(sender, app_data):
+    if dpg.is_item_hovered('joydraw'):
+        _jdrag['on'] = True
+        mp = dpg.get_drawing_mouse_pos(); _joy_apply(mp[0] - JCX, mp[1] - JCY)
+
+def _joy_move(sender, app_data):
+    if _jdrag['on']:
+        mp = dpg.get_drawing_mouse_pos(); _joy_apply(mp[0] - JCX, mp[1] - JCY)
+
+def _joy_release(sender, app_data):
+    if _jdrag['on']:
+        _jdrag['on'] = False
+        dpg.configure_item('knob', center=[JCX, JCY])
+        _set_vel(vx=0.0, vy=0.0)                    # 놓으면 정지(전후/측방만; 선회는 슬라이더 유지)
+
+
 dpg.create_context()
 
 # STOP 버튼용 빨강 테마
@@ -122,6 +148,14 @@ with dpg.theme() as stop_theme:
         dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (210, 60, 60))
 
 with dpg.window(tag='main'):
+    dpg.add_text('가상 조이스틱 — 드래그=전후(↕)/측방(↔), 놓으면 정지')
+    with dpg.drawlist(width=2*JR+30, height=2*JR+30, tag='joydraw'):
+        dpg.draw_circle([JCX, JCY], JR, color=(90, 90, 120), fill=(38, 38, 52), thickness=2)   # 패드
+        dpg.draw_line([JCX-JR, JCY], [JCX+JR, JCY], color=(70, 70, 95))                          # 십자
+        dpg.draw_line([JCX, JCY-JR], [JCX, JCY+JR], color=(70, 70, 95))
+        dpg.draw_circle([JCX, JCY], JR*0.5, color=(60, 60, 85))
+        dpg.draw_circle([JCX, JCY], 24, color=(245, 190, 70), fill=(235, 175, 55), tag='knob')   # 노브
+    dpg.add_separator()
     dpg.add_text('속도 명령 (슬라이더 드래그 = 실시간 발행)')
     dpg.add_slider_float(label='vx 전진 [m/s]', tag='vx', min_value=-VMAX, max_value=VMAX,
                          default_value=0.0, callback=lambda s, a: _send_move())
@@ -147,6 +181,9 @@ with dpg.window(tag='main'):
 
 with dpg.handler_registry():
     dpg.add_key_press_handler(callback=_key)
+    dpg.add_mouse_down_handler(callback=_joy_press)      # 조이스틱 드래그
+    dpg.add_mouse_drag_handler(callback=_joy_move)
+    dpg.add_mouse_release_handler(callback=_joy_release)
 
 dpg.set_value('status', 'Move   vx=+0.00  vy=+0.00  w=+0.00   | mode=move')
 dpg.create_viewport(title='02_Leg Teleop  (SportClient)', width=500, height=470)

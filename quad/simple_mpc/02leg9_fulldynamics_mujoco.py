@@ -331,6 +331,7 @@ mpc.velocity_base = v
 _SLIP=bool(_os.environ.get("SLIP")); _slipacc=[0.0]*4; _netx=[0.0]*4; _prevf=[None]*4   # 발 슬립진단(접촉중 수평이동)
 _itms=[]   # mpc.iterate 시간(ms) — 실시간성 측정
 _lc = LowCmd(nu); _KP = np.full(nu, float(_os.environ.get("KP","0"))); _KD = np.full(nu, float(_os.environ.get("KD","0")))  # 저수준 LowCmd(기본 kp=kd=0=순수토크)
+_CMDFILE = _os.environ.get("CMDFILE")   # GUI(teleop_gui.py)가 발행하는 JSON 명령 채널 → SportClient.Move (별도 프로세스, env무관)
 _EST = bool(_os.environ.get("EST")); _ESTCL = bool(_os.environ.get("ESTCL"))   # EST=검증, ESTCL=추정값을 MPC에 피드(closed-loop)
 _estor = StateEstimator(model_handler.getModel(), ["FL_foot","FR_foot","HL_foot","HR_foot"], dt_simu) if (_EST or _ESTCL) else None
 if _estor: _estor.reset(device.d.qpos[0:3])
@@ -420,6 +421,12 @@ while True:
     if _INF:
         if not device.viewer.is_running(): break
     elif step >= _MAXSTEP: break
+    if _CMDFILE and step % 5 == 0:          # GUI JSON 채널 소비(20Hz) → 고수준 SportClient.Move
+        try:
+            import json as _json
+            with open(_CMDFILE) as _f: _cj = _json.load(_f)
+            device.sport.Move(float(_cj.get('v',0.0)), float(_cj.get('vy',0.0)), float(_cj.get('w',0.0)))
+        except Exception: pass
     v = device.sport.velocity_base()        # 고수준 SportClient → cmd_vel
     mpc.velocity_base = v
     if step % 30 == 0:
