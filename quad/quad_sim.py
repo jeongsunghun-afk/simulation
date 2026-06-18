@@ -482,14 +482,17 @@ class QuadSim:
         reset_fn = reset_fn or self.set_home
         if os.environ.get('HEADLESS'):                       # 헤드리스 정량테스트(뷰어 없이 N스텝)
             nsteps = int(os.environ.get('STEPS', '1500'))
+            pe = int(os.environ.get('PRINT_EVERY', '100'))   # 출력 간격(스텝). 첫사이클 관찰은 20 등
             falls = 0
             for s in range(nsteps):
                 control_fn(); mujoco.mj_step(m, d)
                 if reset_on_fall and d.qpos[2] < 0.2:
                     falls += 1; mujoco.mj_resetData(m, d); reset_fn()
-                if s % 100 == 0:
-                    print('[hl] s=%d t=%.2f base_z=%.3f x=%+.3f y=%+.3f falls=%d'
-                          % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], falls), flush=True)
+                if s % pe == 0:
+                    w, x, y, z = d.qpos[3:7]                  # base quat [w,x,y,z] → tilt(수직과의 각)
+                    tilt = np.degrees(np.arccos(max(-1, min(1, 1 - 2 * (x * x + y * y)))))
+                    print('[hl] s=%d t=%.2f base_z=%.3f x=%+.3f y=%+.3f tilt=%.1f falls=%d'
+                          % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], tilt, falls), flush=True)
             print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f' % (nsteps, falls, d.qpos[0]), flush=True)
             return
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
@@ -650,6 +653,7 @@ def mode_trot():
     SWING_FRAC = float(os.environ.get('TROT_SWF', '0.50'))  # D=swing 비율
     STEP_H = float(os.environ.get('TROT_STEPH', '0.08'))
     V = float(os.environ.get('TROT_V', '0.30'))    # V=전진속도[m/s] (env로 조정)
+    V_RAMP = float(os.environ.get('TROT_RAMP', '0.5'))  # 시작 속도램프[s]: 0→V 선형(첫사이클 계단입력 완화). 0=즉시
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off
@@ -697,6 +701,8 @@ def mode_trot():
             q.MPC.MPC_Q = TROT_Q
             print('[trot] 정착 완료 → 전진 trot 시작 V=%.2f (base_z=%.3f)' % (V, q.d.qpos[2]))
         tg = t - S['t0']                     # 3) trot
+        V_eff = V * min(1.0, tg / V_RAMP) if V_RAMP > 1e-6 else V   # 시작 속도램프(첫사이클 휘청 완화)
+        S['x_ref'][9] = V_eff                # MPC 속도참조도 램프(매틱 갱신 → 다음 재계획 반영)
         # ★ Di Carlo 식: gait 스케줄=primary, detect_contact=조기/지연 착지 보정.
         #   스케줄 stance → 힘제어. 스케줄 swing 후반(>0.7)+접촉감지 → 조기착지로 stance 승격.
         #   그 외 swing → 들어올림. (USE_DETECT=False 면 순수 스케줄, A/B 비교용)
@@ -714,7 +720,7 @@ def mode_trot():
         # 발 배치 = hip 기준 default + Raibert(전진 0.5·T_st·V + 피드백 KCAP·(v−v_des))
         Jc = np.zeros((3, q.nv)); mujoco.mj_jacSubtreeCom(q.m, q.d, Jc, 0)
         vcom = Jc @ q.d.qvel
-        v_des = np.array([V, 0.0])
+        v_des = np.array([V_eff, 0.0])       # Raibert 발배치도 램프된 속도 사용
         rai = np.clip(0.5 * T_ST * v_des + KCAP * (vcom[:2] - v_des), -0.12, 0.12)
         q.foot_targets = [None, None, None, None]
         dt = q.m.opt.timestep; swing = {}

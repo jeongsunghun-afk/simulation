@@ -188,7 +188,8 @@ cd /home/jsh/simple-mpc && VIEW=1 STEPS=300 VX=0.2 ~/.pixi/bin/pixi run python e
 [기타]
 cd /home/jsh/문서/jsh/simulation/biped && python3 wbic_balance.py --mode mpc        # biped MPC+WBIC
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot go2 --mode trot # quad_sim 자체 convex MPC(GRF)+WBIC trot
-# ★02_Leg도 보행성공: --robot ours_sphere --mode trot (sphere발로 접촉문제 해결; 7s 0falls·0.27m/s·base_z안정). 헤드리스 정량테스트=HEADLESS=1 STEPS=n. env TROT_V(속도)/TROT_T(주기)/TROT_STEPH/TROT_KCAP(capture게인)
+# ★02_Leg도 보행성공: --robot ours_sphere --mode trot (sphere발로 접촉문제 해결; 7s 0falls·0.27m/s·base_z안정). 헤드리스 정량테스트=HEADLESS=1 STEPS=n PRINT_EVERY=n(tilt포함).
+#   env TROT_V(속도)/TROT_T(주기)/TROT_STEPH/TROT_KCAP(capture게인)/★TROT_RAMP(시작 속도램프[s], 기본0.5=첫사이클 휘청완화; y쏠림 2.6→0.7cm·tilt 1.3→0.7°. 0=즉시).
 cd /home/jsh/문서/jsh/simulation/quad && HEADLESS=1 STEPS=1500 /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
 # [MCX<>Rviz] source ~/ros2_ws/install/setup.bash ; ros2 launch motorcortex_bridge motorcortex_sim.launch.py
 ════════════════════════════════════════════════════════════════════
