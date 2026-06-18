@@ -533,10 +533,10 @@ class QuadSim:
                         for fi, g in enumerate(self.foot_gid):
                             if c.geom1 == g or c.geom2 == g:
                                 pen[fi] = min(pen[fi], c.dist)
-                    # quad_sim legs=[HL,HR,FL,FR] → 뒤=pen[0,1], 앞=pen[2,3]
-                    print('[hl] s=%d t=%.2f base_z=%.3f x=%+.3f tilt=%.1f 침투[mm] 뒤HL/HR=%.1f/%.1f 앞FL/FR=%.1f/%.1f falls=%d'
-                          % (s, d.time, d.qpos[2], d.qpos[0], tilt,
-                             pen[0]*1000, pen[1]*1000, pen[2]*1000, pen[3]*1000, falls), flush=True)
+                    yaw = np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
+                    pr = min(pen[0], pen[1]); pf = min(pen[2], pen[3])  # 뒤/앞 최대침투
+                    print('[hl] s=%d t=%.2f z=%.3f x=%+.3f y=%+.3f yaw=%+.0f tilt=%.1f 침투뒤/앞=%.1f/%.1fmm falls=%d'
+                          % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], yaw, tilt, pr*1000, pf*1000, falls), flush=True)
             print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f' % (nsteps, falls, d.qpos[0]), flush=True)
             return
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
@@ -699,15 +699,21 @@ def mode_trot():
     T_TROT = float(os.environ.get('TROT_T', '0.50'))        # 레퍼런스 trot 프리셋
     SWING_FRAC = float(os.environ.get('TROT_SWF', '0.50'))  # D=swing 비율
     STEP_H = float(os.environ.get('TROT_STEPH', '0.08'))
-    V = float(os.environ.get('TROT_V', '0.30'))    # V=전진속도[m/s] (env로 조정)
-    V_RAMP = float(os.environ.get('TROT_RAMP', '0.5'))  # 시작 속도램프[s]: 0→V 선형(첫사이클 계단입력 완화). 0=즉시
+    V = float(os.environ.get('TROT_V', '0.30'))     # 전진속도[m/s] 초기/기본
+    VY = float(os.environ.get('TROT_VY', '0.0'))    # ★측방속도[m/s] (+좌 −우)
+    WZ = float(os.environ.get('TROT_WZ', '0.0'))    # 선회각속도[rad/s] (+좌선회)
+    ACC = float(os.environ.get('TROT_ACC', '0.6'))  # 명령 가속도제한[m/s²]: 시작램프+GUI 급조작 완화
+    CMDFILE = os.environ.get('CMDFILE')             # ★GUI 연동: JSON(/tmp/quad_cmd.json) 폴링(v/vy/w)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off
     T_ST = T_TROT * (1 - SWING_FRAC)
     S = {'armed': False, 't0': 0.0, 'nominal': None, 'liftoff': None, 'x_ref': None,
          'ptgt_prev': [None, None, None, None], 'lam_des': None, 'mpc_t': -1.0, 'bx': 0.0,
-         'settle_until': SETTLE}
+         'settle_until': SETTLE,
+         'Vt': V, 'Vyt': VY, 'Wt': WZ,                      # 목표명령(GUI가 갱신)
+         'Vs': 0.0, 'Vys': 0.0, 'Ws': 0.0, 'cmd_t': -1.0,   # 스무딩 적용명령(0서 시작)
+         'yaw_ref': 0.0}                                     # 선회 yaw각 참조(적분)
 
     def gait(i, tg):
         ph = (tg / T_TROT + OFFSET[i]) % 1.0
@@ -737,20 +743,41 @@ def mode_trot():
         if t < S['settle_until']:            # 1) WBIC stance 정착 (초기/리셋)
             q.wbic_stance(); return
         if not S['armed']:                   # 2) 정착/리셋 자세를 trot 기준으로 캡처
-            S['armed'] = True; S['t0'] = t
+            S['armed'] = True; S['t0'] = t; S['yaw_ref'] = 0.0
             S['nominal'] = [q.foot_point(i).copy() for i in range(4)]
             S['liftoff'] = [q.foot_point(i).copy() for i in range(4)]
-            xr = np.zeros(13); xr[5] = float(q.d.subtree_com[0][2]); xr[9] = V; xr[12] = -9.81
+            xr = np.zeros(13); xr[5] = float(q.d.subtree_com[0][2]); xr[12] = -9.81  # vx/vy/wz는 매틱 갱신
             S['x_ref'] = xr
             # 발의 hip 기준 default offset (settle 시) — 이후 hip 따라 전방 배치
             S['hip_off'] = [S['nominal'][i][:2] - q.d.xpos[q.hip_bid[i]][:2] for i in range(4)]
             S['gz'] = [float(S['nominal'][i][2]) for i in range(4)]
             q.MPC.MPC_Q = TROT_Q
-            print('[trot] 정착 완료 → 전진 trot 시작 V=%.2f (base_z=%.3f)' % (V, q.d.qpos[2]))
+            print('[trot] 정착 완료 → trot 시작 v=%.2f vy=%.2f w=%.2f%s (base_z=%.3f)'
+                  % (S['Vt'], S['Vyt'], S['Wt'], ' [GUI]' if CMDFILE else '', q.d.qpos[2]))
         tg = t - S['t0']                     # 3) trot
-        V_eff = V * min(1.0, tg / V_RAMP) if V_RAMP > 1e-6 else V   # 시작 속도램프(첫사이클 휘청 완화)
-        S['x_ref'][9] = V_eff                # MPC 속도참조도 램프(매틱 갱신 → 다음 재계획 반영)
-        q.cmd_v[0] = V_eff                   # 시각화 명령화살표/텍스트용
+        # ── GUI 명령 폴링(CMDFILE, ~20Hz): v=전진 vy=측방 w=선회 ──
+        if CMDFILE and (S['cmd_t'] < 0 or t - S['cmd_t'] > 0.05):
+            S['cmd_t'] = t
+            try:
+                import json as _json
+                with open(CMDFILE) as _f: _c = _json.load(_f)
+                S['Vt'] = float(_c.get('v', S['Vt'])); S['Vyt'] = float(_c.get('vy', S['Vyt'])); S['Wt'] = float(_c.get('w', S['Wt']))
+            except Exception: pass
+        # ── 명령 가속도제한 스무딩(시작램프 + GUI 급조작 완화) ──
+        dts = q.m.opt.timestep
+        S['Vs']  += float(np.clip(S['Vt']  - S['Vs'],  -ACC * dts, ACC * dts))
+        S['Vys'] += float(np.clip(S['Vyt'] - S['Vys'], -ACC * dts, ACC * dts))
+        S['Ws']  += float(np.clip(S['Wt']  - S['Ws'],  -2.0 * dts, 2.0 * dts))
+        V_eff, Vy_eff, W_eff = S['Vs'], S['Vys'], S['Ws']
+        # 선회: yaw각 참조 적분 + 명령(body)→world 회전 (SRBD 상태는 world frame)
+        S['yaw_ref'] += W_eff * dts
+        _qq = q.d.qpos[3:7]                                                     # quat [w,x,y,z]
+        yaw_m = float(np.arctan2(2 * (_qq[0]*_qq[3] + _qq[1]*_qq[2]), 1 - 2 * (_qq[2]**2 + _qq[3]**2)))
+        cy, sy = np.cos(yaw_m), np.sin(yaw_m)
+        vx_w = V_eff * cy - Vy_eff * sy; vy_w = V_eff * sy + Vy_eff * cy        # body→world 속도
+        S['x_ref'][2] = S['yaw_ref']; S['x_ref'][8] = W_eff                     # yaw각·yaw rate 참조
+        S['x_ref'][9] = vx_w; S['x_ref'][10] = vy_w                            # world vx,vy
+        q.cmd_v[0] = V_eff; q.cmd_v[1] = Vy_eff; q.cmd_v[5] = W_eff             # 시각화(body명령)
         # ★ Di Carlo 식: gait 스케줄=primary, detect_contact=조기/지연 착지 보정.
         #   스케줄 stance → 힘제어. 스케줄 swing 후반(>0.7)+접촉감지 → 조기착지로 stance 승격.
         #   그 외 swing → 들어올림. (USE_DETECT=False 면 순수 스케줄, A/B 비교용)
@@ -768,13 +795,16 @@ def mode_trot():
         # 발 배치 = hip 기준 default + Raibert(전진 0.5·T_st·V + 피드백 KCAP·(v−v_des))
         Jc = np.zeros((3, q.nv)); mujoco.mj_jacSubtreeCom(q.m, q.d, Jc, 0)
         vcom = Jc @ q.d.qvel
-        v_des = np.array([V_eff, 0.0])       # Raibert 발배치도 램프된 속도 사용
-        rai = np.clip(0.5 * T_ST * v_des + KCAP * (vcom[:2] - v_des), -0.12, 0.12)
+        v_des = np.array([vx_w, vy_w])       # Raibert 발배치 = world 속도(전진+측방, 선회 회전반영)
+        rai = np.clip(0.5 * T_ST * v_des + KCAP * (vcom[:2] - v_des), -0.14, 0.14)
         q.foot_targets = [None, None, None, None]
         dt = q.m.opt.timestep; swing = {}
+        Rw = np.array([[cy, -sy], [sy, cy]])                 # body→world(현재 yaw)
         for i in sw:                                        # swing 발끝 작업공간 목표(p,v)
             hip_xy = q.d.xpos[q.hip_bid[i]][:2]
-            pe_xy = hip_xy + S['hip_off'][i] + rai          # hip기준 전방 Raibert
+            r_xy = hip_xy - q.d.qpos[:2]                     # 몸중심→hip
+            tw = W_eff * T_ST * np.array([-r_xy[1], r_xy[0]])  # 선회 접선 발배치(yaw)
+            pe_xy = hip_xy + Rw @ S['hip_off'][i] + rai + tw  # nominal도 몸따라 회전 + Raibert + 선회
             s_ = gait(i, tg)[1]
             p_end = np.array([pe_xy[0], pe_xy[1], S['gz'][i]])
             q.foot_targets[i] = p_end                       # 착지 목표 시각화
