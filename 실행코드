@@ -58,7 +58,8 @@ cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
 #   헤드리스 정량:  HEADLESS=1 STEPS=1500 PRINT_EVERY=100 ...  (tilt·falls 출력)
 #   정지/기립:  --mode stance(WBIC) / stand(중력보상PD) / mpc(MPC+WBIC) / view
-#   env:  TROT_V(속도)  TROT_RAMP(시작 속도램프[s], 기본0.5)  TROT_T(주기)  TROT_KCAP(capture게인)  STIFF(접촉강성, 기본0.005=단단; 발 침투 -37→-0.8mm. 0=끄기)
+#   env:  TROT_V(속도)  TROT_RAMP(시작 속도램프[s], 기본0.5)  TROT_T(주기)  TROT_KCAP(capture게인)
+#   ★물리환경 = 구조3(02leg9_fulldynamics)와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단; 발침투 -37mm→-2mm)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
 
 
 ╔══════════════════════════════════════════════════════════════════╗

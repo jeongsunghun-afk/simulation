@@ -103,16 +103,16 @@ class QuadSim:
                 gid = N(mujoco.mjtObj.mjOBJ_GEOM, cfg['foot_geom'].format(L=L))
                 fb = self.m.geom_bodyid[gid]; self.foot_r[i] = float(self.m.geom_size[gid][0])
             self.foot_bid[i] = fb; self.foot_gid[i] = gid
-        # ★접촉 강성(구조3와 동일 STIFF): 기본 soft(solref 0.02s)이라 발이 땅에 파고듦
-        #   (특히 뒷발=articulated 4DoF라 더 깊이). 발 sphere+floor solref 시정수↓ → 단단한 접촉. STIFF=0=끄기.
-        _stiff = float(os.environ.get('STIFF', '0.005'))
+        # ★물리환경을 구조3(02leg9_fulldynamics_mujoco.py line54-58)과 동일하게 ──
+        #   timestep(1kHz)·CONE(마찰콘)·STIFF(접촉강성 전 geom solref)·FRIC(마찰). 발 침투(soft 접촉) 해결 포함.
+        self.m.opt.timestep = float(os.environ.get('TIMESTEP', '0.001'))    # 구조3 dt_simu=1kHz
+        if os.environ.get('CONE'):
+            self.m.opt.cone = int(os.environ['CONE'])                       # 0=pyramidal 1=elliptic
+        _stiff = float(os.environ.get('STIFF', '0.005'))                    # 기본 단단(발 침투 방지). 0=끄기
         if _stiff > 0:
-            _tc = max(_stiff, 2.0 * self.m.opt.timestep)       # 안정조건 ≥2*dt
-            _fl = N(mujoco.mjtObj.mjOBJ_GEOM, 'floor')
-            _gids = [self.foot_gid[i] for i in range(4)] + ([_fl] if _fl >= 0 else [])
-            for g in _gids:
-                self.m.geom_solref[g] = [_tc, 1.0]
-                self.m.geom_solimp[g] = [0.95, 0.99, 0.001, 0.5, 2.0]
+            self.m.geom_solref[:, 0] = _stiff; self.m.geom_solref[:, 1] = 1.0   # 전 geom(구조3 동일)
+        if os.environ.get('FRIC'):
+            self.m.geom_friction[:, 0] = float(os.environ['FRIC'])
         self.q_home = None
         self.com_ref = None
         self.last_lam = None
