@@ -337,6 +337,8 @@ mpc.velocity_base = v
 _vsmooth = v.copy()   # ★속도명령 가속도제한(급조작/방향전환 완화). 측방·선회=약축이라 전후보다 더 부드럽게(per-axis)
 _ACC = np.array([float(_os.environ.get("ACC_X","0.4")), float(_os.environ.get("ACC_Y","0.3")), 1.0, 1.0, 1.0, float(_os.environ.get("ACC_W","0.5"))])
 _SLIP=bool(_os.environ.get("SLIP")); _slipacc=[0.0]*4; _netx=[0.0]*4; _prevf=[None]*4   # 발 슬립진단(접촉중 수평이동)
+_STATE_PUB = _os.environ.get("STATE_PUB")   # 상태 발행 채널(→GUI IMU·actuator 패널). Raion/RaiSim 스타일 모니터링
+_JN = ["FL_hip","FL_thigh","FL_calf","FR_hip","FR_thigh","FR_calf","HL_hip","HL_thigh","HL_calf","HL_foot","HR_hip","HR_thigh","HR_calf","HR_foot"]
 _itms=[]   # mpc.iterate 시간(ms) — 실시간성 측정
 _lc = LowCmd(nu); _KP = np.full(nu, float(_os.environ.get("KP","0"))); _KD = np.full(nu, float(_os.environ.get("KD","0")))  # 저수준 LowCmd(기본 kp=kd=0=순수토크)
 _CMDFILE = _os.environ.get("CMDFILE")   # GUI(teleop_gui.py)가 발행하는 JSON 명령 채널 → SportClient.Move (별도 프로세스, env무관)
@@ -526,4 +528,20 @@ while True:
                 _slipacc[_fi] += float(np.linalg.norm(_p - _prevf[_fi]))
                 _netx[_fi] += float(_p[0] - _prevf[_fi][0])     # 부호있는 전후 변위(앞+/뒤-)
             _prevf[_fi] = _p
+    if _STATE_PUB and step % 3 == 0:        # 상태 발행(~30Hz) → GUI IMU·actuator 패널
+        try:
+            import json as _j2, os as _o9
+            _ls2 = device.read_low_state()
+            _qw2,_qx2,_qy2,_qz2 = _ls2.quat[3],_ls2.quat[0],_ls2.quat[1],_ls2.quat[2]
+            _roll = _npd.degrees(_npd.arctan2(2*(_qw2*_qx2+_qy2*_qz2), 1-2*(_qx2*_qx2+_qy2*_qy2)))
+            _pitch = _npd.degrees(_npd.arcsin(_npd.clip(2*(_qw2*_qy2-_qz2*_qx2),-1,1)))
+            _yaw2 = _npd.degrees(_npd.arctan2(2*(_qw2*_qz2+_qx2*_qy2), 1-2*(_qy2*_qy2+_qz2*_qz2)))
+            _st = {'mode': _mode, 'base_z': float(device.d.qpos[2]), 't': step*dt_mpc,
+                   'rpy': [float(_roll),float(_pitch),float(_yaw2)], 'gyro': [float(x) for x in _ls2.gyro],
+                   'names': _JN, 'q': [float(x) for x in _ls2.q], 'dq': [float(x) for x in _ls2.dq], 'tau': [float(x) for x in _ls2.tau_est],
+                   'cmd': [float(v[0]),float(v[1]),float(v[5])]}
+            _tmp2 = _STATE_PUB + '.tmp'
+            with open(_tmp2,'w') as _f2: _j2.dump(_st, _f2)
+            _o9.replace(_tmp2, _STATE_PUB)
+        except Exception: pass
     _pk += 1; step += 1

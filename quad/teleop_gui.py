@@ -137,6 +137,70 @@ def _key(sender, app_data):                            # 키보드 백업: 화�
     _status()
 
 
+# ── 모니터링 패널 (plugin 구조: Raion/RaiSim 스타일 IMU·Actuator) ──
+STATE_PATH = os.environ.get('QUAD_STATE', '/tmp/quad_state.json')
+
+
+def read_state():
+    try:
+        with open(STATE_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+class Panel:                                        # plugin 베이스(build=위젯생성 / update=상태반영)
+    title = 'Panel'
+    def build(self): pass
+    def update(self, st): pass
+
+
+class StatusPanel(Panel):
+    title = 'Robot'
+    def build(self):
+        with dpg.collapsing_header(label='Robot State', default_open=True):
+            dpg.add_text('-', tag='rs_text')
+    def update(self, st):
+        dpg.set_value('rs_text', 'mode = %s     base_z = %.3f m     t = %.1f s'
+                      % (st.get('mode', '?'), st.get('base_z', 0.0), st.get('t', 0.0)))
+
+
+class IMUPanel(Panel):
+    title = 'IMU'
+    def build(self):
+        with dpg.collapsing_header(label='IMU', default_open=True):
+            dpg.add_text('Orientation  Roll / Pitch / Yaw [deg]', color=(150, 160, 190))
+            dpg.add_text('-', tag='imu_rpy')
+            dpg.add_text('Angular velocity  Gyro [rad/s]', color=(150, 160, 190))
+            dpg.add_text('-', tag='imu_gyro')
+    def update(self, st):
+        r = st.get('rpy', [0, 0, 0]); g = st.get('gyro', [0, 0, 0])
+        dpg.set_value('imu_rpy', 'R %+7.1f    P %+7.1f    Y %+7.1f' % (r[0], r[1], r[2]))
+        dpg.set_value('imu_gyro', '%+6.2f    %+6.2f    %+6.2f' % (g[0], g[1], g[2]))
+
+
+class ActuatorPanel(Panel):
+    title = 'Actuators'
+    def build(self):
+        with dpg.collapsing_header(label='Actuators  (14 DOF)', default_open=True):
+            with dpg.table(header_row=True, row_background=True, borders_innerH=True,
+                           borders_outerV=True, scrollY=True, height=270):
+                for c in ('Joint', 'q [rad]', 'dq [rad/s]', 'tau [Nm]'):
+                    dpg.add_table_column(label=c)
+                for i in range(14):
+                    with dpg.table_row():
+                        for col in ('n', 'q', 'd', 't'):
+                            dpg.add_text('-', tag='act_%s%d' % (col, i))
+    def update(self, st):
+        n = st.get('names', []); q = st.get('q', []); d = st.get('dq', []); t = st.get('tau', [])
+        for i in range(min(14, len(n))):
+            dpg.set_value('act_n%d' % i, n[i]); dpg.set_value('act_q%d' % i, '%+.2f' % q[i])
+            dpg.set_value('act_d%d' % i, '%+.2f' % d[i]); dpg.set_value('act_t%d' % i, '%+.1f' % t[i])
+
+
+PANELS = [StatusPanel(), IMUPanel(), ActuatorPanel()]   # ★plugin 등록: PANELS.append(MyPanel())로 패널 추가
+
+
 dpg.create_context()
 
 # 한글 폰트(없으면 ??로 표기)
@@ -189,6 +253,11 @@ with dpg.window(tag='main'):
     dpg.add_text('키: ↑↓=전후  ←→=측방  ,/.=선회  X/Space=STOP', color=(140, 140, 155))
     dpg.add_text('', tag='status')
     dpg.add_text('채널: ' + CMD_PATH, color=(115, 118, 130))
+    dpg.add_separator()
+    dpg.add_text('모니터 (plugin: ' + ', '.join(p.title for p in PANELS) + ')', color=(170, 175, 195))
+    for _p in PANELS:                                  # plugin 패널 빌드
+        _p.build()
+    dpg.add_text('상태채널: ' + STATE_PATH, color=(115, 118, 130))
 
 with dpg.handler_registry():
     dpg.add_key_press_handler(callback=_key)
@@ -197,12 +266,25 @@ with dpg.handler_registry():
     dpg.add_mouse_release_handler(callback=lambda s, a: (left.release(), right.release()))
 
 _status()
-dpg.create_viewport(title='02_Leg Teleop (RBQ style)', width=500, height=510)
+dpg.create_viewport(title='02_Leg Teleop (RBQ style) + Monitor', width=540, height=820)
 dpg.setup_dearpygui()
 if _kf is not None:
     dpg.bind_font(_kf)
 dpg.bind_theme(_dark)
 dpg.show_viewport()
 dpg.set_primary_window('main', True)
-dpg.start_dearpygui()
+
+# ── 렌더 루프: ~20Hz 상태채널 폴링 → 패널 갱신 ──
+_fc = 0
+while dpg.is_dearpygui_running():
+    _fc += 1
+    if _fc % 3 == 0:
+        _st = read_state()
+        if _st:
+            for _p in PANELS:
+                try:
+                    _p.update(_st)
+                except Exception:
+                    pass
+    dpg.render_dearpygui_frame()
 dpg.destroy_context()
