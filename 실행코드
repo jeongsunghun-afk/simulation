@@ -98,6 +98,14 @@ cd /home/jsh/문서/jsh/simulation/quad && W_FORCE=1 KP_POST=30 W_POST=2 KP_CONT
 #  근본: raw-TSID < KinodynamicsID(centroidal 정식화 격차). 일관 발배치엔 KinodynamicsID 재현 또는 WBC 필요.
 
 [구조3 — simple-mpc 레퍼런스 (점접촉 addPointFoot, force_size=3). pixi env(/home/jsh/simple-mpc, py3.14 격리)]
+# ╔═══════════════ [구조3 = 02_Leg 본선·완성 현황 2026-06] ═══════════════╗
+#  ✅ FullDynamics MPC+RTI(TSID없이): limp소멸·thread-robust(NTH1~8)·전방향(전진94%·측방·선회·대각)·속도 0.1~0.4(빠른cadence 0.5)
+#  ✅ Unitree SDK 계층: SportClient.Move(고수준) → MPC → RobotInterface LowCmd/LowState(저수준). 실로봇=MujocoRobot만 RealRobot 교체
+#  ✅ 비동기(MPC워커 subprocess+공유메모리) · 상태추정(leg odometry closed-loop, ground-truth 안씀)
+#  ✅ RBQ스타일 GUI: dual조이스틱·모션(Ready/Ground/Walk)·높이슬라이더·모니터패널(IMU/Actuator)·plugin · 속도 가속도제한 스무딩
+#  ⬜ 남음: 실로봇 배포(RBQ 저수준 API 매핑) · (선택)속도상한↑·보행중 높이조절
+#  ★대표 실행(GUI+뷰어): 아래 [배포 인프라] 블록의 터미널1(GUI)+터미널2(뷰어) 참조
+# ╚════════════════════════════════════════════════════════════════════╝
 # 빌드(1회): cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi install && ~/.pixi/bin/pixi run build && ~/.pixi/bin/pixi run install
 cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi run python examples/go2_kinodynamics_patched.py          # pybullet(강체접촉 0.089m/s)
 cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 STEPS=1000 VIEW=1 ~/.pixi/bin/pixi run python examples/go2_kinodynamics_mujoco.py  # MuJoCo(접촉맞춤 0.097m/s)
