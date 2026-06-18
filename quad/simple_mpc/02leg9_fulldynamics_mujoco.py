@@ -328,6 +328,7 @@ _vx0 = float(_os.environ.get("VX", "0.2"))
 device.sport.Move(_vx0, float(_os.environ.get("VY", "0")), float(_os.environ.get("WZ", "0")))   # 초기 고수준 속도명령
 v = device.sport.velocity_base()
 mpc.velocity_base = v
+_vsmooth = v.copy(); _ACC = float(_os.environ.get("ACC_LIM","0.8"))   # ★속도명령 가속도제한(급조작 완화). 낮을수록 부드러움
 _SLIP=bool(_os.environ.get("SLIP")); _slipacc=[0.0]*4; _netx=[0.0]*4; _prevf=[None]*4   # 발 슬립진단(접촉중 수평이동)
 _itms=[]   # mpc.iterate 시간(ms) — 실시간성 측정
 _lc = LowCmd(nu); _KP = np.full(nu, float(_os.environ.get("KP","0"))); _KD = np.full(nu, float(_os.environ.get("KD","0")))  # 저수준 LowCmd(기본 kp=kd=0=순수토크)
@@ -458,8 +459,9 @@ while True:
         for _j in range(N_simu): device.write_low_cmd(_lc)
         if step % 30 == 0: print("[MODE] %s base_z=%.3f" % (_mode, device.d.qpos[2]), flush=True)
         step += 1; continue
-    v = device.sport.velocity_base()        # 고수준 SportClient → cmd_vel
-    mpc.velocity_base = v
+    _vt = device.sport.velocity_base()      # 목표 cmd_vel
+    _vsmooth = _vsmooth + np.clip(_vt - _vsmooth, -_ACC*dt_mpc, _ACC*dt_mpc)   # ★가속도제한 ramp(급조작/놓음 완화)
+    v = _vsmooth.copy(); mpc.velocity_base = v
     if step % 30 == 0:
         _z = device.d.qpos[2]; _x = device.d.qpos[0]; _y = device.d.qpos[1]
         _t = _npd.degrees(_npd.arccos(_npd.clip(1 - 2 * (device.d.qpos[4]**2 + device.d.qpos[5]**2), -1, 1)))

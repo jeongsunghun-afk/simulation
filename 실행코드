@@ -114,6 +114,7 @@ cd /home/jsh/simple-mpc && VIEW=1 STEPS=300 VX=0.2 ~/.pixi/bin/pixi run python e
 #   터미널1(GUI): /home/jsh/miniforge3/envs/proxddp/bin/python /home/jsh/문서/jsh/simulation/quad/teleop_gui.py
 #   터미널2(뷰어): cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
 #   ★StandUp/StandDown(mode): Ready=stand_up(서기 qstand), Ground=stand_down(눕기, IK base 0.30), Walk=move(MPC보행). 자세전환=PD보간+중력보상(POSE_KP120/RATE1.5/STANDDOWN_Z). 검증: 서기0.50·눕기0.32·보행OK.
+#   ★조이스틱 급조작 완화: 속도명령 가속도제한 ramp(ACC_LIM, 기본0.8 m/s²). 확 놓거나 급움직여도 ~0.5s에 걸쳐 부드럽게. 더 부드럽게=ACC_LIM 낮춤.
 #   ★RBQ 매핑: RBQ 저수준 setPosRef/setTorqueRef/setGainKp/Kd = 우리 LowCmd → 실RBQ배포=RobotInterface를 RBQ SDK로 구현. RBQ GUI는 squashfs-root/usr/qml/(참고용, *.AppImage·squashfs-root는 gitignore).
 #
 # ╔══════════════ [배포 인프라: SDK 계층 · 상태추정 · 비동기 · GUI] ══════════════╗
