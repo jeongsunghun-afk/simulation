@@ -114,7 +114,6 @@ cd /home/jsh/simple-mpc && VIEW=1 STEPS=300 VX=0.2 ~/.pixi/bin/pixi run python e
 #   터미널1(GUI): /home/jsh/miniforge3/envs/proxddp/bin/python /home/jsh/문서/jsh/simulation/quad/teleop_gui.py
 #   터미널2(뷰어): cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
 #   ★StandUp/StandDown(mode): Ready=stand_up(서기 qstand), Ground=stand_down(눕기, IK base 0.30), Walk=move(MPC보행). 자세전환=PD보간+중력보상(POSE_KP120/RATE1.5/STANDDOWN_Z). 검증: 서기0.50·눕기0.32·보행OK.
-#   ★조이스틱 급조작 완화: 속도명령 가속도제한 ramp(ACC_LIM, 기본0.8 m/s²). 확 놓거나 급움직여도 ~0.5s에 걸쳐 부드럽게. 더 부드럽게=ACC_LIM 낮춤.
 #   ★RBQ 매핑: RBQ 저수준 setPosRef/setTorqueRef/setGainKp/Kd = 우리 LowCmd → 실RBQ배포=RobotInterface를 RBQ SDK로 구현. RBQ GUI는 squashfs-root/usr/qml/(참고용, *.AppImage·squashfs-root는 gitignore).
 #
 # ╔══════════════ [배포 인프라: SDK 계층 · 상태추정 · 비동기 · GUI] ══════════════╗
@@ -131,8 +130,7 @@ cd /home/jsh/simple-mpc && VIEW=1 STEPS=300 VX=0.2 ~/.pixi/bin/pixi run python e
 #   ★★비동기 검증(MPC_DECIM으로 stale plan 모사): 순수토크는 50Hz도 전복. ★해결구성 = force_cone OFF + T=40 + 50Hz(DECIM=2) + 관절PD KP=100 KD=2 → 전방향 안정(전진2.6°·측방7.5°·선회1.4°·대각8°), solve15.6ms<20ms 실시간OK.
 #     발견: ①force_cone OFF가 비동기 안정성↑(50Hz 전진 tilt7→1.8) ②측방=약축이라 KP=100 필요(전진은60) ③25Hz는 PD로도 전복(50Hz가 하한) ④T30은 너무짧아 불안정, T40~50 적정.
 #     실배포 권장: 50Hz MPC + 1kHz 관절PD(KP100). 100Hz면 순수토크로도 되나 solve<10ms 필요(T·스레드 추가최적). 비동기 실제 스레드분리·상태추정은 다음.
-cd /home/jsh/simple-mpc && VIEW=1 NTH=8 VX=0.2 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
-#   ★★핵심수정 2가지: ①뒷발목(articulated) point-foot서 floppy→ANKLE_W=50 posture핀고정. ②★접촉불일치: 기본 MJCF는 발=MESH라 발당 GRF 2개(다점)인데 OCP는 단일점접촉(addPointFoot).
+pan  ★★핵심수정 2가지: ①뒷발목(articulated) point-foot서 floppy→ANKLE_W=50 posture핀고정. ②★접촉불일치: 기본 MJCF는 발=MESH라 발당 GRF 2개(다점)인데 OCP는 단일점접촉(addPointFoot).
 #     → quad_real_pt.mjcf(발=단일구, 구바닥=OCP접촉점 정렬, 비발링크 충돌끔) 생성·기본. 이게 thread-카오스(안정마진0)의 진짜원인이었고 해결→NTH1~8 전부 robust + WBVX=400 94%추종 동시달성.
 #   + go2가중치일치(w_basepos=0·발프레임추종w_frame=1000) + Peak토크(×3) + STIFF=0.005 접촉.
 #   env: MJCF(기본 quad_real_pt.mjcf), STIFF=0.005, ANKLE_W=50, NTH(기본8;1~8 robust,16은 oversubscription 전복), CROUCHZ, STAND=1, VX/VY/WZ(초기cmd), STEPS/VIEW.
