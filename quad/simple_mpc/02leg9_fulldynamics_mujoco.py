@@ -115,8 +115,9 @@ class MujocoRobot:
             if self._vc % _every == 0:
                 self._draw_viz()
                 self.viewer.sync()
-                if not _o3.environ.get("NOSLEEP"):
-                    import time as _t; _t.sleep(self.m.opt.timestep*_every)
+                _rate=float(_o3.environ.get("RATE","1"))        # ★재생 배속(2=2배빠르게, 0=최대속도/sleep없음)
+                if _rate>0 and not _o3.environ.get("NOSLEEP"):
+                    import time as _t; _t.sleep(self.m.opt.timestep*_every/_rate)
     def _draw_viz(self):
         import numpy as _np, os as _o4
         d=self.d; m=self.m
