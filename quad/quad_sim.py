@@ -844,6 +844,7 @@ def mode_trot():
         q.foot_targets = [None, None, None, None]
         dt = q.m.opt.timestep; swing = {}
         Rw = np.array([[cy, -sy], [sy, cy]])                 # body→world(현재 yaw)
+        _sh = STEP_H * (0.2 + 0.8 * min(1.0, tg / WARMUP)) if WARMUP > 1e-6 else STEP_H  # 시작 step↑ ramp(첫스윙 작게→full)
         for i in sw:                                        # swing 발끝 작업공간 목표(p,v)
             hip_xy = q.d.xpos[q.hip_bid[i]][:2]
             r_xy = hip_xy - q.d.qpos[:2]                     # 몸중심→hip
@@ -853,7 +854,7 @@ def mode_trot():
             p_end = np.array([pe_xy[0], pe_xy[1], S['gz'][i]])
             q.foot_targets[i] = p_end                       # 착지 목표 시각화
             p_tgt = swing_foot_pos(s_, S['liftoff'][i], p_end,
-                                   np.array([vcom[0], vcom[1], 0]), step_height=STEP_H, tau_land=1.0)
+                                   np.array([vcom[0], vcom[1], 0]), step_height=_sh, tau_land=1.0)
             pv = S['ptgt_prev'][i]                          # 목표속도(차분, 노이즈 억제 위해 clip)
             v_tgt = np.clip((p_tgt - pv) / dt, -1.0, 1.0) if pv is not None else np.zeros(3)
             S['ptgt_prev'][i] = p_tgt.copy(); swing[i] = (p_tgt, v_tgt)
