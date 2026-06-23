@@ -781,7 +781,7 @@ def mode_trot():
          'settle_until': SETTLE,
          'Vt': V, 'Vyt': VY, 'Wt': WZ,                      # 목표명령(GUI가 갱신)
          'Vs': 0.0, 'Vys': 0.0, 'Ws': 0.0, 'cmd_t': -1.0,   # 스무딩 적용명령(0서 시작)
-         'yaw_ref': 0.0}                                     # 선회 yaw각 참조(적분)
+         'yaw_ref': 0.0, 'last_t': -1.0}                     # 선회 yaw각 참조(적분) · 직전 시각(reset 감지용)
 
     def gait(i, tg):
         ph = (tg / T_TROT + OFFSET[i]) % 1.0
@@ -796,6 +796,16 @@ def mode_trot():
 
     def ctrl():
         t = q.d.time
+        # ★ 뷰어 reset(Backspace)/낙상 감지 — ★mode 무관 최우선(stand 모드·armed 전에도 잡힘). 시간역행 OR 큰 위치점프.
+        if t < S['last_t'] - 1e-6 or abs(q.d.qpos[0] - S['bx']) > 0.5:
+            q.crouch_home()                                  # 깨끗한 crouch 복원
+            S['armed'] = False; S['lam_des'] = None; S['ptgt_prev'] = [None, None, None, None]
+            S['t0'] = 0.0; S['settle_until'] = q.d.time + SETTLE; S['yaw_ref'] = 0.0
+            S['Vs'] = S['Vys'] = S['Ws'] = 0.0
+            S['bx'] = float(q.d.qpos[0]); S['last_t'] = q.d.time
+            print('[trot] reset 감지 → crouch 복원 후 재정착(%s 모드)' % q.cmd_mode, flush=True)
+            return
+        S['last_t'] = t; S['bx'] = float(q.d.qpos[0])        # 매틱 갱신(reset 감지 기준)
         # ── GUI 명령 폴링(CMDFILE, ~20Hz): v/vy/w + mode ──
         if CMDFILE and (S['cmd_t'] < 0 or t - S['cmd_t'] > 0.05):
             S['cmd_t'] = t
@@ -808,18 +818,6 @@ def mode_trot():
         if q.cmd_mode != 'move':
             q.wbic_stance(); S['armed'] = False; q.cmd_v[:] = 0.0
             return
-        # ★ 리셋 감지(뷰어 Backspace/자동 낙상): 시간 역행 OR base 위치 급변(>0.3m) →
-        #   상태기계 재초기화 + 재정착 타이머. 안 하면 낡은 world-frame nominal/liftoff 로 멈춤.
-        #   settle_until 은 d.time 절대값 — 시간 0복귀 안 하는 passive 뷰어 케이스도 커버.
-        if S['armed'] and (t < S['t0'] - 1e-6 or abs(q.d.qpos[0] - S['bx']) > 0.3):
-            print('[trot] 리셋 감지(t=%.2f bx=%.2f→%.2f) → crouch 복원 후 재정착'
-                  % (t, S['bx'], q.d.qpos[0]))
-            q.crouch_home()                  # ★ 깨끗한 crouch-at-origin 복원(time→0)
-            S['armed'] = False; S['lam_des'] = None
-            S['ptgt_prev'] = [None, None, None, None]
-            S['t0'] = 0.0; S['settle_until'] = SETTLE   # crouch_home 후 time=0
-            S['bx'] = float(q.d.qpos[0]); return
-        S['bx'] = float(q.d.qpos[0])
         if t < S['settle_until']:            # 1) WBIC stance 정착 (초기/리셋)
             q.wbic_stance(); return
         if not S['armed']:                   # 2) 정착/리셋 자세를 trot 기준으로 캡처
