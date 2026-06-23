@@ -812,7 +812,7 @@ def mode_trot():
             q.crouch_home()                                  # 깨끗한 crouch 복원
             S['armed'] = False; S['lam_des'] = None; S['ptgt_prev'] = [None, None, None, None]
             S['t0'] = 0.0; S['settle_until'] = q.d.time + SETTLE; S['yaw_ref'] = 0.0
-            S['Vs'] = S['Vys'] = S['Ws'] = 0.0
+            S['Vs'] = S['Vys'] = S['Ws'] = 0.0; S['cmd_t'] = -1.0   # ★cmd_t 리셋: 시간역행 후 CMDFILE 폴링 재개(안하면 GUI 먹통)
             S['bx'] = float(q.d.qpos[0]); S['last_t'] = q.d.time
             print('[trot] reset 감지 → crouch 복원 후 재정착(%s 모드)' % q.cmd_mode, flush=True)
             return
