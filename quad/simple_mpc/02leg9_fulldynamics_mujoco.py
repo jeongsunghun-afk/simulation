@@ -464,6 +464,9 @@ while True:
         device.sport.Move(0.0, 0.0, 0.0)    # 명령 0(reset 후 정지서 시작, GUI가 다시 줌)
         print("[MJ] reset 감지 → qstand 복원", flush=True)
     _last_t = device.d.time
+    if _os.environ.get("DIST_F"):           # 외란 비교 테스트: base 측방 충격(DIST_S틱부터 0.15s)
+        _ds = int(_os.environ.get("DIST_S", "150"))
+        device.d.xfrc_applied[1, 1] = float(_os.environ["DIST_F"]) if _ds <= step < _ds + 15 else 0.0
     if _CMDFILE and step % 5 == 0:          # GUI JSON 채널 소비(20Hz) → 고수준 SportClient.Move + mode
         try:
             import json as _json
