@@ -58,8 +58,8 @@ cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin
 cd /home/jsh/문서/jsh/simulation/quad && TROT_V=0.5 /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
 #   측방:  TROT_V=0 TROT_VY=0.2    선회:  TROT_WZ=0.4    대각/원호:  TROT_V=0.3 TROT_VY=0.2 (또는 TROT_WZ=0.3)
 #   ★GUI + 뷰어 동시 (구조3와 동일 teleop_gui: 조이스틱 v/vy/w + 모션버튼 + 모니터패널):
-#     터미널1:  /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
-#     터미널2:  CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
+#     터미널1:  cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
+#     터미널2:  cd /home/jsh/문서/jsh/simulation/quad && CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
 #     · 조이스틱→v/vy/w 보행 · Walk=보행/STOP·Ready(서기)·Ground(눕기)=제자리 WBIC stance · IMU/Actuator 패널=STATE_PUB 발행(~30Hz)
 #   헤드리스 정량:  HEADLESS=1 STEPS=3000 PRINT_EVERY=500 ...  (z·x·y·yaw·tilt·발침투·falls 출력; 1kHz라 STEPS=시간/0.001)
 #   정지/기립:  --mode stance(WBIC) / stand(중력보상PD) / mpc(MPC+WBIC) / view
@@ -67,6 +67,11 @@ cd /home/jsh/문서/jsh/simulation/quad && TROT_V=0.5 /home/jsh/miniforge3/envs/
 #   ★REAR_ANKLE(뒷발목 각도[rad], 기본0): 4-DoF 여유 해소 — 같은 발 궤적에 뒷다리 자세만 변경. ★음수=웅크림(발목접힘·발끝이 calf쪽으로, -0.6서 발끝-무릎 0.39→0.33). -0.5~-0.9 보행안정. 양수=반대(폄).
 #   ★물리환경 = 구조3(02leg9_fulldynamics)와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단; 발침투 -37mm→-2mm)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
 
+#터미널1(GUI)
+cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
+#터미널2(MPC+WBIC)
+cd /home/jsh/문서/jsh/simulation/quad && CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json \
+  /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
 
 ╔══════════════════════════════════════════════════════════════════╗
 ║  레퍼런스 / 기타                                                    ║

@@ -526,8 +526,8 @@ class QuadSim:
         """구조3와 동일 스키마로 상태 발행(원자적) → teleop_gui 모니터 패널(IMU/Actuator)."""
         d, m = self.d, self.m
         if not hasattr(self, '_jnames'):                  # q/dq 순서와 일치(MuJoCo 관절순)
-            self._jnames = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j)
-                            for j in range(m.njnt) if m.jnt_type[j] != mujoco.mjtJoint.mjFREE]
+            self._jnames = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j).replace('_joint', '')
+                            for j in range(m.njnt) if m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
         Rm = np.zeros(9); mujoco.mju_quat2Mat(Rm, d.qpos[3:7]); Rm = Rm.reshape(3, 3)
         rpy = [math.degrees(math.atan2(Rm[2, 1], Rm[2, 2])),
                math.degrees(math.asin(max(-1, min(1, -Rm[2, 0])))),
