@@ -573,16 +573,19 @@ class QuadSim:
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
             v.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0
             v.opt.flags[mujoco.mjtVisFlag.mjVIS_PERTOBJ] = 1     # 외란 박스 ON
-            print('viewer open — 창 닫으면 종료. (더블클릭+Ctrl+우드래그=외란)')
+            _re = int(os.environ.get('RENDER_EVERY', '10'))     # 렌더당 물리스텝(1kHz라 매스텝 렌더는 과함→10=100Hz)
+            _rate = float(os.environ.get('RATE', '1.0'))        # ★재생 배속(2=2배빠르게, 0=최대속도/sleep없음)
+            print('viewer open — 창 닫으면 종료. (더블클릭+Ctrl+우드래그=외란) | RATE=%.1f배 RENDER_EVERY=%d' % (_rate, _re))
             while v.is_running():
                 t0 = time.time()
-                control_fn()
-                mujoco.mjv_applyPerturbForce(m, d, v.perturb)    # Ctrl+드래그 외란 적용
-                mujoco.mj_step(m, d)
-                if reset_on_fall and d.qpos[2] < 0.2:
-                    mujoco.mj_resetData(m, d); reset_fn()
+                for _ in range(_re):                            # 물리 _re스텝 후 1회 렌더(빠르고 부드럽게)
+                    control_fn()
+                    mujoco.mjv_applyPerturbForce(m, d, v.perturb)
+                    mujoco.mj_step(m, d)
+                    if reset_on_fall and d.qpos[2] < 0.2:
+                        mujoco.mj_resetData(m, d); reset_fn()
                 _pc += 1
-                if _sp and _pc % 30 == 0: self.publish_state(_sp)   # GUI 모니터 패널(~30Hz)
+                if _sp and _pc % 3 == 0: self.publish_state(_sp)    # GUI 모니터 패널(~30Hz)
                 self.draw_overlay(v)
                 # 좌상단: 시뮬 시간 / 우상단: 외란 힘 N
                 fext = max((float(np.linalg.norm(d.xfrc_applied[b, :3]))
@@ -596,9 +599,10 @@ class QuadSim:
                     (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
                      'cmd vx/vy/wz', '%+.2f %+.2f %+.2f' % (cv[0], cv[1], cv[5]))])
                 v.sync()
-                dt = m.opt.timestep - (time.time() - t0)
-                if dt > 0:
-                    time.sleep(dt)
+                if _rate > 0:                                   # RATE=0이면 sleep없이 최대속도
+                    dt = _re * m.opt.timestep / _rate - (time.time() - t0)
+                    if dt > 0:
+                        time.sleep(dt)
 
 
 # ══════════════════════════════════════════════════════════════
