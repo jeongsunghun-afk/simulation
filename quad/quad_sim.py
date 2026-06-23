@@ -184,7 +184,7 @@ class QuadSim:
         d.qpos[2] = base_z
         # ★뒷다리(4DoF) 발목을 REAR_ANKLE로 두고 hip/thigh/calf로 같은 발 위치 IK
         #   → 같은 발 궤적, 더 웅크린 자세(발목 꺾고 thigh 펴짐). 4-DoF 여유(redundancy) 해소.
-        _ra = float(os.environ.get('REAR_ANKLE', '0.0'))
+        _ra = float(os.environ.get('REAR_ANKLE', '-0.7'))   # 기본=최적자세(뒷발목 굽힘; 고속서 base높이는 0.52 자연높이가 최적)
         if _ra != 0.0:
             for i in range(4):
                 if self.leg_dof[i] == 4:
@@ -758,6 +758,7 @@ def mode_trot():
     ACC = float(os.environ.get('TROT_ACC', '0.6'))  # 명령 가속도제한[m/s²]: 시작램프+GUI 급조작 완화
     WARMUP = float(os.environ.get('TROT_WARMUP', '0.6'))  # 시작 제자리trot 시간[s]: 첫 사이클 리듬확립 후 이동(시작 lurch 완화)
     CMDFILE = os.environ.get('CMDFILE')             # ★GUI 연동: JSON(/tmp/quad_cmd.json) 폴링(v/vy/w)
+    if CMDFILE: q.cmd_mode = 'stand_up'             # ★GUI 모드: 시작=Ready(stand). Walk 버튼 눌러야 gait 시작 (standalone은 move=즉시보행)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off

@@ -61,21 +61,21 @@ cd /home/jsh/문서/jsh/simulation/quad && TROT_V=1.0 /home/jsh/miniforge3/envs/
 #   측방:  TROT_V=0 TROT_VY=0.2    선회:  TROT_WZ=0.4    대각/원호:  TROT_V=0.3 TROT_VY=0.2 (또는 TROT_WZ=0.3)
 #   ★GUI + 뷰어 동시 (구조3와 동일 teleop_gui: 조이스틱 v/vy/w + 모션버튼 + 모니터패널):
 #     터미널1:  cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
-#     터미널2:  cd /home/jsh/문서/jsh/simulation/quad && REAR_ANKLE=-0.7 TROT_Z=0.45 RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
-#     · 조이스틱→v/vy/w 보행 · Walk=보행/STOP·Ready(서기)·Ground(눕기)=제자리 WBIC stance · IMU/Actuator 패널=STATE_PUB 발행(~30Hz) · ★웅크림자세(REAR_ANKLE/TROT_Z)
+#     터미널2:  cd /home/jsh/문서/jsh/simulation/quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
+#     · ★시작=Ready(서기), Walk 버튼 눌러야 보행 시작 · 조이스틱→v/vy/w · STOP·Ready·Ground=제자리 stance · IMU/Actuator 패널 · ★기본=최적자세(REAR_ANKLE=-0.7·base0.52)
 #   ★뷰어 배속:  RATE=2(2배 빠르게)·RATE=4·RATE=0(최대속도/sleep없음).  RENDER_EVERY(렌더당 물리스텝, 기본10).  예: RATE=3 TROT_V=0.5 ...quad_sim.py ...
 #   헤드리스 정량:  HEADLESS=1 STEPS=3000 PRINT_EVERY=500 ...  (z·x·y·yaw·tilt·발침투·falls 출력; 1kHz라 STEPS=시간/0.001)
 #   정지/기립:  --mode stance(WBIC) / stand(중력보상PD) / mpc(MPC+WBIC) / view
 #   env:  TROT_V/VY/WZ(전진·측방·선회 속도)  TROT_ACC(명령 가속도제한, 기본0.6)  ★TROT_WARMUP(시작 제자리trot[s], 기본0.6=리듬확립후 이동, 시작 lurch완화; 0=즉시)  CMDFILE(GUI폴링)  TROT_T(주기)  TROT_KCAP
-#   ★REAR_ANKLE(뒷발목 각도[rad], 기본0): 4-DoF 여유 해소 — 같은 발 궤적에 뒷다리 자세만 변경. ★음수=웅크림(발목접힘·발끝이 calf쪽으로, -0.6서 발끝-무릎 0.39→0.33). -0.5~-0.9 보행안정. 양수=반대(폄).
+#   ★REAR_ANKLE(뒷발목 각도[rad], ★기본=-0.7 최적자세): 4-DoF 여유 해소 — 같은 발 궤적에 뒷다리 자세만(발목접힘). 0=폄. TROT_Z(base높이, 기본0.52=자연·고속최적; 0.45=웅크림 저속미관용). ★1.0m/s 최적=base 0.50~0.52(높을수록 안정·토크↓, 토크는 병목아님).
 #   ★물리환경 = 구조3(02leg9_fulldynamics)와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단; 발침투 -37mm→-2mm)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
 #   ★per-joint 토크한계(TAU_LIM, 기본 켜짐): WBIC QP에 −τ_peak≤τ≤τ_peak 부등식제약(모터 Peak hip/thigh84·calf126·foot168, jnt_actfrcrange). 사후클립 아닌 QP가 직접 존중→동역학일관·초과시 최적재분배. 보행토크 32Nm라 무영향. TAU_LIM=0=끄기.
 #     W_TAU(토크 effort 최소화 가중, 기본0): min||τ||² 항. 단 posture/λ추종이 해를 거의 결정해 redundancy 적음→실효 미미(W_TAU=1도 토크 ~1%만↓). 프레임워크만 보유.
 
 # 터미널1 (GUI)
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
-# 터미널2 (웅크림 자세 + GUI 연동 + 2배속)
-cd /home/jsh/문서/jsh/simulation/quad && REAR_ANKLE=-0.7 TROT_Z=0.45 RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
+# 터미널2 (뷰어, 기본=최적자세·시작Ready) — Walk 버튼 눌러 보행 시작
+cd /home/jsh/문서/jsh/simulation/quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
 
 ╔══════════════════════════════════════════════════════════════════╗
 ║  레퍼런스 / 기타                                                    ║

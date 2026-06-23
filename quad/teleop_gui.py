@@ -24,7 +24,7 @@ class SportClient:
 
     def __init__(self, path=CMD_PATH):
         self.path = path
-        self.cmd = {'v': 0.0, 'vy': 0.0, 'w': 0.0, 'mode': 'move',
+        self.cmd = {'v': 0.0, 'vy': 0.0, 'w': 0.0, 'mode': 'stand_up',   # 시작=Ready(서기). Walk 눌러야 보행
                     'body_h': 0.52, 'step_h': 0.15, 'euler': [0.0, 0.0, 0.0], 'gait': 0}
         self._pub()
 
