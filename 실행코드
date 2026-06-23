@@ -13,14 +13,13 @@
 ╚══════════════════════════════════════════════════════════════════╝
 
 # (1) 뷰어 단독 — 무한보행 + 키보드 teleop (↑↓전진 ←→측방 ,/.선회 X정지)
-cd /home/jsh/simple-mpc && VIEW=1 NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
+cd /home/jsh/simple-mpc && VIEW=1 RATE=0 NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
 
 # (2) ★ GUI + 뷰어 동시 (RBQ 스타일 조이스틱·모션버튼·IMU/Actuator 패널) — ★시작=Ready(서기), Walk 눌러야 보행
 #   ── 터미널 1 : GUI ──
 /home/jsh/miniforge3/envs/proxddp/bin/python /home/jsh/문서/jsh/simulation/quad/teleop_gui.py
 #   ── 터미널 2 : 뷰어 (GUI 명령 수신) ──
 cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
-cd /home/jsh/simple-mpc && VIEW=1 RATE=0 NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
 
 # (3) 헤드리스 — 유한 STEPS, 초기속도 VX/VY/WZ
 cd /home/jsh/simple-mpc && VIEW=0 STEPS=400 VX=0.4 NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
@@ -65,7 +64,8 @@ cd /home/jsh/문서/jsh/simulation/quad && TROT_V=1.0 /home/jsh/miniforge3/envs/
 #   ★GUI + 뷰어 동시 (구조3와 동일 teleop_gui: 조이스틱 v/vy/w + 모션버튼 + 모니터패널):
 #     터미널1:  cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
 #     터미널2:  cd /home/jsh/문서/jsh/simulation/quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
-#     · ★시작=Ready(서기), Walk 버튼 눌러야 보행 시작 · 조이스틱→v/vy/w · STOP·Ready·Ground=제자리 stance · IMU/Actuator 패널 · ★기본=최적자세(REAR_ANKLE=-0.7·base0.52)
+#     · ★시작=Ready(서기), Walk 눌러야 보행 · 조이스틱→v/vy/w · STOP·Ready=제자리 stance · ★Ground(눕기)=낮게 내려감(GROUND_Z 0.28) · ★Body Height 슬라이더=서기높이 실시간(q_home IK 재계산) · IMU/Actuator 패널 · 기본=최적자세(REAR_ANKLE=-0.7·base0.52)
+#     env: GROUND_Z(눕기높이, 기본0.28)  HEIGHT_RATE(높이변경 속도[m/s], 기본0.3)
 #   ★뷰어 배속:  RATE=2(2배 빠르게)·RATE=4·RATE=0(최대속도/sleep없음).  RENDER_EVERY(렌더당 물리스텝, 기본10).  예: RATE=3 TROT_V=0.5 ...quad_sim.py ...
 #   헤드리스 정량:  HEADLESS=1 STEPS=3000 PRINT_EVERY=500 ...  (z·x·y·yaw·tilt·발침투·falls 출력; 1kHz라 STEPS=시간/0.001)
 #   정지/기립:  --mode stance(WBIC) / stand(중력보상PD) / mpc(MPC+WBIC) / view

@@ -208,6 +208,14 @@ class QuadSim:
         self.com_ref = np.array([fc[0], fc[1], d.subtree_com[0][2]])
         return self.q_home
 
+    def update_stand_qhome(self, base_z):
+        """target base_z용 q_home/com_ref 재계산(IK) — 라이브 d는 복원(텔레포트X).
+        WBIC posture+CoM task가 새 q_home으로 부드럽게 구동 → 서기 높이변경/눕기."""
+        _q = self.d.qpos.copy(); _v = self.d.qvel.copy(); _t = self.d.time
+        self.crouch_home(base_z)                       # q_home/com_ref 갱신(d 텔레포트됨)
+        self.d.qpos[:] = _q; self.d.qvel[:] = _v; self.d.time = _t   # 라이브 d 복원
+        mujoco.mj_forward(self.m, self.d)
+
     # ── WBIC stance QP (4발 접촉정합 균형) ─────────────
     def wbic_stance(self, contacts=(0, 1, 2, 3)):
         d, m, nv = self.d, self.m, self.nv
@@ -770,8 +778,10 @@ def mode_trot():
     WZ = float(os.environ.get('TROT_WZ', '0.0'))    # 선회각속도[rad/s] (+좌선회)
     ACC = float(os.environ.get('TROT_ACC', '0.6'))  # 명령 가속도제한[m/s²]: 시작램프+GUI 급조작 완화
     WARMUP = float(os.environ.get('TROT_WARMUP', '0.6'))  # 시작 제자리trot 시간[s]: 첫 사이클 리듬확립 후 이동(시작 lurch 완화)
-    CMDFILE = os.environ.get('CMDFILE')             # ★GUI 연동: JSON(/tmp/quad_cmd.json) 폴링(v/vy/w)
+    CMDFILE = os.environ.get('CMDFILE')             # ★GUI 연동: JSON(/tmp/quad_cmd.json) 폴링(v/vy/w/mode/body_h)
     if CMDFILE: q.cmd_mode = 'stand_up'             # ★GUI 모드: 시작=Ready(stand). Walk 버튼 눌러야 gait 시작 (standalone은 move=즉시보행)
+    GROUND_Z = float(os.environ.get('GROUND_Z', '0.28'))   # Ground(눕기) 목표 높이[m]
+    HRATE = float(os.environ.get('HEIGHT_RATE', '0.3'))    # 높이 변경 속도[m/s] (body_h·Ground 부드럽게)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off
@@ -781,7 +791,8 @@ def mode_trot():
          'settle_until': SETTLE,
          'Vt': V, 'Vyt': VY, 'Wt': WZ,                      # 목표명령(GUI가 갱신)
          'Vs': 0.0, 'Vys': 0.0, 'Ws': 0.0, 'cmd_t': -1.0,   # 스무딩 적용명령(0서 시작)
-         'yaw_ref': 0.0, 'last_t': -1.0}                     # 선회 yaw각 참조(적분) · 직전 시각(reset 감지용)
+         'yaw_ref': 0.0, 'last_t': -1.0,                     # 선회 yaw각 참조(적분) · 직전 시각(reset 감지용)
+         'body_h': q.base_z0, 'ht_cur': q.base_z0, 'qhome_h': q.base_z0}   # body_h슬라이더 · 보간높이 · q_home 계산높이
 
     def gait(i, tg):
         ph = (tg / T_TROT + OFFSET[i]) % 1.0
@@ -813,9 +824,14 @@ def mode_trot():
                 with open(CMDFILE) as _f: _c = json.load(_f)
                 S['Vt'] = float(_c.get('v', S['Vt'])); S['Vyt'] = float(_c.get('vy', S['Vyt'])); S['Wt'] = float(_c.get('w', S['Wt']))
                 q.cmd_mode = _c.get('mode', 'move')
+                S['body_h'] = float(_c.get('body_h', S['body_h']))   # 서기 높이 슬라이더
             except Exception: pass
-        # ── 모드: move 외(Ready 서기/Ground 눕기/STOP)는 제자리 WBIC stance ──
+        # ── 모드: move 외(Ready 서기/Ground 눕기/STOP)는 제자리 WBIC stance + 높이제어 ──
         if q.cmd_mode != 'move':
+            _tgt = GROUND_Z if q.cmd_mode == 'stand_down' else S['body_h']   # 눕기=낮게, 서기=슬라이더 높이
+            S['ht_cur'] += float(np.clip(_tgt - S['ht_cur'], -HRATE * q.m.opt.timestep, HRATE * q.m.opt.timestep))  # 부드럽게 보간
+            if abs(S['ht_cur'] - S['qhome_h']) > 6e-3:        # 목표 바뀌면 q_home/com_ref IK 재계산(다리 굽힘 자세)
+                q.update_stand_qhome(S['ht_cur']); S['qhome_h'] = S['ht_cur']
             q.wbic_stance(); S['armed'] = False; q.cmd_v[:] = 0.0
             return
         if t < S['settle_until']:            # 1) WBIC stance 정착 (초기/리셋)
