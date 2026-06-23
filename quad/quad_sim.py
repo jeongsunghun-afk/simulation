@@ -135,6 +135,9 @@ class QuadSim:
         _jl = [(self.m.jnt_range[j, 0], self.m.jnt_range[j, 1]) if self.m.jnt_limited[j] else (-1e9, 1e9)
                for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
         self._qmin = np.array([a for a, b in _jl]); self._qmax = np.array([b for a, b in _jl])
+        # 뒷발목(4DoF 여자유도) nu-order 인덱스 + 핀 가중치: posture로 REAR_ANKLE에 고정→흔들림↓·좌우대칭
+        self._ankle_idx = set(int(self.legqv[i][3]) - 6 for i in range(4) if self.leg_dof[i] == 4)
+        self._ankle_w = float(os.environ.get('ANKLE_W', '20'))   # 0이면 핀 안함(기존 여자유도)
         self.base_trail = _deque(maxlen=_tn)              # base 궤적(마젠타)
         self.foot_trail = [_deque(maxlen=_tn) for _ in range(4)]   # 발별 궤적
 
@@ -362,7 +365,10 @@ class QuadSim:
         #   (4-DOF 발목)를 남기므로 null-space 규제 없으면 발목이 발산(flail). 약규제로 안정화.
         a_post = 60 * (self.q_home - d.qpos[7:7 + self.nu]) - 5 * qv[6:6 + self.nu]
         for j in range(self.nu):
-            w_post = 0.1 if (6 + j) in sw_vidx else 1.0
+            if j in self._ankle_idx and self._ankle_w > 0:   # 뒷발목: REAR_ANKLE에 강하게 핀(여자유도 고정→대칭)
+                w_post = self._ankle_w
+            else:
+                w_post = 0.1 if (6 + j) in sw_vidx else 1.0
             P[6 + j, 6 + j] += w_post; g[6 + j] -= w_post * a_post[j]
         P[:nv, :nv] += 1e-3 * np.eye(nv)
         for k in range(K):           # λ tracking
