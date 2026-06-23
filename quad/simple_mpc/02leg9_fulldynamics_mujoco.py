@@ -349,7 +349,7 @@ _JN = ["FL_hip","FL_thigh","FL_calf","FR_hip","FR_thigh","FR_calf","HL_hip","HL_
 _itms=[]   # mpc.iterate 시간(ms) — 실시간성 측정
 _lc = LowCmd(nu); _KP = np.full(nu, float(_os.environ.get("KP","0"))); _KD = np.full(nu, float(_os.environ.get("KD","0")))  # 저수준 LowCmd(기본 kp=kd=0=순수토크)
 _CMDFILE = _os.environ.get("CMDFILE")   # GUI(teleop_gui.py)가 발행하는 JSON 명령 채널 → SportClient.Move (별도 프로세스, env무관)
-_mode = 'move'                          # 현재 모드(move/balance_stand/stand_up/stand_down)
+_mode = 'stand_up' if _CMDFILE else 'move'   # ★GUI모드 시작=Ready(stand_up), Walk 눌러야 보행. standalone=move(즉시)
 # ── 자세제어(StandUp/StandDown): 목표자세로 PD 보간. stand_up=서기(qstand), stand_down=낮은 crouch(IK) ──
 _q_up = _qstand[7:7+nu].copy()
 _Mp = model_handler.getModel(); _Dp = _Mp.createData(); _fp = [_Mp.getFrameId(n) for n in ["FL_foot","FR_foot","HL_foot","HR_foot"]]
