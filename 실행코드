@@ -27,6 +27,9 @@ cd /home/jsh/simple-mpc && VIEW=0 STEPS=400 VX=0.4 NTH=8 STIFF=0.005 ~/.pixi/bin
 
 #  env:  VX/VY/WZ(초기속도)  NTH=8(스레드)  STIFF=0.005(접촉)  T=50(호라이즌)  ★RATE(뷰어 배속, 2=2배·0=최대속도)  RENDER_EVERY(기본10)
 #        WBVX/WBVY/WBWZ(전진·측방·선회 추종가중)  ASYNC=1(비동기)  EST/ESTCL=1(상태추정)
+#  ★[OCP 정식화] 비선형 OCP(proxDDP, RTI 1뉴턴스텝/100Hz). ★FullDynamics=동역학모델이 전신강체(=full-body). 변수=전신 상태궤적x+토크u(T스텝).
+#    목적(cost): base속도추종(WBVX400/WBVY200/WBWZ10)·발프레임추종(WFRAME1000)·centroidal운동량(0.04, 전신상태서 뽑은 파생량=shaping)·posture(뒷발목 ANKLE_W=50)·토크/힘 정규화(1e-4).
+#    제약: ①전신강체동역학(등식 EOM+접촉) ②토크한계 ±Peak(torque_limits, effortLimit×3) ③관절위치한계(kinematics_limits, qmin/qmax) ④마찰콘(force_cone μ0.8) ⑤착지(land_cstr) ⑥stance 접지.
 #  예(2배속): cd /home/jsh/simple-mpc && VIEW=1 RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
 #  빌드(최초 1회):  cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi install && ~/.pixi/bin/pixi run build && ~/.pixi/bin/pixi run install
 
@@ -69,7 +72,9 @@ cd /home/jsh/문서/jsh/simulation/quad && TROT_V=1.0 /home/jsh/miniforge3/envs/
 #   env:  TROT_V/VY/WZ(전진·측방·선회 속도)  TROT_ACC(명령 가속도제한, 기본0.6)  ★TROT_WARMUP(시작 제자리trot[s], 기본0.6=리듬확립후 이동, 시작 lurch완화; 0=즉시)  CMDFILE(GUI폴링)  TROT_T(주기)  TROT_KCAP
 #   ★REAR_ANKLE(뒷발목 각도[rad], ★기본=-0.7 최적자세): 4-DoF 여유 해소 — 같은 발 궤적에 뒷다리 자세만(발목접힘). 0=폄. TROT_Z(base높이, 기본0.52=자연·고속최적; 0.45=웅크림 저속미관용). ★1.0m/s 최적=base 0.50~0.52(높을수록 안정·토크↓, 토크는 병목아님).
 #   ★물리환경 = 구조3(02leg9_fulldynamics)와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단; 발침투 -37mm→-2mm)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
-#   ★per-joint 토크한계(TAU_LIM, 기본 켜짐): WBIC QP에 −τ_peak≤τ≤τ_peak 부등식제약(모터 Peak hip/thigh84·calf126·foot168, jnt_actfrcrange). 사후클립 아닌 QP가 직접 존중→동역학일관·초과시 최적재분배. 보행토크 32Nm라 무영향. TAU_LIM=0=끄기.
+#   ★[2계층 정식화] ①convex MPC(Di Carlo SRBD, GRF 호라이즌 최적화)→λ계획  ②WBIC=순간 QP(quadprog, 변수 z=[q̈;λ], 전신동역학 사용).
+#     WBIC 목적(cost): swing발SE3·base자세/높이·posture·λ(MPC GRF)추종.  제약: ①전신동역학(등식) ②stance 무가속 ③마찰콘 ④토크한계(아래) ⑤위치한계(아래). +발배치=Raibert+capture(MPC밖).
+#     ※구조3와 차이: 구조3=전신 비선형 OCP 단일(호라이즌·predictive) / quad_sim=convex MPC(GRF)+순간WBIC 2계층(reactive). WBIC 동역학모델은 전신.
 #     W_TAU(토크 effort 최소화 가중, 기본0): min||τ||² 항. 단 posture/λ추종이 해를 거의 결정해 redundancy 적음→실효 미미(W_TAU=1도 토크 ~1%만↓). 프레임워크만 보유.
 #   ★관절 위치한계(POS_LIM, 기본 켜짐, 구조3 kinematics_limits 차용): WBIC QP에 q(T_la)∈[qmin,qmax]를 가속도경계로(jnt_range). lookahead POS_TLA(기본0.05s)로 한계전 감속. 검증: -10°로 좁히면 -10.3°서 묶임. 보행무영향. POS_LIM=0=끄기.
 
