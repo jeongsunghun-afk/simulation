@@ -71,6 +71,7 @@ cd /home/jsh/문서/jsh/simulation/quad && TROT_V=1.0 /home/jsh/miniforge3/envs/
 #   ★물리환경 = 구조3(02leg9_fulldynamics)와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단; 발침투 -37mm→-2mm)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
 #   ★per-joint 토크한계(TAU_LIM, 기본 켜짐): WBIC QP에 −τ_peak≤τ≤τ_peak 부등식제약(모터 Peak hip/thigh84·calf126·foot168, jnt_actfrcrange). 사후클립 아닌 QP가 직접 존중→동역학일관·초과시 최적재분배. 보행토크 32Nm라 무영향. TAU_LIM=0=끄기.
 #     W_TAU(토크 effort 최소화 가중, 기본0): min||τ||² 항. 단 posture/λ추종이 해를 거의 결정해 redundancy 적음→실효 미미(W_TAU=1도 토크 ~1%만↓). 프레임워크만 보유.
+#   ★관절 위치한계(POS_LIM, 기본 켜짐, 구조3 kinematics_limits 차용): WBIC QP에 q(T_la)∈[qmin,qmax]를 가속도경계로(jnt_range). lookahead POS_TLA(기본0.05s)로 한계전 감속. 검증: -10°로 좁히면 -10.3°서 묶임. 보행무영향. POS_LIM=0=끄기.
 
 # 터미널1
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py

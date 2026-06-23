@@ -131,6 +131,10 @@ class QuadSim:
         # per-joint Peak토크(QP 한계+클립용): jnt_actfrcrange = hip/thigh84·calf126·foot168, qpos/ctrl 순서 일치
         self._tau_peak = np.array([self.m.jnt_actfrcrange[j, 1] if self.m.jnt_actfrcrange[j, 1] > 0 else 1e8
                                    for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE])
+        # per-joint 위치 한계(WBIC QP, 가속도경계용): jnt_range
+        _jl = [(self.m.jnt_range[j, 0], self.m.jnt_range[j, 1]) if self.m.jnt_limited[j] else (-1e9, 1e9)
+               for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
+        self._qmin = np.array([a for a, b in _jl]); self._qmax = np.array([b for a, b in _jl])
         self.base_trail = _deque(maxlen=_tn)              # base 궤적(마젠타)
         self.foot_trail = [_deque(maxlen=_tn) for _ in range(4)]   # 발별 궤적
 
@@ -363,6 +367,15 @@ class QuadSim:
             Ac = np.zeros((3, nz)); Ac[:, :nv] = J
             A = np.vstack([A, Ac]); b = np.concatenate([b, np.zeros(3)])
         lb = np.full(nz, -1e8); ub = np.full(nz, 1e8); Gl = []; hl = []
+        # ★관절 위치 한계(구조3 kinematics_limits 차용): q(T_la)=q+dq·T_la+½q̈·T_la² ∈ [qmin,qmax]
+        #   → q̈ 경계. lookahead T_la로 한계 전 부드럽게 감속. 모순(이미 한계초과)이면 relax.
+        if os.environ.get('POS_LIM', '1') != '0':
+            _tla = float(os.environ.get('POS_TLA', '0.05'))   # 위치한계 lookahead[s]
+            qj = d.qpos[7:7 + self.nu]; dqj = qv[6:6 + self.nu]; _c = 0.5 * _tla * _tla
+            ub_p = (self._qmax - qj - dqj * _tla) / _c; lb_p = (self._qmin - qj - dqj * _tla) / _c
+            for j in range(self.nu):
+                _u = min(ub[6 + j], ub_p[j]); _l = max(lb[6 + j], lb_p[j])
+                if _l <= _u: ub[6 + j] = _u; lb[6 + j] = _l   # 일관시만 적용(infeasible 방지)
         for k in range(K):
             o = nv + 3 * k; lb[o + 2] = LAMZ_MIN
             for sx, sy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
