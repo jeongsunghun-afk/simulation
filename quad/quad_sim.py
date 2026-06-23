@@ -740,6 +740,7 @@ def mode_trot():
     VY = float(os.environ.get('TROT_VY', '0.0'))    # ★측방속도[m/s] (+좌 −우)
     WZ = float(os.environ.get('TROT_WZ', '0.0'))    # 선회각속도[rad/s] (+좌선회)
     ACC = float(os.environ.get('TROT_ACC', '0.6'))  # 명령 가속도제한[m/s²]: 시작램프+GUI 급조작 완화
+    WARMUP = float(os.environ.get('TROT_WARMUP', '0.6'))  # 시작 제자리trot 시간[s]: 첫 사이클 리듬확립 후 이동(시작 lurch 완화)
     CMDFILE = os.environ.get('CMDFILE')             # ★GUI 연동: JSON(/tmp/quad_cmd.json) 폴링(v/vy/w)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
@@ -804,11 +805,13 @@ def mode_trot():
             print('[trot] 정착 완료 → trot 시작 v=%.2f vy=%.2f w=%.2f%s (base_z=%.3f)'
                   % (S['Vt'], S['Vyt'], S['Wt'], ' [GUI]' if CMDFILE else '', q.d.qpos[2]))
         tg = t - S['t0']                     # 3) trot
-        # ── 명령 가속도제한 스무딩(시작램프 + GUI 급조작 완화) ──
+        # ── 가속도제한 스무딩 + 시작 warmup(첫 WARMUP초 제자리trot로 리듬확립 후 이동) ──
         dts = q.m.opt.timestep
-        S['Vs']  += float(np.clip(S['Vt']  - S['Vs'],  -ACC * dts, ACC * dts))
-        S['Vys'] += float(np.clip(S['Vyt'] - S['Vys'], -ACC * dts, ACC * dts))
-        S['Ws']  += float(np.clip(S['Wt']  - S['Ws'],  -2.0 * dts, 2.0 * dts))
+        _go = tg > WARMUP                                   # warmup 지난 뒤에만 목표속도 적용
+        _vt, _vyt, _wt = (S['Vt'], S['Vyt'], S['Wt']) if _go else (0.0, 0.0, 0.0)
+        S['Vs']  += float(np.clip(_vt  - S['Vs'],  -ACC * dts, ACC * dts))
+        S['Vys'] += float(np.clip(_vyt - S['Vys'], -ACC * dts, ACC * dts))
+        S['Ws']  += float(np.clip(_wt  - S['Ws'],  -2.0 * dts, 2.0 * dts))
         V_eff, Vy_eff, W_eff = S['Vs'], S['Vys'], S['Ws']
         # 선회: yaw각 참조 적분 + 명령(body)→world 회전 (SRBD 상태는 world frame)
         S['yaw_ref'] += W_eff * dts
