@@ -128,6 +128,9 @@ class QuadSim:
         _tn = int(os.environ.get('TRAIL_N', '300'))
         self.cmd_v = np.zeros(6)                          # 명령속도(화살표·텍스트용; mode가 설정)
         self.cmd_mode = 'move'                            # 현재 모드(GUI; move/stand_up/stand_down)
+        # per-joint Peak토크(QP 한계+클립용): jnt_actfrcrange = hip/thigh84·calf126·foot168, qpos/ctrl 순서 일치
+        self._tau_peak = np.array([self.m.jnt_actfrcrange[j, 1] if self.m.jnt_actfrcrange[j, 1] > 0 else 1e8
+                                   for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE])
         self.base_trail = _deque(maxlen=_tn)              # base 궤적(마젠타)
         self.foot_trail = [_deque(maxlen=_tn) for _ in range(4)]   # 발별 궤적
 
@@ -251,7 +254,7 @@ class QuadSim:
         for k, J in enumerate(Js):
             tau -= J[:, 6:6 + self.nu].T @ lam[k]
         self.last_lam = lam
-        d.ctrl[:] = np.clip(tau, -TAU_MAX, TAU_MAX)
+        d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)   # per-joint Peak로 안전클립(QP가 이미 존중)
         return tau, True
 
     # ── MPC (Linear Convex, gait_sim.controllers.mpc 재사용) + WBIC 추종 ──
@@ -366,6 +369,14 @@ class QuadSim:
                 row = np.zeros(nz); row[o] = sx; row[o + 1] = sy; row[o + 2] = -MU * MU_MARGIN
                 Gl.append(row); hl.append(0.0)
         P = 0.5 * (P + P.T) + 1e-8 * np.eye(nz)
+        # ★per-joint 토크 한계: −τ_peak ≤ τ ≤ τ_peak,  τ = M_act·q̈ + h_act − Σ Jᵀλ (z의 선형식)
+        if os.environ.get('TAU_LIM', '1') != '0':
+            h_act = h[6:6 + self.nu]
+            T_mat = np.zeros((self.nu, nz)); T_mat[:, :nv] = M[6:6 + self.nu, :]
+            for k, J in enumerate(Js):
+                T_mat[:, sl(k)] = -J[:, 6:6 + self.nu].T
+            Gl.extend(list(T_mat));  hl.extend(list(self._tau_peak - h_act))    # τ ≤ +peak
+            Gl.extend(list(-T_mat)); hl.extend(list(self._tau_peak + h_act))    # −τ ≤ +peak
         G = np.vstack(Gl) if Gl else None; hh = np.array(hl) if hl else None
         z = solve_qp(P, g, G, hh, A, b, lb, ub, solver='quadprog')
         if z is None:
@@ -375,7 +386,7 @@ class QuadSim:
         for k, J in enumerate(Js):
             tau -= J[:, 6:6 + self.nu].T @ lam[k]
         self.last_lam = lam
-        d.ctrl[:] = np.clip(tau, -TAU_MAX, TAU_MAX)
+        d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)   # per-joint Peak로 안전클립(QP가 이미 존중)
         return tau, True
 
     # ── 제어 ──────────────────────────────────────────
