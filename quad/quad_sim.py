@@ -792,7 +792,8 @@ def mode_trot():
          'Vt': V, 'Vyt': VY, 'Wt': WZ,                      # 목표명령(GUI가 갱신)
          'Vs': 0.0, 'Vys': 0.0, 'Ws': 0.0, 'cmd_t': -1.0,   # 스무딩 적용명령(0서 시작)
          'yaw_ref': 0.0, 'last_t': -1.0,                     # 선회 yaw각 참조(적분) · 직전 시각(reset 감지용)
-         'body_h': q.base_z0, 'ht_cur': q.base_z0, 'qhome_h': q.base_z0}   # body_h슬라이더 · 보간높이 · q_home 계산높이
+         'body_h': q.base_z0, 'ht_cur': q.base_z0, 'qhome_h': q.base_z0,   # body_h슬라이더 · 보간높이 · q_home 계산높이
+         'yaw_hold': None}                                                 # 선회정지 시 유지할 헤딩(드리프트 보정)
 
     def gait(i, tg):
         ph = (tg / T_TROT + OFFSET[i]) % 1.0
@@ -857,10 +858,14 @@ def mode_trot():
         S['Vys'] += float(np.clip(_vyt - S['Vys'], -ACC * dts, ACC * dts))
         S['Ws']  += float(np.clip(_wt  - S['Ws'],  -2.0 * dts, 2.0 * dts))
         V_eff, Vy_eff, W_eff = S['Vs'], S['Vys'], S['Ws']
-        # 선회: yaw각 참조 적분 + 명령(body)→world 회전 (SRBD 상태는 world frame)
-        S['yaw_ref'] += W_eff * dts
+        # 선회: yaw각 참조 + 명령(body)→world 회전 (SRBD 상태는 world frame)
         _qq = q.d.qpos[3:7]                                                     # quat [w,x,y,z]
         yaw_m = float(np.arctan2(2 * (_qq[0]*_qq[3] + _qq[1]*_qq[2]), 1 - 2 * (_qq[2]**2 + _qq[3]**2)))
+        if abs(W_eff) > 0.02:                                                   # 선회중: yaw_ref 적분(측정 0.3rad 이내 클램프=windup방지)
+            S['yaw_ref'] = float(np.clip(S['yaw_ref'] + W_eff * dts, yaw_m - 0.3, yaw_m + 0.3)); S['yaw_hold'] = None
+        else:                                                                  # ★선회 멈추면 현재 헤딩 래치·유지 → MPC가 드리프트 보정(전진이 헤딩 따라감)
+            if S['yaw_hold'] is None: S['yaw_hold'] = yaw_m
+            S['yaw_ref'] = S['yaw_hold']
         cy, sy = np.cos(yaw_m), np.sin(yaw_m)
         vx_w = V_eff * cy - Vy_eff * sy; vy_w = V_eff * sy + Vy_eff * cy        # body→world 속도
         S['x_ref'][2] = S['yaw_ref']; S['x_ref'][8] = W_eff                     # yaw각·yaw rate 참조
