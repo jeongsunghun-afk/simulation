@@ -70,6 +70,7 @@ cd /home/jsh/문서/jsh/simulation/quad && TROT_V=1.0 /home/jsh/miniforge3/envs/
 #   ★REAR_ANKLE(뒷발목 각도[rad], 기본0): 4-DoF 여유 해소 — 같은 발 궤적에 뒷다리 자세만 변경. ★음수=웅크림(발목접힘·발끝이 calf쪽으로, -0.6서 발끝-무릎 0.39→0.33). -0.5~-0.9 보행안정. 양수=반대(폄).
 #   ★물리환경 = 구조3(02leg9_fulldynamics)와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단; 발침투 -37mm→-2mm)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
 #   ★per-joint 토크한계(TAU_LIM, 기본 켜짐): WBIC QP에 −τ_peak≤τ≤τ_peak 부등식제약(모터 Peak hip/thigh84·calf126·foot168, jnt_actfrcrange). 사후클립 아닌 QP가 직접 존중→동역학일관·초과시 최적재분배. 보행토크 32Nm라 무영향. TAU_LIM=0=끄기.
+#     W_TAU(토크 effort 최소화 가중, 기본0): min||τ||² 항. 단 posture/λ추종이 해를 거의 결정해 redundancy 적음→실효 미미(W_TAU=1도 토크 ~1%만↓). 프레임워크만 보유.
 
 # 터미널1 (GUI)
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py

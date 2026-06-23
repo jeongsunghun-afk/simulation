@@ -369,14 +369,19 @@ class QuadSim:
                 row = np.zeros(nz); row[o] = sx; row[o + 1] = sy; row[o + 2] = -MU * MU_MARGIN
                 Gl.append(row); hl.append(0.0)
         P = 0.5 * (P + P.T) + 1e-8 * np.eye(nz)
-        # ★per-joint 토크 한계: −τ_peak ≤ τ ≤ τ_peak,  τ = M_act·q̈ + h_act − Σ Jᵀλ (z의 선형식)
-        if os.environ.get('TAU_LIM', '1') != '0':
+        # ★토크 = M_act·q̈ + h_act − Σ Jᵀλ (z의 선형식 τ=T_mat·z+h_act). 한계(제약) + effort최소화(비용)
+        _tau_lim = os.environ.get('TAU_LIM', '1') != '0'
+        _w_tau = float(os.environ.get('W_TAU', '0'))        # 토크 effort 최소화 가중(기본0=off; 0.001~0.01 권장)
+        if _tau_lim or _w_tau > 0:
             h_act = h[6:6 + self.nu]
             T_mat = np.zeros((self.nu, nz)); T_mat[:, :nv] = M[6:6 + self.nu, :]
             for k, J in enumerate(Js):
                 T_mat[:, sl(k)] = -J[:, 6:6 + self.nu].T
-            Gl.extend(list(T_mat));  hl.extend(list(self._tau_peak - h_act))    # τ ≤ +peak
-            Gl.extend(list(-T_mat)); hl.extend(list(self._tau_peak + h_act))    # −τ ≤ +peak
+            if _w_tau > 0:                                  # min ||τ||²: 여러 해 중 토크 작은 해 선택
+                P += _w_tau * (T_mat.T @ T_mat); g += _w_tau * (T_mat.T @ h_act)
+            if _tau_lim:                                    # per-joint 토크 한계 −τ_peak ≤ τ ≤ τ_peak
+                Gl.extend(list(T_mat));  hl.extend(list(self._tau_peak - h_act))
+                Gl.extend(list(-T_mat)); hl.extend(list(self._tau_peak + h_act))
         G = np.vstack(Gl) if Gl else None; hh = np.array(hl) if hl else None
         z = solve_qp(P, g, G, hh, A, b, lb, ub, solver='quadprog')
         if z is None:
