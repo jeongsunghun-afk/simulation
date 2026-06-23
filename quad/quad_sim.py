@@ -11,6 +11,7 @@ biped wbic_balance.py 와 동일한 '단일 파일 + --mode' 관리 방식.
 시각화: 구조3(02leg9_fulldynamics) 스타일 — footstep타겟·지지다각형·CoM투영·명령화살표·base/발궤적·마찰콘+GRF·텍스트. 항상표시.
 """
 import os
+import json
 import sys
 import math
 import time
@@ -126,6 +127,7 @@ class QuadSim:
         from collections import deque as _deque
         _tn = int(os.environ.get('TRAIL_N', '300'))
         self.cmd_v = np.zeros(6)                          # 명령속도(화살표·텍스트용; mode가 설정)
+        self.cmd_mode = 'move'                            # 현재 모드(GUI; move/stand_up/stand_down)
         self.base_trail = _deque(maxlen=_tn)              # base 궤적(마젠타)
         self.foot_trail = [_deque(maxlen=_tn) for _ in range(4)]   # 발별 궤적
 
@@ -520,9 +522,30 @@ class QuadSim:
                 if np.linalg.norm(pts[k] - pts[k - 1]) < 1e-4: continue
                 _ln(pts[k - 1], pts[k], 0.004, _tc[i % 4])
 
+    def publish_state(self, path):
+        """구조3와 동일 스키마로 상태 발행(원자적) → teleop_gui 모니터 패널(IMU/Actuator)."""
+        d, m = self.d, self.m
+        if not hasattr(self, '_jnames'):                  # q/dq 순서와 일치(MuJoCo 관절순)
+            self._jnames = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_JOINT, j)
+                            for j in range(m.njnt) if m.jnt_type[j] != mujoco.mjtJoint.mjFREE]
+        Rm = np.zeros(9); mujoco.mju_quat2Mat(Rm, d.qpos[3:7]); Rm = Rm.reshape(3, 3)
+        rpy = [math.degrees(math.atan2(Rm[2, 1], Rm[2, 2])),
+               math.degrees(math.asin(max(-1, min(1, -Rm[2, 0])))),
+               math.degrees(math.atan2(Rm[1, 0], Rm[0, 0]))]
+        st = {'mode': self.cmd_mode, 'base_z': float(d.qpos[2]), 't': float(d.time),
+              'rpy': rpy, 'gyro': [float(x) for x in d.qvel[3:6]], 'names': self._jnames,
+              'q': [float(x) for x in d.qpos[7:7 + self.nu]],
+              'dq': [float(x) for x in d.qvel[6:6 + self.nu]],
+              'tau': [float(x) for x in d.ctrl[:self.nu]]}
+        tmp = path + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(st, f)
+        os.replace(tmp, path)
+
     def run_viewer(self, control_fn, reset_on_fall=True, reset_fn=None):
         m, d = self.m, self.d
         reset_fn = reset_fn or self.set_home
+        _sp = os.environ.get('STATE_PUB'); _pc = 0   # 상태발행 채널 + 프레임카운터
         if os.environ.get('HEADLESS'):                       # 헤드리스 정량테스트(뷰어 없이 N스텝)
             nsteps = int(os.environ.get('STEPS', '1500'))
             pe = int(os.environ.get('PRINT_EVERY', '100'))   # 출력 간격(스텝). 첫사이클 관찰은 20 등
@@ -531,6 +554,7 @@ class QuadSim:
                 control_fn(); mujoco.mj_step(m, d)
                 if reset_on_fall and d.qpos[2] < 0.2:
                     falls += 1; mujoco.mj_resetData(m, d); reset_fn()
+                if _sp and s % 30 == 0: self.publish_state(_sp)   # GUI 모니터 패널
                 if s % pe == 0:
                     w, x, y, z = d.qpos[3:7]                  # base quat [w,x,y,z] → tilt(수직과의 각)
                     tilt = np.degrees(np.arccos(max(-1, min(1, 1 - 2 * (x * x + y * y)))))
@@ -557,6 +581,8 @@ class QuadSim:
                 mujoco.mj_step(m, d)
                 if reset_on_fall and d.qpos[2] < 0.2:
                     mujoco.mj_resetData(m, d); reset_fn()
+                _pc += 1
+                if _sp and _pc % 30 == 0: self.publish_state(_sp)   # GUI 모니터 패널(~30Hz)
                 self.draw_overlay(v)
                 # 좌상단: 시뮬 시간 / 우상단: 외란 힘 N
                 fext = max((float(np.linalg.norm(d.xfrc_applied[b, :3]))
@@ -735,6 +761,18 @@ def mode_trot():
 
     def ctrl():
         t = q.d.time
+        # ── GUI 명령 폴링(CMDFILE, ~20Hz): v/vy/w + mode ──
+        if CMDFILE and (S['cmd_t'] < 0 or t - S['cmd_t'] > 0.05):
+            S['cmd_t'] = t
+            try:
+                with open(CMDFILE) as _f: _c = json.load(_f)
+                S['Vt'] = float(_c.get('v', S['Vt'])); S['Vyt'] = float(_c.get('vy', S['Vyt'])); S['Wt'] = float(_c.get('w', S['Wt']))
+                q.cmd_mode = _c.get('mode', 'move')
+            except Exception: pass
+        # ── 모드: move 외(Ready 서기/Ground 눕기/STOP)는 제자리 WBIC stance ──
+        if q.cmd_mode != 'move':
+            q.wbic_stance(); S['armed'] = False; q.cmd_v[:] = 0.0
+            return
         # ★ 리셋 감지(뷰어 Backspace/자동 낙상): 시간 역행 OR base 위치 급변(>0.3m) →
         #   상태기계 재초기화 + 재정착 타이머. 안 하면 낡은 world-frame nominal/liftoff 로 멈춤.
         #   settle_until 은 d.time 절대값 — 시간 0복귀 안 하는 passive 뷰어 케이스도 커버.
@@ -762,14 +800,6 @@ def mode_trot():
             print('[trot] 정착 완료 → trot 시작 v=%.2f vy=%.2f w=%.2f%s (base_z=%.3f)'
                   % (S['Vt'], S['Vyt'], S['Wt'], ' [GUI]' if CMDFILE else '', q.d.qpos[2]))
         tg = t - S['t0']                     # 3) trot
-        # ── GUI 명령 폴링(CMDFILE, ~20Hz): v=전진 vy=측방 w=선회 ──
-        if CMDFILE and (S['cmd_t'] < 0 or t - S['cmd_t'] > 0.05):
-            S['cmd_t'] = t
-            try:
-                import json as _json
-                with open(CMDFILE) as _f: _c = _json.load(_f)
-                S['Vt'] = float(_c.get('v', S['Vt'])); S['Vyt'] = float(_c.get('vy', S['Vyt'])); S['Wt'] = float(_c.get('w', S['Wt']))
-            except Exception: pass
         # ── 명령 가속도제한 스무딩(시작램프 + GUI 급조작 완화) ──
         dts = q.m.opt.timestep
         S['Vs']  += float(np.clip(S['Vt']  - S['Vs'],  -ACC * dts, ACC * dts))
