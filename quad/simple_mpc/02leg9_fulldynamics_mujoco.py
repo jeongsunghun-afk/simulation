@@ -374,6 +374,7 @@ if _estor: _estor.reset(device.d.qpos[0:3])
 _ep = np.array(device.d.qpos[0:3]); _ev = np.zeros(3)
 # ★비동기 모사: MPC를 K 제어주기(10ms)마다 풀고, 그 사이 plan을 advance하며 재사용 (K=4→25Hz, K=2→50Hz). 1=동기(매주기)
 _DECIM = int(_os.environ.get("MPC_DECIM","1")); _pk = 0
+_last_t = 0.0   # 직전 시각(뷰어 Backspace reset 감지용 — 시간역행)
 print("[MJ] MPC_DECIM=%d → 재계획 %.0fHz (제어 %.0fHz)" % (_DECIM, 100.0/_DECIM, 100.0*N_simu), flush=True)
 import numpy as _npd
 # 뷰어=무한루프+키보드 teleop / 헤드리스=STEPS 유한
@@ -457,6 +458,12 @@ while True:
     if _INF:
         if not device.viewer.is_running(): break
     elif step >= _MAXSTEP: break
+    if device.d.time < _last_t - 1e-6:      # ★뷰어 reset(Backspace) 감지: 시간역행 → qstand 깨끗 복원(MPC가 거기서 회복)
+        device.d.qpos[:] = _qstand; device.d.qvel[:] = 0.0; _mj.mj_forward(device.m, device.d)
+        _vsmooth = np.zeros_like(_vsmooth); _cmdq = _qstand[7:7+nu].copy(); _last_h = -1.0
+        device.sport.Move(0.0, 0.0, 0.0)    # 명령 0(reset 후 정지서 시작, GUI가 다시 줌)
+        print("[MJ] reset 감지 → qstand 복원", flush=True)
+    _last_t = device.d.time
     if _CMDFILE and step % 5 == 0:          # GUI JSON 채널 소비(20Hz) → 고수준 SportClient.Move + mode
         try:
             import json as _json
