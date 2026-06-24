@@ -61,7 +61,19 @@ class QuadSim:
         self.foot_kind = cfg['foot_kind']; self.base_z0 = cfg['base_z0']
         self.foot_z0 = cfg.get('foot_z0', 0.0)   # nominal 자세 발바닥 목표 z(접지=0). 과거 0.02→20mm 부양 버그
         global MU; MU = cfg['mu']
-        self.m = mujoco.MjModel.from_xml_path(mjcf or cfg['mjcf'])
+        _xmlp = mjcf or cfg['mjcf']
+        if os.environ.get('STAIRS'):              # ★계단 환경 주입: STAIR_H(단높이)·STAIR_D(단깊이)·STAIR_N(단수)·STAIR_X0(시작x)
+            H = float(os.environ.get('STAIR_H', '0.05')); D = float(os.environ.get('STAIR_D', '0.25'))
+            N = int(os.environ.get('STAIR_N', '6')); X0 = float(os.environ.get('STAIR_X0', '0.7'))
+            _g = ''.join('<geom type="box" pos="%.4f 0 %.4f" size="%.4f 1.0 %.4f" rgba="0.55 0.55 0.62 1" friction="1.3 0.02 0.001" condim="3"/>\n'
+                         % (X0 + i*D + D/2, (i+1)*H/2, D/2, (i+1)*H/2) for i in range(N))
+            with open(_xmlp) as _f: _xml = _f.read()
+            _xml = _xml.replace('</worldbody>', _g + '</worldbody>')
+            _tmp = os.path.join(os.path.dirname(_xmlp), '_stairs_tmp.mjcf')   # 메시 상대경로 해석 위해 같은 폴더에
+            with open(_tmp, 'w') as _f: _f.write(_xml)
+            self.m = mujoco.MjModel.from_xml_path(_tmp); os.remove(_tmp)
+        else:
+            self.m = mujoco.MjModel.from_xml_path(_xmlp)
         if _NOLIMIT:
             self.m.jnt_limited[:] = 0    # 관절 한계 해제 (테스트용)
         else:
@@ -209,6 +221,9 @@ class QuadSim:
         self.q_home = d.qpos[7:7 + self.nu].copy()
         fc = np.mean([self.foot_point(i)[:2] for i in range(4)], axis=0)
         self.com_ref = np.array([fc[0], fc[1], d.subtree_com[0][2]])
+        # 명목(기본자세) 발 위치 — hip 기준 오프셋(body frame) + 발 z. Ready 호밍 목표.
+        self.foot_hip_off = [self.foot_point(i)[:2] - d.xpos[self.hip_bid[i]][:2] for i in range(4)]
+        self.foot_gz0 = [float(self.foot_point(i)[2]) for i in range(4)]
         return self.q_home
 
     def update_stand_qhome(self, base_z):
@@ -772,7 +787,9 @@ def mode_trot():
     q = QuadSim()
     _tz = os.environ.get('TROT_Z')           # trot crouch 높이 override(낮추면 CoM↓ roll안정↑)
     q.crouch_home(float(_tz) if _tz else None); q.setup_mpc()
-    TROT_Q = np.diag([200., 200., 100., 0., 100., 200., 0., 0., 1., 10., 10., 1., 0.])
+    # ★py(world y위치) 가중치=0 — x와 대칭으로 자유. (과거 100=직진 y앵커였으나 측방/대각·헤딩추종을 막음;
+    #   위치 드리프트는 속도추종 vx/vy=10이 잡음). global y앵커 제거 → 선회 후 전진이 헤딩 따라감.
+    TROT_Q = np.diag([200., 200., 100., 0., float(os.environ.get('WPY', '0.')), 200., 0., 0., 1., 10., 10., 1., 0.])
     OFFSET = {0: 0.0, 3: 0.0, 1: 0.5, 2: 0.5}      # 대각쌍 A=HL,FR / B=HR,FL
     # SWING_FRAC<0.5 → 대각 전환에 double-support 겹침(착지 후 이륙) → 공중(flight) 방지
     SETTLE = 0.5
@@ -791,6 +808,22 @@ def mode_trot():
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off
+    # ── 점프: GUI Jump 트리거 시 offline 궤적(quad_hop.solve_jump) 재생(피드포워드 u* + 관절 PD) ──
+    JUMP_NPZ = os.environ.get('JUMP_NPZ', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'jump_stand.npz'))
+    JUMP = None
+    if os.path.exists(JUMP_NPZ):
+        _jd = np.load(JUMP_NPZ, allow_pickle=True)
+        _aq = q.m.actuator_trnid[:, 0]                  # 액추에이터→조인트
+        JUMP = {'q': _jd['q'], 'dq': _jd['dq'], 'tau': _jd['tau'], 'base_z': _jd['base_z'],
+                'sub': max(1, round(float(_jd['dt']) / q.m.opt.timestep)), 'N': len(_jd['tau']),
+                'qadr': q.m.jnt_qposadr[_aq], 'vadr': q.m.jnt_dofadr[_aq]}
+        print('[trot] 점프 궤적 로드: %s (knots=%d sub=%d 정점z=%.2f)'
+              % (JUMP_NPZ, JUMP['N'], JUMP['sub'], JUMP['base_z'].max()), flush=True)
+    JKP = float(os.environ.get('JUMP_KP', '120')); JKD = float(os.environ.get('JUMP_KD', '3'))
+    # ── Ready 호밍: 누르면 발을 명목 위치로 다시 디뎌 기본자세 복귀(대각쌍 2스텝) ──
+    HOME_ON_READY = os.environ.get('HOME_ON_READY', '0') == '1'   # 기본 OFF(사용자 선택): Ready=그자리 stance 유지. =1이면 발구름 호밍
+    HOME_T = float(os.environ.get('HOME_T', '1.8'))         # 호밍 지속[s]: 제자리 trot로 발을 기본명목 재정렬
+    HOME_TOL = float(os.environ.get('HOME_TOL', '0.03'))    # 발편차 이하면 호밍 생략(이미 기본자세)
     T_ST = T_TROT * (1 - SWING_FRAC)
     S = {'armed': False, 't0': 0.0, 'nominal': None, 'liftoff': None, 'x_ref': None,
          'ptgt_prev': [None, None, None, None], 'lam_des': None, 'mpc_t': -1.0, 'bx': 0.0,
@@ -799,7 +832,11 @@ def mode_trot():
          'Vs': 0.0, 'Vys': 0.0, 'Ws': 0.0, 'cmd_t': -1.0,   # 스무딩 적용명령(0서 시작)
          'yaw_ref': 0.0, 'last_t': -1.0,                     # 선회 yaw각 참조(적분) · 직전 시각(reset 감지용)
          'body_h': q.base_z0, 'ht_cur': q.base_z0, 'qhome_h': q.base_z0,   # body_h슬라이더 · 보간높이 · q_home 계산높이
-         'yaw_hold': None}                                                 # 선회정지 시 유지할 헤딩(드리프트 보정)
+         'yaw_hold': None,                                                 # 선회정지 시 유지할 헤딩(드리프트 보정)
+         'jseq': None, 'jact': False, 'jk': 0, 'jsub': 0,                  # 점프: 마지막seq · 재생중 · 현knot · sub카운터
+         'prev_mode': q.cmd_mode, 'homing': False, 'home_t0': 0.0,        # Ready 호밍: 직전모드 · 진행중 · 시작시각
+         'home_phase': -1, 'home_lift': None,                             #   현 스텝위상 · liftoff 캡처
+         'hseq': None, 'home_req': False}                                 # home_seq 마지막값 · 호밍 요청(엣지/Ready/점프완료 통합)
 
     def gait(i, tg):
         ph = (tg / T_TROT + OFFSET[i]) % 1.0
@@ -811,6 +848,17 @@ def mode_trot():
             for i in range(4):
                 cs[k, i] = gait(i, tg + k * q.MPC.DT_MPC)[0]
         return cs
+
+    def home_feet_dev():
+        """현 발이 명목(hip 기준 기본자세) 위치서 얼마나 벗어났나(최대, m)."""
+        _qq = q.d.qpos[3:7]
+        yaw = float(np.arctan2(2 * (_qq[0]*_qq[3] + _qq[1]*_qq[2]), 1 - 2 * (_qq[2]**2 + _qq[3]**2)))
+        cy, sy = np.cos(yaw), np.sin(yaw); Rw = np.array([[cy, -sy], [sy, cy]])
+        dev = 0.0
+        for i in range(4):
+            tgt = q.d.xpos[q.hip_bid[i]][:2] + Rw @ q.foot_hip_off[i]
+            dev = max(dev, float(np.linalg.norm(q.foot_point(i)[:2] - tgt)))
+        return dev
 
     def ctrl():
         t = q.d.time
@@ -832,14 +880,62 @@ def mode_trot():
                 S['Vt'] = float(_c.get('v', S['Vt'])); S['Vyt'] = float(_c.get('vy', S['Vyt'])); S['Wt'] = float(_c.get('w', S['Wt']))
                 q.cmd_mode = _c.get('mode', 'move')
                 S['body_h'] = float(_c.get('body_h', S['body_h']))   # 서기 높이 슬라이더
+                if JUMP is not None:                                  # 점프 트리거(jump_seq 상승엣지)
+                    _js = int(_c.get('jump_seq', 0))
+                    if S['jseq'] is not None and _js > S['jseq'] and not S['jact']:  # 첫폴링=동기화(시작점프 방지)
+                        S['jact'] = True; S['jk'] = 0; S['jsub'] = 0
+                        print('[trot] 점프 트리거(seq=%d) → offline 궤적 재생' % _js, flush=True)
+                    S['jseq'] = _js
+                _hs = int(_c.get('home_seq', 0))                     # Ready 버튼 → 기본자세 호밍 요청(모드 무관)
+                if S['hseq'] is not None and _hs > S['hseq']:
+                    S['home_req'] = True
+                S['hseq'] = _hs
             except Exception: pass
+        _prev_mode = S['prev_mode']; S['prev_mode'] = q.cmd_mode    # 매틱 직전모드(호밍 진입엣지 감지)
+        if q.cmd_mode == 'stand_up' and _prev_mode != 'stand_up':   # 다른모드→Ready 진입도 호밍 요청
+            S['home_req'] = True
+        # ── 점프 재생: offline 궤적 피드포워드 u* + 관절 PD (WBIC 우회, base는 물리로) ──
+        if S['jact'] and JUMP is not None:
+            k = min(S['jk'], JUMP['N'] - 1)
+            qcur = q.d.qpos[JUMP['qadr']]; dqcur = q.d.qvel[JUMP['vadr']]
+            tau = JUMP['tau'][k] + JKP * (JUMP['q'][k] - qcur) + JKD * (JUMP['dq'][k] - dqcur)
+            q.d.ctrl[:] = np.clip(tau, -q._tau_peak, q._tau_peak)
+            q.cmd_v[:] = 0.0
+            S['jsub'] += 1
+            if S['jsub'] >= JUMP['sub']:
+                S['jsub'] = 0; S['jk'] += 1
+                if S['jk'] >= JUMP['N']:                              # 착지·복귀 완료 → 정착(자동호밍 없음; 발 재정렬은 Ready 수동)
+                    S['jact'] = False; S['armed'] = False
+                    S['settle_until'] = t + SETTLE
+                    q.update_stand_qhome(q.base_z0); S['ht_cur'] = q.base_z0; S['qhome_h'] = q.base_z0
+                    print('[trot] 점프 완료 → 정착(base_z=%.3f)' % q.d.qpos[2], flush=True)
+            return
         # ── 모드: move 외(Ready 서기/Ground 눕기/STOP)는 제자리 WBIC stance + 높이제어 ──
         if q.cmd_mode != 'move':
             _tgt = GROUND_Z if q.cmd_mode == 'stand_down' else S['body_h']   # 눕기=낮게, 서기=슬라이더 높이
             S['ht_cur'] += float(np.clip(_tgt - S['ht_cur'], -HRATE * q.m.opt.timestep, HRATE * q.m.opt.timestep))  # 부드럽게 보간
             if abs(S['ht_cur'] - S['qhome_h']) > 6e-3:        # 목표 바뀌면 q_home/com_ref IK 재계산(다리 굽힘 자세)
                 q.update_stand_qhome(S['ht_cur']); S['qhome_h'] = S['ht_cur']
-            q.wbic_stance(); S['armed'] = False; q.cmd_v[:] = 0.0
+            # ★ 기본자세 호밍 요청(Ready 버튼·Ready 진입·점프완료) → 정착 후 제자리 trot로 발 재정렬 트리거
+            if (HOME_ON_READY and S['home_req'] and not S['homing']
+                    and q.cmd_mode == 'stand_up' and t >= S['settle_until']):
+                S['home_req'] = False
+                _dev = home_feet_dev()
+                if _dev > HOME_TOL:                           # 이미 기본자세면(편차 작음) 생략
+                    S['homing'] = True; S['home_t0'] = t; S['armed'] = False   # 트로트 재arm 강제(아래 경로로 진행)
+                    print('[trot] 기본자세 호밍 시작(발편차 %.0fmm, 제자리 trot)' % (_dev * 1000), flush=True)
+            if not S['homing']:                               # 호밍 아니면 일반 stance 유지
+                q.wbic_stance(); S['armed'] = False; q.cmd_v[:] = 0.0
+                return
+            # 호밍 중이면 아래 trot 경로로 진행(제자리 v=0, 발=기본명목 — MPC 균형 재활용)
+        else:
+            S['homing'] = False                               # move(보행) 명령 = 호밍 취소
+        # ── trot 경로 (move 보행 또는 homing 제자리 재정렬) ──
+        if S['homing'] and (t - S['home_t0'] > HOME_T):       # 호밍 종료 → stance 복귀
+            S['homing'] = False; S['armed'] = False; S['settle_until'] = t + SETTLE
+            q.wbic_stance(); q.cmd_v[:] = 0.0
+            print('[trot] 호밍 완료 → stance(base_z=%.3f 발편차%.0fmm)'
+                  % (q.d.qpos[2], home_feet_dev() * 1000), flush=True)
             return
         if t < S['settle_until']:            # 1) WBIC stance 정착 (초기/리셋)
             q.wbic_stance(); return
@@ -849,17 +945,20 @@ def mode_trot():
             S['liftoff'] = [q.foot_point(i).copy() for i in range(4)]
             xr = np.zeros(13); xr[5] = float(q.d.subtree_com[0][2]); xr[12] = -9.81  # vx/vy/wz는 매틱 갱신
             S['x_ref'] = xr
-            # 발의 hip 기준 default offset (settle 시) — 이후 hip 따라 전방 배치
-            S['hip_off'] = [S['nominal'][i][:2] - q.d.xpos[q.hip_bid[i]][:2] for i in range(4)]
-            S['gz'] = [float(S['nominal'][i][2]) for i in range(4)]
+            # ★ 발 목표 = 몸(hip) 기준 절대 명목위치(foot_hip_off) — 현재 발위치 무관.
+            #   어긋난 발(점프·외란·호밍 직후)도 기본 stance로 수렴. (호밍·보행 공통)
+            S['hip_off'] = [q.foot_hip_off[i].copy() for i in range(4)]
+            S['gz'] = [float(z) for z in q.foot_gz0]
             q.MPC.MPC_Q = TROT_Q
-            print('[trot] 정착 완료 → trot 시작 v=%.2f vy=%.2f w=%.2f%s (base_z=%.3f)'
-                  % (S['Vt'], S['Vyt'], S['Wt'], ' [GUI]' if CMDFILE else '', q.d.qpos[2]))
+            print('[trot] %s 시작 v=%.2f vy=%.2f w=%.2f%s (base_z=%.3f)'
+                  % ('호밍(제자리)' if S['homing'] else '정착 완료 → trot', S['Vt'], S['Vyt'], S['Wt'],
+                     ' [GUI]' if CMDFILE else '', q.d.qpos[2]))
         tg = t - S['t0']                     # 3) trot
         # ── 가속도제한 스무딩 + 시작 warmup(첫 WARMUP초 제자리trot로 리듬확립 후 이동) ──
         dts = q.m.opt.timestep
         _go = tg > WARMUP                                   # warmup 지난 뒤에만 목표속도 적용
-        _vt, _vyt, _wt = (S['Vt'], S['Vyt'], S['Wt']) if _go else (0.0, 0.0, 0.0)
+        _vt, _vyt, _wt = (0.0, 0.0, 0.0) if S['homing'] else \
+            ((S['Vt'], S['Vyt'], S['Wt']) if _go else (0.0, 0.0, 0.0))   # 호밍=제자리(발만 재정렬)
         S['Vs']  += float(np.clip(_vt  - S['Vs'],  -ACC * dts, ACC * dts))
         S['Vys'] += float(np.clip(_vyt - S['Vys'], -ACC * dts, ACC * dts))
         S['Ws']  += float(np.clip(_wt  - S['Ws'],  -2.0 * dts, 2.0 * dts))
@@ -899,7 +998,8 @@ def mode_trot():
         q.foot_targets = [None, None, None, None]
         dt = q.m.opt.timestep; swing = {}
         Rw = np.array([[cy, -sy], [sy, cy]])                 # body→world(현재 yaw)
-        _sh = STEP_H * (0.2 + 0.8 * min(1.0, tg / WARMUP)) if WARMUP > 1e-6 else STEP_H  # 시작 step↑ ramp(첫스윙 작게→full)
+        _sh = STEP_H if S['homing'] else (                  # 호밍=풀 step height(발 어긋남 클리어), 보행=시작 ramp
+            STEP_H * (0.2 + 0.8 * min(1.0, tg / WARMUP)) if WARMUP > 1e-6 else STEP_H)
         for i in sw:                                        # swing 발끝 작업공간 목표(p,v)
             hip_xy = q.d.xpos[q.hip_bid[i]][:2]
             r_xy = hip_xy - q.d.qpos[:2]                     # 몸중심→hip

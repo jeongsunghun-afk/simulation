@@ -24,12 +24,24 @@ class SportClient:
 
     def __init__(self, path=CMD_PATH):
         self.path = path
+        self.vmax = VMAX; self.wmax = WMAX          # 조이스틱 풀스케일(보행속도 게이지로 live 조절)
         self.cmd = {'v': 0.0, 'vy': 0.0, 'w': 0.0, 'mode': 'stand_up',   # 시작=Ready(서기). Walk 눌러야 보행
-                    'body_h': 0.52, 'step_h': 0.15, 'euler': [0.0, 0.0, 0.0], 'gait': 0}
+                    'body_h': 0.52, 'step_h': 0.15, 'euler': [0.0, 0.0, 0.0], 'gait': 0,
+                    'vmax': VMAX, 'jump_seq': 0, 'home_seq': 0}   # jump_seq=점프 트리거, home_seq=Ready 기본자세복귀 트리거
         self._pub()
 
     def BodyHeight(self, h):                        # 서기 높이[m] (★보행중 무시 — 자세모드서만)
         self.cmd['body_h'] = float(h); self._pub()
+
+    def WalkSpeed(self, v):                         # 보행속도 게이지[m/s] — 조이스틱 풀스케일 (양 컨트롤러 공통)
+        self.vmax = float(v); self.cmd['vmax'] = float(v); self._pub()
+
+    def Jump(self):                                 # 점프 트리거(상승엣지로 컨트롤러가 offline 호핑 실행)
+        self.cmd['jump_seq'] = int(self.cmd.get('jump_seq', 0)) + 1; self._pub()
+
+    def Ready(self):                                # 서기 + 기본자세 복귀(home_seq 상승엣지 → 발 명목위치 호밍)
+        self.cmd['mode'] = 'stand_up'; self.cmd.update(v=0.0, vy=0.0, w=0.0)
+        self.cmd['home_seq'] = int(self.cmd.get('home_seq', 0)) + 1; self._pub()
 
     def StepHeight(self, h):                        # 발 들림[m] (launch 적용)
         self.cmd['step_h'] = float(h); self._pub()
@@ -108,12 +120,23 @@ def _status():
                   % (sc.cmd['v'], sc.cmd['vy'], sc.cmd['w'], sc.cmd['mode']))
 
 
-def _left(ax, ay):                                     # 좌스틱: 전후(ay)/측방(ax)
-    sc.Move(ay * VMAX, -ax * VMAX, sc.cmd['w']); _status()
+_last_left = [0.0, 0.0]                                 # 슬라이더 변경 시 live 재적용용 마지막 축
+_last_right = [0.0, 0.0]
+
+
+def _left(ax, ay):                                     # 좌스틱: 전후(ay)/측방(ax) — 풀스케일=보행속도 게이지
+    _last_left[:] = [ax, ay]
+    sc.Move(ay * sc.vmax, -ax * sc.vmax, sc.cmd['w']); _status()
 
 
 def _right(ax, ay):                                    # 우스틱: 선회(ax)
-    sc.Move(sc.cmd['v'], sc.cmd['vy'], -ax * WMAX); _status()
+    _last_right[:] = [ax, ay]
+    sc.Move(sc.cmd['v'], sc.cmd['vy'], -ax * sc.wmax); _status()
+
+
+def _set_walk_speed(v):                                # 보행속도 게이지 콜백 — vmax 갱신 + 현 입력 live 재적용
+    sc.WalkSpeed(v)
+    _left(_last_left[0], _last_left[1])
 
 
 left = JoyPad('joyL', 200, _left)
@@ -126,13 +149,14 @@ def _mode_btn(m):
 
 def _key(sender, app_data):                            # 키보드 백업: 화살표=이동, ,/. =선회, X=STOP
     k = app_data; s = 0.05
-    if k == dpg.mvKey_Up:      sc.Move(min(VMAX, sc.cmd['v'] + s), sc.cmd['vy'], sc.cmd['w'])
-    elif k == dpg.mvKey_Down:  sc.Move(max(-VMAX, sc.cmd['v'] - s), sc.cmd['vy'], sc.cmd['w'])
-    elif k == dpg.mvKey_Left:  sc.Move(sc.cmd['v'], min(VMAX, sc.cmd['vy'] + s), sc.cmd['w'])
-    elif k == dpg.mvKey_Right: sc.Move(sc.cmd['v'], max(-VMAX, sc.cmd['vy'] - s), sc.cmd['w'])
-    elif k == dpg.mvKey_Comma:  sc.Move(sc.cmd['v'], sc.cmd['vy'], min(WMAX, sc.cmd['w'] + s))
-    elif k == dpg.mvKey_Period: sc.Move(sc.cmd['v'], sc.cmd['vy'], max(-WMAX, sc.cmd['w'] - s))
+    if k == dpg.mvKey_Up:      sc.Move(min(sc.vmax, sc.cmd['v'] + s), sc.cmd['vy'], sc.cmd['w'])
+    elif k == dpg.mvKey_Down:  sc.Move(max(-sc.vmax, sc.cmd['v'] - s), sc.cmd['vy'], sc.cmd['w'])
+    elif k == dpg.mvKey_Left:  sc.Move(sc.cmd['v'], min(sc.vmax, sc.cmd['vy'] + s), sc.cmd['w'])
+    elif k == dpg.mvKey_Right: sc.Move(sc.cmd['v'], max(-sc.vmax, sc.cmd['vy'] - s), sc.cmd['w'])
+    elif k == dpg.mvKey_Comma:  sc.Move(sc.cmd['v'], sc.cmd['vy'], min(sc.wmax, sc.cmd['w'] + s))
+    elif k == dpg.mvKey_Period: sc.Move(sc.cmd['v'], sc.cmd['vy'], max(-sc.wmax, sc.cmd['w'] - s))
     elif k in (dpg.mvKey_X, dpg.mvKey_Spacebar): sc.StopMove()
+    elif k == dpg.mvKey_J: sc.Jump()
     else: return
     _status()
 
@@ -221,6 +245,10 @@ with dpg.theme() as _stop_theme:
     with dpg.theme_component(dpg.mvButton):
         dpg.add_theme_color(dpg.mvThemeCol_Button, (170, 45, 45))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (210, 65, 65))
+with dpg.theme() as _jump_theme:
+    with dpg.theme_component(dpg.mvButton):
+        dpg.add_theme_color(dpg.mvThemeCol_Button, (40, 120, 70))
+        dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (60, 160, 95))
 
 with dpg.window(tag='main'):
     dpg.add_text('02_Leg Teleop   (RBQ 스타일 · SportClient)')
@@ -236,13 +264,18 @@ with dpg.window(tag='main'):
     dpg.add_separator()
     dpg.add_text('모션', color=(170, 175, 195))
     with dpg.group(horizontal=True):
-        dpg.add_button(label='Ready 서기', width=120, callback=lambda: _mode_btn('stand_up'))
+        dpg.add_button(label='Ready 서기', width=120, callback=lambda: (sc.Ready(), _status()))
         dpg.add_button(label='Ground 눕기', width=120, callback=lambda: _mode_btn('stand_down'))
         dpg.add_button(label='Walk 보행', width=120, callback=lambda: _mode_btn('move'))
+        _jb = dpg.add_button(label='Jump 점프', width=110, callback=lambda: (sc.Jump(), _status()))
+        dpg.bind_item_theme(_jb, _jump_theme)
         _b = dpg.add_button(label='STOP', width=90, callback=lambda: (sc.StopMove(), _status()))
         dpg.bind_item_theme(_b, _stop_theme)
     dpg.add_separator()
-    dpg.add_text('높이 (Body=서기 높이·live / Step=발 들림·재시작 적용)', color=(170, 175, 195))
+    dpg.add_text('속도/높이 (Walk=보행속도 게이지·live / Body=서기 높이·live / Step=발 들림)', color=(170, 175, 195))
+    dpg.add_slider_float(label='Walk Speed [m/s]  (조이스틱 풀스케일 · 양 컨트롤러 공통)', tag='ws',
+                         min_value=0.0, max_value=1.0, default_value=VMAX,
+                         callback=lambda s, a: _set_walk_speed(a))
     dpg.add_slider_float(label='Body Height [m]  (서기만, 보행중 무시)', tag='bh',
                          min_value=0.34, max_value=0.52, default_value=0.52,
                          callback=lambda s, a: sc.BodyHeight(a))
@@ -250,7 +283,7 @@ with dpg.window(tag='main'):
                          min_value=0.05, max_value=0.20, default_value=0.15,
                          callback=lambda s, a: sc.StepHeight(a))
     dpg.add_separator()
-    dpg.add_text('키: ↑↓=전후  ←→=측방  ,/.=선회  X/Space=STOP', color=(140, 140, 155))
+    dpg.add_text('키: ↑↓=전후  ←→=측방  ,/.=선회  J=점프  X/Space=STOP', color=(140, 140, 155))
     dpg.add_text('', tag='status')
     dpg.add_text('채널: ' + CMD_PATH, color=(115, 118, 130))
     dpg.add_separator()
