@@ -82,7 +82,17 @@ class QuadSim:
             lim = self.m.jnt_limited.astype(bool)
             self.m.jnt_solref[lim] = [0.004, 1.0]              # 2*timestep, 빠른 복원
             self.m.jnt_solimp[lim] = [0.95, 0.99, 0.001, 0.5, 2.0]  # 높은 impedance
+        # ★다리무게 가설 검증: 다리 링크 질량/관성만 스케일 (LEG_MASS_SCALE, 기본1.0=원본)
+        _lms = float(os.environ.get('LEG_MASS_SCALE', '1.0'))
+        if _lms != 1.0:
+            for _b in range(self.m.nbody):
+                _bn = mujoco.mj_id2name(self.m, mujoco.mjtObj.mjOBJ_BODY, _b) or ''
+                if any(_s in _bn for _s in ('hip', 'thigh', 'calf', 'foot')):
+                    self.m.body_mass[_b] *= _lms; self.m.body_inertia[_b] *= _lms
         self.d = mujoco.MjData(self.m)
+        if _lms != 1.0:
+            mujoco.mj_setConst(self.m, self.d)
+            print('[LEG_MASS] 다리링크 ×%.2f → 총질량 %.1fkg' % (_lms, self.m.body_mass.sum()), flush=True)
         self.nv = self.m.nv
         self.nu = self.m.nu          # = 4*dof
         N = lambda kind, nm: mujoco.mj_name2id(self.m, kind, nm)
@@ -388,6 +398,21 @@ class QuadSim:
         P[:nv, :nv] += 1e-3 * np.eye(nv)
         for k in range(K):           # λ tracking
             P[sl(k), sl(k)] += w_lam * np.eye(3); g[sl(k)] -= w_lam * lam_des[contacts[k]]
+        # ★각운동량 보상(leg-heavy 고속): 총 centroidal 각운동량 h_ω 를 GRF 모멘트로 감쇠.
+        #   Σ rᵢ×λᵢ ≈ −Kd·h_ω  (SRBD MPC가 무시하는 다리 swing 각운동량을 WBIC가 보상 → 고속 yaw/pitch 드리프트↓)
+        _w_am = float(os.environ.get('W_AM', '0'))
+        if _w_am > 0 and K > 0:
+            mujoco.mj_subtreeVel(m, d)
+            h_ang = d.subtree_angmom[0].copy()           # 총 각운동량 about CoM (world)
+            hdes = -float(os.environ.get('KD_AM', '8')) * h_ang
+            com = d.subtree_com[0]
+            A_am = np.zeros((3, nz))
+            for k, c in enumerate(contacts):
+                r = self.foot_point(c) - com             # 발 위치 − CoM
+                A_am[0, sl(k)] = [0.0, -r[2], r[1]]      # skew(r)
+                A_am[1, sl(k)] = [r[2], 0.0, -r[0]]
+                A_am[2, sl(k)] = [-r[1], r[0], 0.0]
+            P += _w_am * (A_am.T @ A_am); g -= _w_am * (A_am.T @ hdes)
         Js = [self.foot_jac(c) for c in contacts]
         A = np.zeros((6, nz)); b = -h[0:6]; A[:, :nv] = M[0:6, :]
         for k, J in enumerate(Js):
@@ -994,7 +1019,17 @@ def mode_trot():
         Jc = np.zeros((3, q.nv)); mujoco.mj_jacSubtreeCom(q.m, q.d, Jc, 0)
         vcom = Jc @ q.d.qvel
         v_des = np.array([vx_w, vy_w])       # Raibert 발배치 = world 속도(전진+측방, 선회 회전반영)
-        rai = np.clip(0.5 * T_ST * v_des + KCAP * (vcom[:2] - v_des), -0.14, 0.14)
+        v_fb = vcom[:2].copy()               # 발배치 피드백 속도 (기본=CoM 속도)
+        # ★ALIP: CoM속도 대신 각운동량 반영 속도 v_alip = vcom + [L_y,−L_x]/(m·H).
+        #   centroidal 각운동량 L(다리 swing momentum 포함)을 발배치에 녹여 leg-heavy 고속 안정화.
+        if os.environ.get('ALIP', '1') != '0':       # 기본 ON (정상속도 무해·고속 도움; ALIP=0로 끔)
+            mujoco.mj_subtreeVel(q.m, q.d)
+            L = q.d.subtree_angmom[0]                       # centroidal 각운동량 (world, 다리 포함)
+            H = max(0.1, float(q.d.subtree_com[0][2]))      # CoM 높이
+            mtot = float(q.m.body_mass.sum())
+            _ag = float(os.environ.get('ALIP_G', '1.0'))    # ALIP 항 가중(튜닝)
+            v_fb = v_fb + _ag * np.array([L[1], -L[0]]) / (mtot * H)
+        rai = np.clip(0.5 * T_ST * v_des + KCAP * (v_fb - v_des), -0.14, 0.14)
         q.foot_targets = [None, None, None, None]
         dt = q.m.opt.timestep; swing = {}
         Rw = np.array([[cy, -sy], [sy, cy]])                 # body→world(현재 yaw)

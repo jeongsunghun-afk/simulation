@@ -284,7 +284,9 @@ for _ia in (9, 13):
 w_x = np.diag(np.array(w_basepos + _wlp + w_basevel + _wlv))   # _9: nu=14 비균일
 w_u = np.eye(nu) * 1e-4
 w_LFRF = float(_os.environ.get("WFRAME", "1000"))
-w_cent = np.diag(np.array([0.04, 0.04, 0, 0, 0, 0]))   # go2와 동일
+_wcl = float(_os.environ.get("WCENT_LIN", "0.04"))     # 선형 운동량 xy 가중(기본 go2값)
+_wca = float(_os.environ.get("WCENT_ANG", "0"))        # ★각운동량 가중(기본0=go2; leg-heavy 고속 yaw/pitch 드리프트 억제 실험)
+w_cent = np.diag(np.array([_wcl, _wcl, 0, _wca, _wca, _wca]))
 w_forces_lin = np.array([0.0001, 0.0001, 0.0001])
 
 problem_conf = dict(

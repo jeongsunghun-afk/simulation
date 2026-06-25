@@ -20,15 +20,15 @@ G = 9.81
 
 
 def _hop_action(M, stance, x_ref, dt, w_base_z=50.0, w_base_vz=1.0, w_ori=150.0,
-                w_joint=0.2, w_jvel=0.1, w_fric=2.0):
-    """호핑 전용 per-step 액션 — 위상별 가중 조절(push=vz강조, flight=자세홀드).
-       build_action 과 동일 구조지만 base_z/base_vz 가중을 인자로 노출."""
+                w_joint=0.2, w_jvel=0.1, w_fric=2.0, w_base_x=0.0, w_base_vx=1.0):
+    """호핑 전용 per-step 액션 — 위상별 가중 조절(push=vz/vx강조, flight=자세홀드).
+       build_action 과 동일 구조지만 base x/z·vx/vz 가중을 인자로 노출(전방점프 지원)."""
     cm = QN._contact_multiple(M, stance)
     cost = crocoddyl.CostModelSum(M.state, M.nu)
-    w_state = np.array([0.0, 0.0, w_base_z, w_ori, w_ori, 10.0] +   # base pos(xy자유) + ori
-                       [w_joint] * M.nu +                            # 관절각
-                       [1.0, 1.0, w_base_vz, 1.0, 1.0, 1.0] +        # base vel (vz 강조 가능)
-                       [w_jvel] * M.nu)                              # 관절속도
+    w_state = np.array([w_base_x, 0.0, w_base_z, w_ori, w_ori, 10.0] +   # base pos(x=전방추종 가능, y자유) + ori
+                       [w_joint] * M.nu +                                # 관절각
+                       [w_base_vx, 1.0, w_base_vz, 1.0, 1.0, 1.0] +      # base vel (vx=전진·vz=상승 강조 가능)
+                       [w_jvel] * M.nu)                                  # 관절속도
     cost.addCost('xreg', crocoddyl.CostModelResidual(
         M.state, crocoddyl.ActivationModelWeightedQuad(w_state ** 2),
         crocoddyl.ResidualModelState(M.state, x_ref, M.nu)), 1.0)
@@ -132,10 +132,10 @@ def solve_hop(apex=0.04, dt=0.01, n_settle=30, n_push=25, n_land=70,
     return M, xs, us, sched
 
 
-def solve_jump(stand_z=0.52, crouch_z=0.30, apex=0.04, dt=0.01,
+def solve_jump(stand_z=0.52, crouch_z=0.30, apex=0.04, dist=0.0, dt=0.01,
                n_load=35, n_push=25, n_land=35, n_recover=50, z_takeoff=0.52,
-               save='jump_stand.npz', view=False):
-    """GUI용 자체완결 점프: 서기(stand_z)→웅크림(crouch_z)→푸시→비행→착지→서기.
+               save=None, view=False):
+    """GUI용 자체완결 점프: 서기→웅크림→푸시→비행→착지→서기. dist>0=전방점프(전진 dist m).
        MuJoCo 액추에이터 순서로 export(q*/dq*/tau*) → quad_sim 이 pin 없이 직접 재생."""
     import sys
     _a = sys.argv; sys.argv = [_a[0]]
@@ -148,45 +148,51 @@ def solve_jump(stand_z=0.52, crouch_z=0.30, apex=0.04, dt=0.01,
         qs = quad_sim.QuadSim()
     finally:
         sys.argv = _a
+    if save is None:
+        save = 'jump_fwd.npz' if dist > 1e-6 else 'jump_stand.npz'
     pin2mj, mj_to_pin = QN._bridge(M, qs)
     nq = M.model.nq; nv = M.model.nv; nu = M.nu
 
-    def state_at(z):                          # 주어진 base 높이의 crouch 자세 → pin 전상태
+    def state_at(z, x0=0.0):                  # 주어진 base 높이·x의 crouch 자세 → pin 전상태
         qs.crouch_home(z); mujoco.mj_forward(qs.m, qs.d)
-        return mj_to_pin(qs.d).copy()
+        s = mj_to_pin(qs.d).copy(); s[0] += x0; return s
     x_stand = state_at(stand_z); x_crouch = state_at(crouch_z)
     vz_tk = float(np.sqrt(2 * G * apex)); n_flight = max(4, int(round(2 * vz_tk / G / dt)))
-    x_push = x_crouch.copy(); x_push[2] = z_takeoff + apex; x_push[nq + 2] = vz_tk
-    x_air = x_crouch.copy(); x_air[2] = z_takeoff + apex; x_air[nq + 2] = 0.0
-    print('[JUMP] stand z=%.3f → crouch z=%.3f → apex z=%.3f (vz_tk=%.2f, flight=%d)' %
-          (stand_z, crouch_z, z_takeoff + apex, vz_tk, n_flight))
+    vx_tk = dist / (n_flight * dt) if dist > 1e-6 else 0.0           # 전방 이륙속도(비행으로 dist 커버)
+    x_push = x_crouch.copy(); x_push[2] = z_takeoff + apex; x_push[nq + 2] = vz_tk; x_push[nq + 0] = vx_tk
+    x_air = x_crouch.copy(); x_air[2] = z_takeoff + apex; x_air[0] = dist * 0.5; x_air[nq + 0] = vx_tk
+    x_land = state_at(crouch_z, x0=dist)                             # 전방 착지(웅크림)
+    x_recover = state_at(stand_z, x0=dist)                           # 전방 서기
+    wbx = 50.0 if dist > 1e-6 else 0.0; wbvx = 50.0 if dist > 1e-6 else 1.0
+    print('[JUMP] stand z=%.3f→crouch z=%.3f→apex z=%.3f  dist=%.2fm (vz_tk=%.2f vx_tk=%.2f flight=%d)' %
+          (stand_z, crouch_z, z_takeoff + apex, dist, vz_tk, vx_tk, n_flight))
 
     actions, sched = [], []
-    for _ in range(n_load):                                          # 웅크림(squat down)
+    for _ in range(n_load):                                          # 웅크림(squat down, x=0)
         actions.append(_hop_action(M, M.legs, x_crouch, dt, w_base_z=120.0)); sched.append('load')
-    for _ in range(n_push):                                          # 푸시(이륙)
-        actions.append(_hop_action(M, M.legs, x_push, dt, w_base_z=200.0, w_base_vz=50.0))
+    for _ in range(n_push):                                          # 푸시(이륙: 상승+전진)
+        actions.append(_hop_action(M, M.legs, x_push, dt, w_base_z=200.0, w_base_vz=50.0, w_base_vx=wbvx))
         sched.append('push')
-    for _ in range(n_flight):                                        # 비행(접촉제거=탄도)
-        actions.append(_hop_action(M, [], x_air, dt, w_base_z=0.0, w_base_vz=0.0, w_joint=2.0))
+    for _ in range(n_flight):                                        # 비행(접촉제거=탄도, 전방 이동)
+        actions.append(_hop_action(M, [], x_air, dt, w_base_z=0.0, w_base_vz=0.0, w_base_vx=0.0, w_joint=2.0))
         sched.append('flight')
-    for _ in range(n_land):                                          # 착지 흡수→웅크림
-        actions.append(_hop_action(M, M.legs, x_crouch, dt, w_base_z=80.0)); sched.append('land')
-    for _ in range(n_recover):                                       # 다시 서기
-        actions.append(_hop_action(M, M.legs, x_stand, dt, w_base_z=80.0)); sched.append('recover')
-    w_T = np.ones(2 * nv); w_T[:3] = [0, 0, 10]
-    terminal = QN.build_terminal(M, x_stand, w=w_T)
+    for _ in range(n_land):                                          # 전방 착지 흡수→웅크림
+        actions.append(_hop_action(M, M.legs, x_land, dt, w_base_z=80.0, w_base_x=wbx)); sched.append('land')
+    for _ in range(n_recover):                                       # 전방서 다시 서기
+        actions.append(_hop_action(M, M.legs, x_recover, dt, w_base_z=80.0, w_base_x=wbx)); sched.append('recover')
+    w_T = np.ones(2 * nv); w_T[:3] = [10.0 if dist > 1e-6 else 0.0, 0, 10]
+    terminal = QN.build_terminal(M, x_recover, w=w_T)
     problem = crocoddyl.ShootingProblem(x_stand, actions, terminal)
     solver = crocoddyl.SolverFDDP(problem)
     N = len(actions); t0 = time.time()
     done = solver.solve([x_stand] * (N + 1), [np.zeros(nu)] * N, 500, False, 1e-9)
     xs = np.array(solver.xs); us = np.array(solver.us)
-    bz = xs[:, 2]; footz = np.array([_foot_z(M, x[:nq]) for x in xs])
+    bz = xs[:, 2]; bx = xs[:, 0]; footz = np.array([_foot_z(M, x[:nq]) for x in xs])
     tilts = np.array([_tilt(x) for x in xs]); air = (footz > 0.02).sum()
     print('[JUMP] done=%s iters=%d time=%.0fms  base_z 시작%.3f→정점%.3f→끝%.3f' %
           (done, solver.iter, (time.time() - t0) * 1e3, bz[0], bz.max(), bz[-1]))
-    print('[JUMP] 공중=%d knots(%.0fms) 발최대%.3f tilt최대%.1f° 토크max%.1f' %
-          (air, air * dt * 1e3, footz.max(), tilts.max(), np.abs(us).max()))
+    print('[JUMP] base_x 시작%.3f→끝%.3f (전진 %.3fm, 목표 %.2f)  공중=%d knots(%.0fms) 발최대%.3f tilt최대%.1f° 토크max%.1f' %
+          (bx[0], bx[-1], bx[-1] - bx[0], dist, air, air * dt * 1e3, footz.max(), tilts.max(), np.abs(us).max()))
 
     # MuJoCo 액추에이터 순서로 변환·저장
     mnu = qs.m.nu
@@ -201,8 +207,8 @@ def solve_jump(stand_z=0.52, crouch_z=0.30, apex=0.04, dt=0.01,
              sched=np.array(sched, dtype=object), stand_z=stand_z)
     print('[JUMP] 저장(MuJoCo순서):', path)
     ok = done and air >= 4 and footz.max() > 0.015 and tilts.max() < 25 \
-        and abs(bz[-1] - stand_z) < 0.05
-    print('[JUMP] 결과:', '✅ 서기→점프→서기 자체완결 궤적' if ok else '❌ 미흡')
+        and abs(bz[-1] - stand_z) < 0.06 and (dist < 1e-6 or abs((bx[-1] - bx[0]) - dist) < 0.12)
+    print('[JUMP] 결과:', '✅ %s점프 자체완결 궤적' % ('전방 ' if dist > 1e-6 else '') if ok else '❌ 미흡')
     if view:
         QN.replay_mujoco(M, xs, dt, loops=4)
     return path
@@ -297,6 +303,7 @@ if __name__ == '__main__':
     ap.add_argument('--kp', type=float, default=120.0)
     ap.add_argument('--kd', type=float, default=3.0)
     ap.add_argument('--apex', type=float, default=0.04)
+    ap.add_argument('--dist', type=float, default=0.0, help='전방 점프거리[m] (0=제자리)')
     ap.add_argument('--dt', type=float, default=0.01)
     ap.add_argument('--settle', type=int, default=30)
     ap.add_argument('--push', type=int, default=25)
@@ -306,7 +313,7 @@ if __name__ == '__main__':
     ap.add_argument('--save', default=None)
     a = ap.parse_args()
     if a.jump:
-        solve_jump(apex=a.apex, view=a.view)
+        solve_jump(apex=a.apex, dist=a.dist, view=a.view, save=a.save)
     elif a.track:
         track_hop(npz=a.npz, kp=a.kp, kd=a.kd, view=a.view)
     else:
