@@ -1,6 +1,8 @@
 import numpy as np
 import mujoco as _mj
-_GO2_MJCF="/home/jsh/문서/jsh/simulation/quad/quad_real.mjcf"
+import os as _os0
+# ★점접촉 MJCF(OCP 점접촉 가정과 일치) — 메시발은 OCP와 불일치해 발산. fulldynamics와 동일.
+_GO2_MJCF=_os0.environ.get("MJCF","/home/jsh/문서/jsh/simulation/quad/quad_real_pt.mjcf")
 _PIN2MJ=[8,9,10,11,12,13,0,1,2,3,4,5,6,7]  # pin(FL,FR,HL,HR)→mjcf(HL,HR,FL,FR)
 class MujocoRobot:
     """simple-mpc device(BulletRobot) 인터페이스를 MuJoCo로 구현. 토크는 KinodynamicsID(TSID) 출력.
@@ -96,12 +98,19 @@ fref[2] = -model_handler.getMass() / nk * gravity[2]
 u0 = np.concatenate((fref, fref, fref, fref, np.zeros(model_handler.getModel().nv - 6)))
 dt_mpc = 0.01
 
-w_basepos = [0, 0, 100, float(_os.environ.get("WBORI","200")), float(_os.environ.get("WBORI","200")), 0]
+_wbp = float(_os.environ.get("WBPOS", "0"))   # ★base x,y 위치 가중(기본0=자유=보행용). STAND/드리프트엔 >0로 앵커
+_wbz = float(_os.environ.get("WBZ", "100"))   # base z 가중(FullDynamics=0=발프레임에 위임)
+w_basepos = [_wbp, _wbp, _wbz, float(_os.environ.get("WBORI","200")), float(_os.environ.get("WBORI","200")), 0]
 w_legpos = [1, 1, 1, 1]
 
 w_basevel = [float(_os.environ.get("WBVX","60")), 10, 10, 10, 10, 10]
 w_legvel = [0.1, 0.1, 0.1, 0.1]
-w_x = np.array(w_basepos + [1.0]*nu + w_basevel + [0.1]*nu)   # _9: nu=14 비균일
+# ★FullDynamics 참조: 뒷발목(pin idx 9=HL_foot,13=HR_foot)은 point-foot서 floppy → posture/vel 강하게 핀고정
+_ankw = float(_os.environ.get("ANKLE_W", "50")); _ankdw = float(_os.environ.get("ANKLE_DW", "5"))
+_wlp = [1.0]*nu; _wlv = [0.1]*nu
+for _ia in (9, 13):
+    _wlp[_ia] = _ankw; _wlv[_ia] = _ankdw
+w_x = np.array(w_basepos + _wlp + w_basevel + _wlv)   # _9: nu=14 비균일
 w_x = np.diag(w_x)
 w_linforce = np.array([0.01, 0.01, 0.01])
 w_u = np.concatenate(
@@ -137,8 +146,8 @@ problem_conf = dict(
     Lfoot=0.01,
     Wfoot=0.01,
     kinematics_limits=True,
-    force_cone=False,
-    land_cstr=False,
+    force_cone=_os.environ.get("FCONE","0")!="0",    # FullDynamics는 ON
+    land_cstr=_os.environ.get("LAND","0")!="0",       # FullDynamics는 ON
 )
 T = 50
 
@@ -153,8 +162,8 @@ T_ss = 30
 mpc_conf = dict(
     support_force=-model_handler.getMass() * gravity[2],
     TOL=1e-4,
-    mu_init=1e-8,
-    max_iters=1,
+    mu_init=float(_os.environ.get("MU_INIT", "1e-8")),     # 정규화(↑=안정·보수). 02_Leg 발산 완화
+    max_iters=int(_os.environ.get("MAXITER", "1")),        # RTI 반복(↑=수렴↑·느림)
     num_threads=8,
     swing_apex=0.15,
     T_fly=T_ss,
@@ -189,10 +198,13 @@ contact_phase_lift = {
     "HL_foot": False,
     "HR_foot": False,
 }
-contact_phases = [contact_phase_quadru] * T_ds
-contact_phases += [contact_phase_lift_FL] * T_ss
-contact_phases += [contact_phase_quadru] * T_ds
-contact_phases += [contact_phase_lift_FR] * T_ss
+if _os.environ.get("STAND"):                              # ★서있기: 전 스탠스(stepping 없음) — 지지 격리·튜닝용
+    contact_phases = [contact_phase_quadru] * (2 * (T_ds + T_ss))
+else:
+    contact_phases = [contact_phase_quadru] * T_ds
+    contact_phases += [contact_phase_lift_FL] * T_ss
+    contact_phases += [contact_phase_quadru] * T_ds
+    contact_phases += [contact_phase_lift_FR] * T_ss
 mpc.generateCycleHorizon(contact_phases)
 
 """ Interpolation """
@@ -206,9 +218,9 @@ kino_ID_settings.kp_base = float(_os.environ.get("KP_BASE","7.0"))
 kino_ID_settings.kp_posture = float(_os.environ.get("KP_POSTURE","10.0"))
 kino_ID_settings.kp_contact = float(_os.environ.get("KP_CONTACT","10.0"))
 kino_ID_settings.w_base = float(_os.environ.get("W_BASE","100.0"))
-kino_ID_settings.w_posture = 1.0
-kino_ID_settings.w_contact_force = 1.0
-kino_ID_settings.w_contact_motion = 1.0
+kino_ID_settings.w_posture = float(_os.environ.get("W_POSTURE","1.0"))
+kino_ID_settings.w_contact_force = float(_os.environ.get("W_CFORCE","1.0"))
+kino_ID_settings.w_contact_motion = float(_os.environ.get("W_CMOTION","1.0"))   # ★발 고정(미끄럼방지). ↑=firm
 
 kino_ID = KinodynamicsID(model_handler, dt_simu, kino_ID_settings)
 
@@ -273,15 +285,6 @@ for step in range(int(_os.environ.get("STEPS","300"))):
         if _z<0.15:
             print("[MJ] ❌ 전복 @%.2fs"%(step*0.01)); _fell=True; break
     # print("Time " + str(step))
-    land_LF = mpc.getFootLandCycle("FL_foot")
-    land_RF = mpc.getFootLandCycle("HL_foot")
-    takeoff_LF = mpc.getFootTakeoffCycle("FL_foot")
-    takeoff_RF = mpc.getFootTakeoffCycle("HL_foot")
-    print(
-        "takeoff_RF = " + str(takeoff_RF) + ", landing_RF = ",
-        str(land_RF) + ", takeoff_LF = " + str(takeoff_LF) + ", landing_LF = ",
-        str(land_LF),
-    )
     start = time.time()
     mpc.iterate(x_measured)
     end = time.time()
@@ -370,6 +373,9 @@ force_FR = np.array(force_FR)
 force_RL = np.array(force_RL)
 force_RR = np.array(force_RR)
 solve_time = np.array(solve_time)
+if len(solve_time):
+    print("[KINO_TIMING] mpc.iterate 평균=%.2fms 최대=%.2fms (%.0fHz 가능)"
+          % (solve_time.mean()*1000, solve_time.max()*1000, 1000.0/(solve_time.mean()*1000)), flush=True)
 FL_measured = np.array(FL_measured)
 FR_measured = np.array(FR_measured)
 RL_measured = np.array(RL_measured)
