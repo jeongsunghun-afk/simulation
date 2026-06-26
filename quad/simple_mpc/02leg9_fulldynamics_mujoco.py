@@ -314,7 +314,8 @@ mpc_conf = dict(support_force=-model_handler.getMass() * gravity[2], TOL=1e-4, m
                 max_iters=int(_os.environ.get("ITERS", "1")), num_threads=int(_os.environ.get("NTH", "8")),
                 swing_apex=_apex0,
                 T_fly=T_ss, T_contact=T_ds, timestep=dt_mpc,
-                capture_gain=float(_os.environ.get("KCAP","0")), alip_gain=float(_os.environ.get("ALIP","0")))  # ★반응형 발배치
+                capture_gain=float(_os.environ.get("KCAP","0")), alip_gain=float(_os.environ.get("ALIP","0")),  # ★반응형 발배치
+                predict_foot=float(_os.environ.get("PREDFOOT","0")))  # ★OCP 예측 기반 발배치(Raibert-OCP 오차보정)
 mpc = MPC(mpc_conf, dynproblem)
 
 cq = {"FL_foot": True, "FR_foot": True, "HL_foot": True, "HR_foot": True}
