@@ -1,0 +1,77 @@
+diff --git a/bindings/expose-mpc.cpp b/bindings/expose-mpc.cpp
+index b4243d4..5eac307 100644
+--- a/bindings/expose-mpc.cpp
++++ b/bindings/expose-mpc.cpp
+@@ -40,6 +40,8 @@ namespace simple_mpc
+       conf.T_fly = bp::extract<int>(settings["T_fly"]);
+       conf.T_contact = bp::extract<int>(settings["T_contact"]);
+       conf.timestep = bp::extract<double>(settings["timestep"]);
++      if (settings.has_key("capture_gain")) conf.capture_gain = bp::extract<double>(settings["capture_gain"]);
++      if (settings.has_key("alip_gain")) conf.alip_gain = bp::extract<double>(settings["alip_gain"]);
+ 
+       return new MPC{conf, problem};
+     }
+@@ -57,6 +59,8 @@ namespace simple_mpc
+       settings["T_fly"] = conf.T_fly;
+       settings["T_contact"] = conf.T_contact;
+       settings["timestep"] = conf.timestep;
++      settings["capture_gain"] = conf.capture_gain;
++      settings["alip_gain"] = conf.alip_gain;
+ 
+       return settings;
+     }
+diff --git a/include/simple-mpc/mpc.hpp b/include/simple-mpc/mpc.hpp
+index f7efccc..7127eb7 100644
+--- a/include/simple-mpc/mpc.hpp
++++ b/include/simple-mpc/mpc.hpp
+@@ -46,6 +46,10 @@ namespace simple_mpc
+     int T_contact = 20;
+     size_t T = 100;
+     double timestep = 0.01;
++
++    // ★반응형 발배치(capture/ALIP) — 측정 속도오차로 발 착지점 보정(표류 잡기). 0=off=순수Raibert
++    double capture_gain = 0.0;   // capture-point 피드백 게인 KCAP
++    double alip_gain = 0.0;      // ALIP 각운동량 보정 게인 (vcom += g*[Ly,-Lx]/(mH))
+   };
+ 
+   /**
+diff --git a/src/inverse-dynamics/kinodynamics-id.cpp b/src/inverse-dynamics/kinodynamics-id.cpp
+index 0273513..1929bd7 100644
+--- a/src/inverse-dynamics/kinodynamics-id.cpp
++++ b/src/inverse-dynamics/kinodynamics-id.cpp
+@@ -221,7 +221,7 @@ void KinodynamicsID::solve(
+   const pinocchio::Motion v_world_aligned{oMb_rotation.act(pinocchio::Motion(targetVelBase_))};
+   const pinocchio::Motion a_world_aligned{oMb_rotation.act(pinocchio::Motion(targetAccBase_))};
+   sampleBase_.setDerivative(v_world_aligned.toVector());
+-  sampleBase_.setDerivative(a_world_aligned.toVector());
++  sampleBase_.setSecondDerivative(a_world_aligned.toVector());   // ★버그수정: 가속은 setSecondDerivative (이전 setDerivative=속도 덮어씀)
+   baseTask_->setReference(sampleBase_);
+ 
+   // Solve QP
+diff --git a/src/mpc.cpp b/src/mpc.cpp
+index b68da21..829aa99 100644
+--- a/src/mpc.cpp
++++ b/src/mpc.cpp
+@@ -296,6 +296,22 @@ namespace simple_mpc
+       next_pose_.head<2>() = data_handler_->getFootRefPose(foot_nb).translation().head<2>();
+       next_pose_.head<2>() += (velocity_base_.head<2>() + velocity_base_[5] * twist_vect_)
+                               * (settings_.T_fly + settings_.T_contact) * settings_.timestep;
++      // ★capture/ALIP 피드백: 측정 속도오차만큼 발 착지점 이동(quad_sim식, 표류 잡기). capture_gain=0이면 비활성
++      if (settings_.capture_gain > 0.0)
++      {
++        const RobotDataHandler::CentroidalStateVector cs = data_handler_->getCentroidalState();  // [com, linmom, angmom]
++        const double mass = ocp_handler_->getModelHandler().getMass();
++        const double H = cs[2] > 0.1 ? cs[2] : 0.1;
++        const Eigen::Matrix3d Rb = data_handler_->getBaseFramePose().rotation();
++        const Eigen::Vector3d vcom_b = Rb.transpose() * (cs.segment<3>(3) / mass);   // base frame CoM 속도
++        const Eigen::Vector3d L_b = Rb.transpose() * cs.tail<3>();                    // base frame 각운동량
++        Eigen::Vector2d v_fb;                                                          // ALIP: vcom + g*[Ly,-Lx]/(mH)
++        v_fb << vcom_b[0] + settings_.alip_gain * L_b[1] / (mass * H),
++                vcom_b[1] - settings_.alip_gain * L_b[0] / (mass * H);
++        Eigen::Vector2d cap = settings_.capture_gain * (v_fb - velocity_base_.head<2>());
++        cap = cap.cwiseMax(-0.15).cwiseMin(0.15);                                       // 과도 착지 방지 클립
++        next_pose_.head<2>() += cap;
++      }
+       next_pose_[2] = data_handler_->getFootPose(foot_nb).translation()[2];
+ 
+       foot_trajectories_.updateTrajectory(
