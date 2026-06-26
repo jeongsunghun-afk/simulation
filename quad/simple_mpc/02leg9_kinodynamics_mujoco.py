@@ -135,7 +135,7 @@ _wbz = float(_os.environ.get("WBZ", "100"))   # base z 가중(FullDynamics=0=발
 w_basepos = [_wbp, _wbp, _wbz, float(_os.environ.get("WBORI","200")), float(_os.environ.get("WBORI","200")), 0]
 w_legpos = [1, 1, 1, 1]
 
-w_basevel = [float(_os.environ.get("WBVX","60")), 10, 10, 10, 10, 10]
+w_basevel = [float(_os.environ.get("WBVX","60")), float(_os.environ.get("WBVY","10")), 10, 10, 10, float(_os.environ.get("WBWZ","10"))]  # ★측방/yaw 가중 env(드리프트 억제)
 w_legvel = [0.1, 0.1, 0.1, 0.1]
 # ★FullDynamics 참조: 뒷발목(pin idx 9=HL_foot,13=HR_foot)은 point-foot서 floppy → posture/vel 강하게 핀고정
 _ankw = float(_os.environ.get("ANKLE_W", "50")); _ankdw = float(_os.environ.get("ANKLE_DW", "5"))

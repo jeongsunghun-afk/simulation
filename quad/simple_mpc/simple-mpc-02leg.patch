@@ -57,7 +57,7 @@ index 0273513..1929bd7 100644
  
    // Solve QP
 diff --git a/src/mpc.cpp b/src/mpc.cpp
-index b68da21..75f063a 100644
+index b68da21..7ce6ab9 100644
 --- a/src/mpc.cpp
 +++ b/src/mpc.cpp
 @@ -10,6 +10,7 @@
@@ -68,14 +68,15 @@ index b68da21..75f063a 100644
  
  namespace simple_mpc
  {
-@@ -277,6 +278,24 @@ namespace simple_mpc
+@@ -277,6 +278,25 @@ namespace simple_mpc
  
    void MPC::updateStepTrackerReferences()
    {
 +    // ★A+B(RTI 반응형 발배치): capture-조정 반응형 속도 v_eff를 [발배치와 몸통참조에 같은 값]으로 → 일관성(RTI도 추종가능)
 +    //   기존 실패원인=발만 옮기고 몸통참조는 velocity_base_ 유지→불일치. v_eff 공유로 해소. capture_gain=0이면 v_eff=velocity_base_(기존동작)
 +    Vector6d v_eff = velocity_base_;
-+    if (settings_.capture_gain > 0.0)
++    const double _capg = settings_.capture_gain + settings_.w_foot_ref;   // ★capture_gain·w_foot_ref 둘다 v_eff로 → 발배치+setVelocityBase(body) 동시조정(일관)
++    if (_capg > 0.0)
 +    {
 +      const RobotDataHandler::CentroidalStateVector cs = data_handler_->getCentroidalState();  // [com, linmom, angmom]
 +      const double mass = ocp_handler_->getModelHandler().getMass();
@@ -86,14 +87,14 @@ index b68da21..75f063a 100644
 +      Eigen::Vector2d v_fb;                                                          // ALIP: vcom + g*[Ly,-Lx]/(mH)
 +      v_fb << vcom_b[0] + settings_.alip_gain * L_b[1] / (mass * H),
 +              vcom_b[1] - settings_.alip_gain * L_b[0] / (mass * H);
-+      Eigen::Vector2d dv = settings_.capture_gain * (v_fb - velocity_base_.head<2>());  // 측정 속도오차 피드백
++      Eigen::Vector2d dv = _capg * (v_fb - velocity_base_.head<2>());                // 측정 속도오차 피드백
 +      dv = dv.cwiseMax(-0.5).cwiseMin(0.5);                                          // 반응 속도오프셋 클립
 +      v_eff.head<2>() += dv;
 +    }
      for (auto const & name : ee_names_)
      {
        const size_t foot_nb = ocp_handler_->getModelHandler().getFootNb(name);
-@@ -288,14 +307,43 @@ namespace simple_mpc
+@@ -288,14 +308,27 @@ namespace simple_mpc
        if (foot_land_time < settings_.T_fly)
          update = false;
  
@@ -120,27 +121,11 @@ index b68da21..75f063a 100644
 +        next_pose_.head<2>() += (v_eff.head<2>() + v_eff[5] * twist_vect_)            // ★발배치=v_eff(반응형 Raibert)
 +                                * (settings_.T_fly + settings_.T_contact) * settings_.timestep;
 +      }
-+      // ★STEP2: capture-point cost 참조(측정 CoM기반 ALIP). 측방드리프트 타깃. w_foot_ref=0이면 baseline
-+      if (settings_.w_foot_ref > 0.0)
-+      {
-+        const RobotDataHandler::CentroidalStateVector cs = data_handler_->getCentroidalState();  // [com, linmom, angmom] 측정값
-+        const double mass = ocp_handler_->getModelHandler().getMass();
-+        const double zc = cs[2] > 0.1 ? cs[2] : 0.1;
-+        const double omega = std::sqrt(9.81 / zc);                                   // LIPM 주파수 √(g/z)
-+        const Eigen::Matrix3d Rb = data_handler_->getBaseFramePose().rotation();
-+        const Eigen::Vector3d vcom_b = Rb.transpose() * (cs.segment<3>(3) / mass);   // base frame CoM 속도(측정)
-+        const Eigen::Vector3d L_b = Rb.transpose() * cs.tail<3>();                    // base frame 각운동량(측정)
-+        Eigen::Vector2d v_alip;                                                       // ALIP 보정 CoM 속도
-+        v_alip << vcom_b[0] + settings_.alip_gain * L_b[1] / (mass * zc),
-+                  vcom_b[1] - settings_.alip_gain * L_b[0] / (mass * zc);
-+        Eigen::Vector2d cap = settings_.w_foot_ref * (v_alip - velocity_base_.head<2>()) / omega;  // capture-point 오프셋
-+        cap = cap.cwiseMax(-0.15).cwiseMin(0.15);                                     // 스텝한계 클립
-+        next_pose_.head<2>() += cap;
-+      }
++      // ★STEP2(개선): w_foot_ref는 위 v_eff 블록으로 일원화됨(발배치 Raibert + setVelocityBase body참조 동시조정)
        next_pose_[2] = data_handler_->getFootPose(foot_nb).translation()[2];
  
        foot_trajectories_.updateTrajectory(
-@@ -309,7 +357,7 @@ namespace simple_mpc
+@@ -309,7 +342,7 @@ namespace simple_mpc
      }
  
      ocp_handler_->setReferenceState(ocp_handler_->getSize() - 1, x_reference_);
