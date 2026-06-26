@@ -156,6 +156,11 @@ w_u = np.concatenate(
 )
 w_u = np.diag(w_u)
 w_LFRF = 2000
+# ★STEP3: 발을 OCP가 더 자유롭게 최적화(footstep adaptation). w_frame↓ → 발 참조구속 완화 → OCP가 최적 foothold 선택.
+#   발은 이미 q통한 결정변수이고 reachability는 kinematics_limits(qmin/qmax)가 제공. FOOT_DECISION=0=baseline(w_frame full).
+_fd = float(_os.environ.get("FOOT_DECISION","0"))
+if _fd > 0: w_LFRF = w_LFRF / (1.0 + 9.0 * min(_fd, 1.0))   # FD=1 → w_frame 10%(거의 자유)
+if _fd > 0: print("[FOOT_DECISION] w_frame %d→%.0f (발 자유최적화)" % (2000, w_LFRF), flush=True)
 _wcap = float(_os.environ.get("WCENT_ANG_P","0.1"))   # ★pitch/roll 각운동량 가중(02_Leg 다리79%=pitch각모멘텀 폭증, 0.1로 못잡음)
 _wcdp = float(_os.environ.get("WCENTDER_ANG_P","0.1"))
 w_cent_lin = np.array([0.0, 0.0, 1])
