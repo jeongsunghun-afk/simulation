@@ -857,6 +857,7 @@ def mode_trot():
          'Vs': 0.0, 'Vys': 0.0, 'Ws': 0.0, 'cmd_t': -1.0,   # 스무딩 적용명령(0서 시작)
          'yaw_ref': 0.0, 'last_t': -1.0,                     # 선회 yaw각 참조(적분) · 직전 시각(reset 감지용)
          'body_h': q.base_z0, 'ht_cur': q.base_z0, 'qhome_h': q.base_z0,   # body_h슬라이더 · 보간높이 · q_home 계산높이
+         'step_h': STEP_H,                                                # ★GUI step height(live 갱신)
          'yaw_hold': None,                                                 # 선회정지 시 유지할 헤딩(드리프트 보정)
          'jseq': None, 'jact': False, 'jk': 0, 'jsub': 0,                  # 점프: 마지막seq · 재생중 · 현knot · sub카운터
          'prev_mode': q.cmd_mode, 'homing': False, 'home_t0': 0.0,        # Ready 호밍: 직전모드 · 진행중 · 시작시각
@@ -905,6 +906,9 @@ def mode_trot():
                 S['Vt'] = float(_c.get('v', S['Vt'])); S['Vyt'] = float(_c.get('vy', S['Vyt'])); S['Wt'] = float(_c.get('w', S['Wt']))
                 q.cmd_mode = _c.get('mode', 'move')
                 S['body_h'] = float(_c.get('body_h', S['body_h']))   # 서기 높이 슬라이더
+                _ph = S['step_h']; S['step_h'] = float(_c.get('step_h', S['step_h']))   # ★step height 슬라이더(live)
+                if os.environ.get('SHDBG') and abs(S['step_h'] - _ph) > 1e-4:
+                    print('[step_h] %.3f → %.3f (GUI live)' % (_ph, S['step_h']), flush=True)
                 if JUMP is not None:                                  # 점프 트리거(jump_seq 상승엣지)
                     _js = int(_c.get('jump_seq', 0))
                     if S['jseq'] is not None and _js > S['jseq'] and not S['jact']:  # 첫폴링=동기화(시작점프 방지)
@@ -1033,8 +1037,9 @@ def mode_trot():
         q.foot_targets = [None, None, None, None]
         dt = q.m.opt.timestep; swing = {}
         Rw = np.array([[cy, -sy], [sy, cy]])                 # body→world(현재 yaw)
-        _sh = STEP_H if S['homing'] else (                  # 호밍=풀 step height(발 어긋남 클리어), 보행=시작 ramp
-            STEP_H * (0.2 + 0.8 * min(1.0, tg / WARMUP)) if WARMUP > 1e-6 else STEP_H)
+        _STH = S['step_h']                                  # ★GUI live step height
+        _sh = _STH if S['homing'] else (                    # 호밍=풀 step height(발 어긋남 클리어), 보행=시작 ramp
+            _STH * (0.2 + 0.8 * min(1.0, tg / WARMUP)) if WARMUP > 1e-6 else _STH)
         for i in sw:                                        # swing 발끝 작업공간 목표(p,v)
             hip_xy = q.d.xpos[q.hip_bid[i]][:2]
             r_xy = hip_xy - q.d.qpos[:2]                     # 몸중심→hip

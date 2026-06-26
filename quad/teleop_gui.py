@@ -279,7 +279,7 @@ with dpg.window(tag='main'):
     dpg.add_slider_float(label='Body Height [m]  (서기만, 보행중 무시)', tag='bh',
                          min_value=0.34, max_value=0.52, default_value=0.52,
                          callback=lambda s, a: sc.BodyHeight(a))
-    dpg.add_slider_float(label='Step Height [m]  (재시작 적용)', tag='sh',
+    dpg.add_slider_float(label='Step Height [m]  (보행중 live 적용)', tag='sh',
                          min_value=0.05, max_value=0.20, default_value=0.15,
                          callback=lambda s, a: sc.StepHeight(a))
     dpg.add_separator()

@@ -52,10 +52,10 @@ class MujocoRobot:
 from simple_mpc import (
     RobotModelHandler,
     RobotDataHandler,
-    KinodynamicsOCP,
+    FullDynamicsOCP,        # ★깨끗한칸: OCP는 full-body(=구조3), 피드백만 TSID
     MPC,
     Interpolator,
-    KinodynamicsID,
+    KinodynamicsID,         # ★정식 TSID(KinodynamicsID) 유지 — Riccati 대신 이걸로 토크 실현
     KinodynamicsIDSettings,
 )
 import os as _os, pinocchio as _pin
@@ -113,62 +113,34 @@ fref[2] = -model_handler.getMass() / nk * gravity[2]
 u0 = np.concatenate((fref, fref, fref, fref, np.zeros(model_handler.getModel().nv - 6)))
 dt_mpc = 0.01
 
-_wbp = float(_os.environ.get("WBPOS", "0"))   # ★base x,y 위치 가중(기본0=자유=보행용). STAND/드리프트엔 >0로 앵커
-_wbz = float(_os.environ.get("WBZ", "100"))   # base z 가중(FullDynamics=0=발프레임에 위임)
-w_basepos = [_wbp, _wbp, _wbz, float(_os.environ.get("WBORI","200")), float(_os.environ.get("WBORI","200")), 0]
-w_legpos = [1, 1, 1, 1]
-
-w_basevel = [float(_os.environ.get("WBVX","60")), 10, 10, 10, 10, 10]
-w_legvel = [0.1, 0.1, 0.1, 0.1]
-# ★FullDynamics 참조: 뒷발목(pin idx 9=HL_foot,13=HR_foot)은 point-foot서 floppy → posture/vel 강하게 핀고정
+# ===== OCP = FullDynamics (구조3와 동일 가중치) — 계획은 구조3와 같게, 피드백만 TSID =====
+u0 = np.zeros(nu)   # FullDynamics 제어=토크(구조3와 동일, kinodyn의 forces+accel 아님)
+w_basepos = [0, float(_os.environ.get("WBY", "0")), 0, float(_os.environ.get("WBORI", "0")), float(_os.environ.get("WBORI", "0")), float(_os.environ.get("WBYAW", "0"))]
+w_basevel = [float(_os.environ.get("WBVX","400")), float(_os.environ.get("WBVY","200")), float(_os.environ.get("WBVZ","10")), 10, 10, float(_os.environ.get("WBWZ","10"))]
 _ankw = float(_os.environ.get("ANKLE_W", "50")); _ankdw = float(_os.environ.get("ANKLE_DW", "5"))
 _wlp = [1.0]*nu; _wlv = [0.1]*nu
 for _ia in (9, 13):
     _wlp[_ia] = _ankw; _wlv[_ia] = _ankdw
-w_x = np.array(w_basepos + _wlp + w_basevel + _wlv)   # _9: nu=14 비균일
-w_x = np.diag(w_x)
-w_linforce = np.array([0.01, 0.01, 0.01])
-w_u = np.concatenate(
-    (
-        w_linforce,
-        w_linforce,
-        w_linforce,
-        w_linforce,
-        np.ones(model_handler.getModel().nv - 6) * 1e-5,
-    )
-)
-w_u = np.diag(w_u)
-w_LFRF = 2000
-_wcap = float(_os.environ.get("WCENT_ANG_P","0.1"))   # ★pitch/roll 각운동량 가중(02_Leg 다리79%=pitch각모멘텀 폭증, 0.1로 못잡음)
-_wcdp = float(_os.environ.get("WCENTDER_ANG_P","0.1"))
-w_cent_lin = np.array([0.0, 0.0, 1])
-w_cent_ang = np.array([_wcap, _wcap, 10])
-w_cent = np.diag(np.concatenate((w_cent_lin, w_cent_ang)))
-w_centder_lin = np.ones(3) * 0.0
-w_centder_ang = np.array([_wcdp, _wcdp, 0.1])
-w_centder = np.diag(np.concatenate((w_centder_lin, w_centder_ang)))
+w_x = np.diag(np.array(w_basepos + _wlp + w_basevel + _wlv))
+w_u = np.eye(nu) * 1e-4
+w_LFRF = float(_os.environ.get("WFRAME", "1000"))
+_wcl = float(_os.environ.get("WCENT_LIN", "0.04")); _wca = float(_os.environ.get("WCENT_ANG", "0"))
+w_cent = np.diag(np.array([_wcl, _wcl, 0, _wca, _wca, _wca]))
+w_forces_lin = np.array([0.0001, 0.0001, 0.0001])
 
 problem_conf = dict(
-    timestep=dt_mpc,
-    w_x=w_x,
-    w_u=w_u,
-    w_cent=w_cent,
-    w_centder=w_centder,
-    gravity=gravity,
-    force_size=3,
-    w_frame=np.eye(3) * w_LFRF,
-    qmin=model_handler.getModel().lowerPositionLimit[7:],
-    qmax=model_handler.getModel().upperPositionLimit[7:],
-    mu=0.8,
-    Lfoot=0.01,
-    Wfoot=0.01,
-    kinematics_limits=True,
-    force_cone=_os.environ.get("FCONE","0")!="0",    # FullDynamics는 ON
-    land_cstr=_os.environ.get("LAND","0")!="0",       # FullDynamics는 ON
+    timestep=dt_mpc, w_x=w_x, w_u=w_u, w_cent=w_cent, gravity=gravity, force_size=3,
+    w_forces=np.diag(w_forces_lin), w_frame=np.eye(3) * w_LFRF,
+    umin=-model_handler.getModel().effortLimit[6:]*3.0, umax=model_handler.getModel().effortLimit[6:]*3.0,
+    qmin=model_handler.getModel().lowerPositionLimit[7:], qmax=model_handler.getModel().upperPositionLimit[7:],
+    Kp_correction=np.array([0, 0, 0]), Kd_correction=np.array([0, 0, 0]),
+    mu=float(_os.environ.get("MU", "0.8")), Lfoot=0.01, Wfoot=0.01,
+    torque_limits=True, kinematics_limits=True,
+    force_cone=_os.environ.get("FCONE","1")!="0", land_cstr=_os.environ.get("LAND","1")!="0",
 )
-T = 50
+T = int(_os.environ.get("T","50"))
 
-dynproblem = KinodynamicsOCP(problem_conf, model_handler)
+dynproblem = FullDynamicsOCP(problem_conf, model_handler)
 dynproblem.createProblem(
     model_handler.getReferenceState(), T, force_size, gravity[2], False
 )
@@ -238,10 +210,6 @@ kino_ID_settings.w_base = float(_os.environ.get("W_BASE","100.0"))
 kino_ID_settings.w_posture = float(_os.environ.get("W_POSTURE","1.0"))
 kino_ID_settings.w_contact_force = float(_os.environ.get("W_CFORCE","1.0"))
 kino_ID_settings.w_contact_motion = float(_os.environ.get("W_CMOTION","1.0"))   # ★발 고정(미끄럼방지). ↑=firm
-# ★TSID 제약 완화 실험: 마찰콘·발고정등식을 풀어 실현 자유도↑ (사용자 "제약 프리하게")
-kino_ID_settings.friction_coefficient = float(_os.environ.get("FRICOEF","0.8"))   # ↑=마찰콘 넓힘(전단력 자유)
-if _os.environ.get("CME") is not None:
-    kino_ID_settings.contact_motion_equality = _os.environ.get("CME") != "0"       # 0=발고정 부등식/soft(slip 허용)
 
 kino_ID = KinodynamicsID(model_handler, dt_simu, kino_ID_settings)
 
@@ -356,14 +324,14 @@ for step in range(int(_os.environ.get("STEPS","300"))):
     com_measured.append(mpc.getDataHandler().getData().com[0].copy())
     L_measured.append(mpc.getDataHandler().getData().hg.angular.copy())
 
-    a0 = mpc.getStateDerivative(0)[nv:].copy()
+    # ★FullDynamics: us=토크라 가속도는 getStateDerivative 전체, 힘은 getContactForces(t)
+    a0 = mpc.getStateDerivative(0)[nv:].copy()   # 전신 가속도(base+관절) — FullDynamics는 그대로 사용
     a1 = mpc.getStateDerivative(1)[nv:].copy()
-
-    a0[6:] = mpc.us[0][nk * force_size :]
-    a1[6:] = mpc.us[1][nk * force_size :]
-    forces0 = mpc.us[0][: nk * force_size]
-    forces1 = mpc.us[1][: nk * force_size]
+    forces0 = np.asarray(mpc.getContactForces(0)).flatten()   # (nk,3)→[FL,FR,HL,HR]×3 평탄화
+    forces1 = np.asarray(mpc.getContactForces(1)).flatten()
     contact_states = mpc.ocp_handler.getContactState(0)
+    if _os.environ.get("DBG") and step<3:
+        print("    [DBG] step%d forces0=%s |a0|max=%.2f a0[:6]=%s tau? "%(step, np.round(forces0,1), np.abs(a0).max(), np.round(a0[:6],2)), flush=True)
 
     forces = [forces0, forces1]
     ddqs = [a0, a1]
@@ -390,6 +358,12 @@ for step in range(int(_os.environ.get("STEPS","300"))):
         q_interp = xs_interp[: mpc.getModelHandler().getModel().nq]
         v_interp = xs_interp[mpc.getModelHandler().getModel().nq :]
         force_interp = [force_interp[i, :] for i in range(4)]
+        if _os.environ.get("AZERO"): acc_interp = np.zeros_like(acc_interp)   # ★거친 getStateDerivative 가속도 제거→TSID가 (q,v) PD추종
+        _acl = float(_os.environ.get("ACLIP","0"))
+        if _acl > 0: acc_interp = np.clip(acc_interp, -_acl, _acl)            # 가속도 클립
+        if _os.environ.get("FGRAV"):                                          # 힘 ref=균등 중력지지(거친 OCP힘 대신)
+            _fg = model_handler.getMass()*9.81/4.0
+            force_interp = [np.array([0.0,0.0,_fg]) for _ in range(4)]
 
         q_meas, v_meas = device.measureState()
         x_measured = np.concatenate([q_meas, v_meas])

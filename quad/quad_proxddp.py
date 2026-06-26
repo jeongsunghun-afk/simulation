@@ -1,4 +1,9 @@
-"""02_Leg 전신 NMPC — aligator ProxDDP **네이티브 hard constraint**.
+"""[폐기됨 DEPRECATED 2026-06-26] 구조1 — 02_Leg는 구조3(02leg9_fulldynamics_mujoco.py)으로 단일화.
+   사유: full-body OCP + 직접토크(Riccati/PD)가 02_Leg 정답. 본 파일(Python NMPC + DDP게인 직접)은
+   구조3와 같은 레시피이나 구조3(simple-mpc C++)이 더 견고·빠름. 기록/참고용 보존, 신규개발 중단.
+   상세: 메모리 biped-wbic-mpc-project.md의 2×2 종결 참조.
+====================================================================================================
+02_Leg 전신 NMPC — aligator ProxDDP **네이티브 hard constraint**.
 
 quad_nmpc.py(FDDP, crocoddyl, soft penalty) 와 달리, 마찰콘·토크를 ProxDDP 의
 **explicit constraint**(proximal/AL) 로 푼다. PROXDDP 논문(quad/PROXDDP-*.pdf) 방향.

@@ -1,4 +1,10 @@
-"""구조차용 proxDDP — simple-mpc의 2계층(NMPC 참조 + TSID-ID 1kHz) 구조를 우리에 이식.
+"""[폐기됨 DEPRECATED 2026-06-26] 구조2 — 02_Leg는 구조3(02leg9_fulldynamics_mujoco.py)으로 단일화.
+   사유: full-body OCP는 이미 최적토크+Riccati를 내놓는데, 본 파일은 그 Riccati를 버리고 TSID로 교체→
+   TSID가 full-body 최적토크를 소비못해 marginal/실패(깨끗한칸 02leg9_fulldyn_tsid_mujoco.py로도 재확인).
+   TSID는 reduced모델(centroidal)용이나 centroidal은 02_Leg 동역학 못담음. 기록용 보존, 신규개발 중단.
+   상세: 메모리 biped-wbic-mpc-project.md의 2×2 종결 참조.
+====================================================================================================
+구조차용 proxDDP — simple-mpc의 2계층(NMPC 참조 + TSID-ID 1kHz) 구조를 우리에 이식.
 
 기존 quad_proxddp.py(우리 전신 NMPC walk_loop) 는 그대로 두고, **DDP게인 추종을
 TSID 역동역학 QP(1kHz)로 교체**한다. simple-mpc 의 KinodynamicsID 역할을 raw TSID 로 구현.

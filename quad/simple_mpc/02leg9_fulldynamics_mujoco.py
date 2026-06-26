@@ -313,7 +313,8 @@ if _os.environ.get("CMDFILE"):
 mpc_conf = dict(support_force=-model_handler.getMass() * gravity[2], TOL=1e-4, mu_init=float(_os.environ.get("MUINIT","1e-8")),
                 max_iters=int(_os.environ.get("ITERS", "1")), num_threads=int(_os.environ.get("NTH", "8")),
                 swing_apex=_apex0,
-                T_fly=T_ss, T_contact=T_ds, timestep=dt_mpc)
+                T_fly=T_ss, T_contact=T_ds, timestep=dt_mpc,
+                capture_gain=float(_os.environ.get("KCAP","0")), alip_gain=float(_os.environ.get("ALIP","0")))  # ★반응형 발배치
 mpc = MPC(mpc_conf, dynproblem)
 
 cq = {"FL_foot": True, "FR_foot": True, "HL_foot": True, "HR_foot": True}
@@ -536,7 +537,7 @@ while True:
                 q_meas[0:3] = _ep; v_meas[0:3] = _Rb.T @ _ev   # 위치=추정, 선속도=추정(월드→동체)
         x_measured = np.concatenate([q_meas, v_meas])
         mpc.getDataHandler().updateInternalData(x_measured, True)
-        current_torque = u_interp - 1.0 * _Ksk @ model_handler.difference(x_measured, x_interp)
+        current_torque = u_interp - float(_os.environ.get("RIC","1.0")) * _Ksk @ model_handler.difference(x_measured, x_interp)  # ★RIC=Riccati피드백 스케일(0=피드포워드만)
         _lc.q = x_interp[7:7+nu]; _lc.dq = x_interp[nq+6:nq+6+nu]   # plan 목표 관절 q/dq
         _lc.kp = _KP; _lc.kd = _KD; _lc.tau = current_torque        # 기본 kp=kd=0=순수토크(Riccati는 tau에 포함)
         device.write_low_cmd(_lc)                                   # Unitree 저수준 인터페이스로 적용
