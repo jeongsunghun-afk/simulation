@@ -203,6 +203,8 @@ mpc_conf = dict(
     T_fly=T_ss,
     T_contact=T_ds,
     timestep=dt_mpc,
+    capture_gain=float(_os.environ.get("KCAP","0")), alip_gain=float(_os.environ.get("ALIP","0")),  # ★반응형 발배치
+    predict_foot=float(_os.environ.get("PREDFOOT","0")),   # ★OCP 예측 발배치
 )
 
 mpc = MPC(mpc_conf, dynproblem)
