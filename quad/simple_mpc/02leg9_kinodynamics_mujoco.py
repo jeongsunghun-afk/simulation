@@ -18,8 +18,20 @@ class MujocoRobot:
                     self.m.body_mass[_b]*=_lms; self.m.body_inertia[_b]*=_lms
             _mj.mj_setConst(self.m,_mj.MjData(self.m))
             print('[LEG_MASS-MJ] 다리링크 ×%.2f → 총질량 %.1fkg'%(_lms,self.m.body_mass.sum()),flush=True)
+        _bad=float(_o2.environ.get('BODY_ADD','0'))   # ★바디무게 추가(다리비율↓, centroidal 검증)
+        if _bad!=0.0:
+            _bb=_mj.mj_name2id(self.m,_mj.mjtObj.mjOBJ_BODY,'base'); _m0=self.m.body_mass[_bb]; _mn=_m0+_bad
+            self.m.body_inertia[_bb]*=(_mn/_m0); self.m.body_mass[_bb]=_mn; _mj.mj_setConst(self.m,_mj.MjData(self.m))
+            print('[BODY_ADD-MJ] base %.2f→%.2fkg 총%.1fkg 다리비율%.0f%%'%(_m0,_mn,self.m.body_mass.sum(),100*(1-self.m.body_mass[_bb]/self.m.body_mass.sum())),flush=True)
         if _o2.environ.get("CONE"): self.m.opt.cone=int(_o2.environ["CONE"])
         if _o2.environ.get("STIFF"): self.m.geom_solref[:,0]=float(_o2.environ["STIFF"]); self.m.geom_solref[:,1]=1.0
+        _rl=float(_o2.environ.get("REAR_LOCK","0"))   # ★뒷발목 물리잠금(4-DOF→3-DOF 대칭화, 강성)
+        if _rl>0:
+            for _jn in ("HL_foot_joint","HR_foot_joint"):
+                _jid=_mj.mj_name2id(self.m,_mj.mjtObj.mjOBJ_JOINT,_jn)
+                if _jid>=0:
+                    self.m.jnt_stiffness[_jid]=_rl; self.m.dof_damping[self.m.jnt_dofadr[_jid]]=_rl*0.2
+            print("[REAR_LOCK] 뒷발목 stiffness=%.0f (대칭3-DOF화)"%_rl,flush=True)
         self.d=_mj.MjData(self.m); self.nu=self.m.nu
         self._set(q0); self.viewer=None
         if view:
@@ -94,6 +106,11 @@ if _lms_pin != 1.0:                                          # joint 0=universe,
         _M.inertias[_ji] = _pin.Inertia(_I.mass*_lms_pin, _I.lever, _I.inertia*_lms_pin)
     print('[LEG_MASS-PIN] 다리링크 ×%.2f → pin 총질량 %.1fkg'
           % (_lms_pin, sum(_M.inertias[_j].mass for _j in range(1,_M.njoints))), flush=True)
+_bad_pin = float(_os.environ.get('BODY_ADD','0'))   # ★바디무게 추가(OCP+TSID 모델, pinocchio base=joint1)
+if _bad_pin != 0.0:
+    _Ib = _M.inertias[1]; _mnb = _Ib.mass + _bad_pin
+    _M.inertias[1] = _pin.Inertia(_mnb, _Ib.lever, _Ib.inertia * (_mnb/_Ib.mass))
+    print('[BODY_ADD-PIN] base +%.1fkg → %.2fkg'%(_bad_pin, _mnb), flush=True)
 model_handler = RobotModelHandler(_M, "standing", base_joint_name)
 model_handler.addPointFoot("FL_foot", base_joint_name)
 model_handler.addPointFoot("FR_foot", base_joint_name)

@@ -56,6 +56,19 @@ class MujocoRobot:
         if _o2.environ.get("CONE"): self.m.opt.cone=int(_o2.environ["CONE"])
         if _o2.environ.get("STIFF"): self.m.geom_solref[:,0]=float(_o2.environ["STIFF"]); self.m.geom_solref[:,1]=1.0
         if _o2.environ.get("FRIC"): self.m.geom_friction[:,0]=float(_o2.environ["FRIC"])   # 발 접촉마찰 override(속도레버)
+        _lms=float(_o2.environ.get("LEG_MASS_SCALE","1.0"))   # ★다리질량 스케일(MuJoCo 물리)
+        if _lms!=1.0:
+            for _b in range(self.m.nbody):
+                _bn=_mj.mj_id2name(self.m,_mj.mjtObj.mjOBJ_BODY,_b) or ''
+                if any(_s in _bn for _s in ('hip','thigh','calf','foot')):
+                    self.m.body_mass[_b]*=_lms; self.m.body_inertia[_b]*=_lms
+            _mj.mj_setConst(self.m,_mj.MjData(self.m))
+            print("[LEG_MASS-MJ] 다리×%.2f → 총%.1fkg 다리비율%.0f%%"%(_lms,self.m.body_mass.sum(),100*(1-self.m.body_mass[_mj.mj_name2id(self.m,_mj.mjtObj.mjOBJ_BODY,'base')]/self.m.body_mass.sum())),flush=True)
+        _bad=float(_o2.environ.get("BODY_ADD","0"))   # ★바디무게 추가(다리비율↓ 테스트, MuJoCo 물리)
+        if _bad!=0.0:
+            _bb=_mj.mj_name2id(self.m,_mj.mjtObj.mjOBJ_BODY,'base'); _m0=self.m.body_mass[_bb]; _mn=_m0+_bad
+            self.m.body_inertia[_bb]*=(_mn/_m0); self.m.body_mass[_bb]=_mn; _mj.mj_setConst(self.m,_mj.MjData(self.m))
+            print("[BODY_ADD-MJ] base %.2f→%.2fkg 총%.1fkg 다리비율%.0f%%"%(_m0,_mn,self.m.body_mass.sum(),100*(1-self.m.body_mass[_bb]/self.m.body_mass.sum())),flush=True)
         self.d=_mj.MjData(self.m); self.nu=self.m.nu
         self._set(q0); self.viewer=None; self.markers=[]; self.cmd_v=np.zeros(6)
         self.sport=SportClient()                                 # 고수준 속도명령(Unitree SportClient.Move)
@@ -228,6 +241,16 @@ import copy
 URDF = "/home/jsh/문서/jsh/simulation/quad/urdf/02_Leg_UFDF_260610_9.urdf"
 base_joint_name = "root_joint"
 _M = _pin.buildModelFromUrdf(URDF, _pin.JointModelFreeFlyer())
+_lms_pin = float(_os.environ.get("LEG_MASS_SCALE","1.0"))   # ★다리질량 스케일(OCP 모델, pinocchio 다리=joint2~)
+if _lms_pin != 1.0:
+    for _ji in range(2, _M.njoints):
+        _Il = _M.inertias[_ji]; _M.inertias[_ji] = _pin.Inertia(_Il.mass*_lms_pin, _Il.lever, _Il.inertia*_lms_pin)
+    print("[LEG_MASS-PIN] 다리×%.2f"%_lms_pin, flush=True)
+_bad_pin = float(_os.environ.get("BODY_ADD","0"))   # ★바디무게 추가(OCP가 믿는 모델, pinocchio base=joint1)
+if _bad_pin != 0.0:
+    _I = _M.inertias[1]; _mn = _I.mass + _bad_pin
+    _M.inertias[1] = _pin.Inertia(_mn, _I.lever, _I.inertia * (_mn/_I.mass))
+    print("[BODY_ADD-PIN] base %.2f→%.2fkg"%(_I.mass, _mn), flush=True)
 _qstand = np.array([0.0,0.0,0.52, 0,0,0,1,
     0.0,0.49223,-0.76893, 0.0,0.49223,-0.76893,
     0.0,-0.4749,0.72463,0.0, 0.0,-0.4749,0.72463,0.0])   # _9 crouch(앞발목 fixed: 앞3·뒤4)

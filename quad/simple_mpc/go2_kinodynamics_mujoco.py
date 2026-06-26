@@ -12,6 +12,15 @@ class MujocoRobot:
         if _o.environ.get("STIFF"):  # 접촉 강체화(solref timeconst↓) → pybullet rigid 근사
             import numpy as _n
             self.m.geom_solref[:,0]=float(_o.environ["STIFF"]); self.m.geom_solref[:,1]=1.0
+        _lms=float(_o.environ.get("LEG_MASS_SCALE","1.0"))   # ★go2 다리질량 스케일(>1=무겁게=02_Leg화, MuJoCo)
+        if _lms!=1.0:
+            for _b in range(self.m.nbody):
+                _bn=_mj.mj_id2name(self.m,_mj.mjtObj.mjOBJ_BODY,_b) or ''
+                if any(_s in _bn for _s in ('hip','thigh','calf')):
+                    self.m.body_mass[_b]*=_lms; self.m.body_inertia[_b]*=_lms
+            _mj.mj_setConst(self.m,_mj.MjData(self.m))
+            _bb=_mj.mj_name2id(self.m,_mj.mjtObj.mjOBJ_BODY,'base')
+            print("[LEG_MASS-MJ] go2 다리×%.2f → 총%.1fkg 다리비율%.0f%%"%(_lms,self.m.body_mass.sum(),100*(1-self.m.body_mass[_bb]/self.m.body_mass.sum())),flush=True)
         self.d=_mj.MjData(self.m); self.nu=self.m.nu
         self._set(q0); self.viewer=None
         if view:
@@ -56,6 +65,11 @@ class _ERD:
     def load(self,name):
         rw=_pin.RobotWrapper.BuildFromURDF(self.SHARE+"/go2_description/urdf/go2.urdf",self.PKG,_pin.JointModelFreeFlyer())
         _pin.loadReferenceConfigurations(rw.model,self.SHARE+"/go2_description/srdf/go2.srdf",False)  # "standing" 자세
+        _lmsp=float(_os.environ.get("LEG_MASS_SCALE","1.0"))   # ★go2 다리질량 스케일(OCP모델, 다리=joint2~)
+        if _lmsp!=1.0:
+            for _ji in range(2, rw.model.njoints):
+                _I=rw.model.inertias[_ji]; rw.model.inertias[_ji]=_pin.Inertia(_I.mass*_lmsp,_I.lever,_I.inertia*_lmsp)
+            print("[LEG_MASS-PIN] go2 다리×%.2f"%_lmsp, flush=True)
         return rw
     def getModelPath(self,sub):
         return self.SHARE

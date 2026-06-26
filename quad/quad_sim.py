@@ -89,10 +89,18 @@ class QuadSim:
                 _bn = mujoco.mj_id2name(self.m, mujoco.mjtObj.mjOBJ_BODY, _b) or ''
                 if any(_s in _bn for _s in ('hip', 'thigh', 'calf', 'foot')):
                     self.m.body_mass[_b] *= _lms; self.m.body_inertia[_b] *= _lms
+        # ★바디무게 추가(BODY_ADD kg): 다리질량 그대로, 비율만 낮춤(다리 79%→낮게). base 바디에 추가+관성 비례
+        _bad = float(os.environ.get('BODY_ADD', '0'))
+        if _bad != 0.0:
+            _bb = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, 'base')
+            _m0 = self.m.body_mass[_bb]; _mn = _m0 + _bad
+            self.m.body_inertia[_bb] *= (_mn / _m0); self.m.body_mass[_bb] = _mn
         self.d = mujoco.MjData(self.m)
-        if _lms != 1.0:
+        if _lms != 1.0 or _bad != 0.0:
             mujoco.mj_setConst(self.m, self.d)
-            print('[LEG_MASS] 다리링크 ×%.2f → 총질량 %.1fkg' % (_lms, self.m.body_mass.sum()), flush=True)
+            print('[MASS] 다리×%.2f 바디+%.1fkg → base %.2fkg 총 %.1fkg (다리비율 %.0f%%)'
+                  % (_lms, _bad, self.m.body_mass[mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, 'base')],
+                     self.m.body_mass.sum(), 100*(1 - self.m.body_mass[mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_BODY, 'base')]/self.m.body_mass.sum())), flush=True)
         self.nv = self.m.nv
         self.nu = self.m.nu          # = 4*dof
         N = lambda kind, nm: mujoco.mj_name2id(self.m, kind, nm)
