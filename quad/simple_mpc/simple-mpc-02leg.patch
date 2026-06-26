@@ -1,18 +1,19 @@
 diff --git a/bindings/expose-mpc.cpp b/bindings/expose-mpc.cpp
-index b4243d4..598a77a 100644
+index b4243d4..783da32 100644
 --- a/bindings/expose-mpc.cpp
 +++ b/bindings/expose-mpc.cpp
-@@ -40,6 +40,9 @@ namespace simple_mpc
+@@ -40,6 +40,10 @@ namespace simple_mpc
        conf.T_fly = bp::extract<int>(settings["T_fly"]);
        conf.T_contact = bp::extract<int>(settings["T_contact"]);
        conf.timestep = bp::extract<double>(settings["timestep"]);
 +      if (settings.has_key("capture_gain")) conf.capture_gain = bp::extract<double>(settings["capture_gain"]);
 +      if (settings.has_key("alip_gain")) conf.alip_gain = bp::extract<double>(settings["alip_gain"]);
 +      if (settings.has_key("predict_foot")) conf.predict_foot = bp::extract<double>(settings["predict_foot"]);
++      if (settings.has_key("w_foot_ref")) conf.w_foot_ref = bp::extract<double>(settings["w_foot_ref"]);
  
        return new MPC{conf, problem};
      }
-@@ -57,6 +60,8 @@ namespace simple_mpc
+@@ -57,6 +61,8 @@ namespace simple_mpc
        settings["T_fly"] = conf.T_fly;
        settings["T_contact"] = conf.T_contact;
        settings["timestep"] = conf.timestep;
@@ -22,10 +23,10 @@ index b4243d4..598a77a 100644
        return settings;
      }
 diff --git a/include/simple-mpc/mpc.hpp b/include/simple-mpc/mpc.hpp
-index f7efccc..381057f 100644
+index f7efccc..edeff05 100644
 --- a/include/simple-mpc/mpc.hpp
 +++ b/include/simple-mpc/mpc.hpp
-@@ -46,6 +46,13 @@ namespace simple_mpc
+@@ -46,6 +46,16 @@ namespace simple_mpc
      int T_contact = 20;
      size_t T = 100;
      double timestep = 0.01;
@@ -36,6 +37,9 @@ index f7efccc..381057f 100644
 +
 +    // ★OCP 예측 기반 발배치: 발을 OCP가 예측한 착지시점 몸통 위치에 놓음(Raibert-OCP 오차 보정). 0=off=Raibert, 1=완전예측
 +    double predict_foot = 0.0;
++
++    // ★STEP2: capture-point cost 참조(측정 CoM기반). 발 참조 += w_foot_ref·(v_alip − v_des)/ω. 0=off=baseline
++    double w_foot_ref = 0.0;
    };
  
    /**
@@ -53,10 +57,18 @@ index 0273513..1929bd7 100644
  
    // Solve QP
 diff --git a/src/mpc.cpp b/src/mpc.cpp
-index b68da21..cff9dbf 100644
+index b68da21..75f063a 100644
 --- a/src/mpc.cpp
 +++ b/src/mpc.cpp
-@@ -277,6 +277,24 @@ namespace simple_mpc
+@@ -10,6 +10,7 @@
+ #include "simple-mpc/foot-trajectory.hpp"
+ #include "simple-mpc/ocp-handler.hpp"
+ #include "simple-mpc/robot-handler.hpp"
++#include <cmath>   // std::sqrt (capture-point ω)
+ 
+ namespace simple_mpc
+ {
+@@ -277,6 +278,24 @@ namespace simple_mpc
  
    void MPC::updateStepTrackerReferences()
    {
@@ -81,7 +93,7 @@ index b68da21..cff9dbf 100644
      for (auto const & name : ee_names_)
      {
        const size_t foot_nb = ocp_handler_->getModelHandler().getFootNb(name);
-@@ -288,14 +306,26 @@ namespace simple_mpc
+@@ -288,14 +307,43 @@ namespace simple_mpc
        if (foot_land_time < settings_.T_fly)
          update = false;
  
@@ -108,10 +120,27 @@ index b68da21..cff9dbf 100644
 +        next_pose_.head<2>() += (v_eff.head<2>() + v_eff[5] * twist_vect_)            // ★발배치=v_eff(반응형 Raibert)
 +                                * (settings_.T_fly + settings_.T_contact) * settings_.timestep;
 +      }
++      // ★STEP2: capture-point cost 참조(측정 CoM기반 ALIP). 측방드리프트 타깃. w_foot_ref=0이면 baseline
++      if (settings_.w_foot_ref > 0.0)
++      {
++        const RobotDataHandler::CentroidalStateVector cs = data_handler_->getCentroidalState();  // [com, linmom, angmom] 측정값
++        const double mass = ocp_handler_->getModelHandler().getMass();
++        const double zc = cs[2] > 0.1 ? cs[2] : 0.1;
++        const double omega = std::sqrt(9.81 / zc);                                   // LIPM 주파수 √(g/z)
++        const Eigen::Matrix3d Rb = data_handler_->getBaseFramePose().rotation();
++        const Eigen::Vector3d vcom_b = Rb.transpose() * (cs.segment<3>(3) / mass);   // base frame CoM 속도(측정)
++        const Eigen::Vector3d L_b = Rb.transpose() * cs.tail<3>();                    // base frame 각운동량(측정)
++        Eigen::Vector2d v_alip;                                                       // ALIP 보정 CoM 속도
++        v_alip << vcom_b[0] + settings_.alip_gain * L_b[1] / (mass * zc),
++                  vcom_b[1] - settings_.alip_gain * L_b[0] / (mass * zc);
++        Eigen::Vector2d cap = settings_.w_foot_ref * (v_alip - velocity_base_.head<2>()) / omega;  // capture-point 오프셋
++        cap = cap.cwiseMax(-0.15).cwiseMin(0.15);                                     // 스텝한계 클립
++        next_pose_.head<2>() += cap;
++      }
        next_pose_[2] = data_handler_->getFootPose(foot_nb).translation()[2];
  
        foot_trajectories_.updateTrajectory(
-@@ -309,7 +339,7 @@ namespace simple_mpc
+@@ -309,7 +357,7 @@ namespace simple_mpc
      }
  
      ocp_handler_->setReferenceState(ocp_handler_->getSize() - 1, x_reference_);

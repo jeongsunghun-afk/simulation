@@ -205,6 +205,7 @@ mpc_conf = dict(
     timestep=dt_mpc,
     capture_gain=float(_os.environ.get("KCAP","0")), alip_gain=float(_os.environ.get("ALIP","0")),  # ★반응형 발배치
     predict_foot=float(_os.environ.get("PREDFOOT","0")),   # ★OCP 예측 발배치
+    w_foot_ref=float(_os.environ.get("W_FOOT_REF","0")),   # ★STEP2: capture-point cost 참조(측정CoM)
 )
 
 mpc = MPC(mpc_conf, dynproblem)
