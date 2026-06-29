@@ -62,9 +62,11 @@ class QuadSim:
         self.foot_z0 = cfg.get('foot_z0', 0.0)   # nominal 자세 발바닥 목표 z(접지=0). 과거 0.02→20mm 부양 버그
         global MU; MU = cfg['mu']
         _xmlp = mjcf or cfg['mjcf']
+        self._stair = None                        # 계단 파라미터(H,D,N,X0) — 발/몸높이 적응용
         if os.environ.get('STAIRS'):              # ★계단 환경 주입: STAIR_H(단높이)·STAIR_D(단깊이)·STAIR_N(단수)·STAIR_X0(시작x)
             H = float(os.environ.get('STAIR_H', '0.05')); D = float(os.environ.get('STAIR_D', '0.25'))
             N = int(os.environ.get('STAIR_N', '6')); X0 = float(os.environ.get('STAIR_X0', '0.7'))
+            self._stair = (H, D, N, X0)
             _g = ''.join('<geom type="box" pos="%.4f 0 %.4f" size="%.4f 1.0 %.4f" rgba="0.55 0.55 0.62 1" friction="1.3 0.02 0.001" condim="3"/>\n'
                          % (X0 + i*D + D/2, (i+1)*H/2, D/2, (i+1)*H/2) for i in range(N))
             with open(_xmlp) as _f: _xml = _f.read()
@@ -205,6 +207,16 @@ class QuadSim:
     # ── 운동학/동역학 헬퍼 ────────────────────────────
     def fullM(self):
         M = np.zeros((self.nv, self.nv)); mujoco.mj_fullM(self.m, M, self.d.qM); return M
+
+    def terrain_z(self, x):
+        """지형(계단) 표면 높이 @ x [m]. 평지=0. 계단 i단(x∈[X0+iD,X0+(i+1)D]) 윗면=(i+1)H."""
+        if self._stair is None:
+            return 0.0
+        H, D, N, X0 = self._stair
+        if x < X0:
+            return 0.0
+        i = int((x - X0) // D)
+        return N * H if i >= N else (i + 1) * H
 
     def foot_point(self, i):
         if self.foot_kind == 'mesh':
@@ -433,7 +445,9 @@ class QuadSim:
         w_ori = float(os.environ.get('W_ORI', '5.0'))
         for j in range(3):
             P[3 + j, 3 + j] += w_ori; g[3 + j] -= w_ori * a_ori[j]
-        a_z = 200 * (self.com_ref[2] - d.subtree_com[0][2]) - 25 * (Jc @ qv)[2]
+        _th = np.mean([self.terrain_z(self.d.xpos[self.hip_bid[i]][0]) for i in range(4)])  # ★계단: 4 hip 평균 지형높이(불연속 완화)
+        _zref = self.com_ref[2] + _th                         # 몸통 높이 기준을 지형따라 부드럽게 올림(평지=+0)
+        a_z = 200 * (_zref - d.subtree_com[0][2]) - 25 * (Jc @ qv)[2]
         w_z = float(os.environ.get('W_Z', '150.0'))   # 높이 유지 강화(nose-dive 방지 핵심)
         P[:nv, :nv] += w_z * np.outer(Jc[2], Jc[2]); g[:nv] -= w_z * a_z * Jc[2]
         # posture — swing 관절엔 약한 규제(w=0.1)만: 발끝 3D task가 다리 DOF<4 면 여유도
@@ -1147,7 +1161,7 @@ def mode_trot():
             tw = W_eff * T_ST * np.array([-r_xy[1], r_xy[0]])  # 선회 접선 발배치(yaw)
             pe_xy = hip_xy + Rw @ S['hip_off'][i] + rai + tw  # nominal도 몸따라 회전 + Raibert + 선회
             s_ = gait(i, tg)[1]
-            p_end = np.array([pe_xy[0], pe_xy[1], S['gz'][i]])
+            p_end = np.array([pe_xy[0], pe_xy[1], S['gz'][i] + q.terrain_z(pe_xy[0])])  # ★계단: 착지 z=평지명목+지형높이
             q.foot_targets[i] = p_end                       # 착지 목표 시각화
             p_tgt = swing_foot_pos(s_, S['liftoff'][i], p_end,
                                    np.array([vcom[0], vcom[1], 0]), step_height=_sh, tau_land=1.0)
