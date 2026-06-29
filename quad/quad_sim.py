@@ -170,6 +170,8 @@ class QuadSim:
         self._vel_clip = float(os.environ.get('VEL_CLIP', '0'))         # 각속도 하드클립(×한계, 0=off; 1.0=한계서 클립)
         self._qdd_prev = np.zeros(self.nu)                              # JERK_LIM용 직전 q̈(관절)
         self._tau_prev = np.zeros(self.nu)                              # TAU_RATE용 직전 τ(관절)
+        self._tau_filt = np.zeros(self.nu)                              # 출력 토크 LPF 상태
+        self._tau_lpf = float(os.environ.get('TAU_LPF', '0'))          # ★출력 토크 LPF 차단주파수[Hz](0=off, QP밖 표준필터)
         # per-joint 위치 한계(WBIC QP, 가속도경계용): jnt_range
         _jl = [(self.m.jnt_range[j, 0], self.m.jnt_range[j, 1]) if self.m.jnt_limited[j] else (-1e9, 1e9)
                for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
@@ -319,6 +321,10 @@ class QuadSim:
             d.ctrl[:] = np.clip(tau, -_avail, _avail)
         else:
             d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)   # per-joint Peak 클립(QP가 이미 존중)
+        if self._tau_lpf > 0:                               # ★출력단 토크 LPF(QP밖,1차): 1kHz 계단성분 평활(공진억제). 위상지연=안정성 트레이드오프
+            _al = 2 * np.pi * self._tau_lpf * self.m.opt.timestep; _al /= (1 + _al)
+            self._tau_filt = _al * d.ctrl[:self.nu] + (1 - _al) * self._tau_filt
+            d.ctrl[:self.nu] = self._tau_filt
         return tau, True
 
     # ── MPC (Linear Convex, gait_sim.controllers.mpc 재사용) + WBIC 추종 ──
@@ -518,6 +524,10 @@ class QuadSim:
             d.ctrl[:] = np.clip(tau, -_avail, _avail)
         else:
             d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)   # per-joint Peak 클립(QP가 이미 존중)
+        if self._tau_lpf > 0:                               # ★출력단 토크 LPF(QP밖,1차): 1kHz 계단성분 평활(공진억제). 위상지연=안정성 트레이드오프
+            _al = 2 * np.pi * self._tau_lpf * self.m.opt.timestep; _al /= (1 + _al)
+            self._tau_filt = _al * d.ctrl[:self.nu] + (1 - _al) * self._tau_filt
+            d.ctrl[:self.nu] = self._tau_filt
         return tau, True
 
     # ── 제어 ──────────────────────────────────────────
