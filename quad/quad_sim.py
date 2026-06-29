@@ -179,6 +179,11 @@ class QuadSim:
         # 뒷발목(4DoF 여자유도) nu-order 인덱스 + 핀 가중치: posture로 REAR_ANKLE에 고정→흔들림↓·좌우대칭
         self._ankle_idx = set(int(self.legqv[i][3]) - 6 for i in range(4) if self.leg_dof[i] == 4)
         self._ankle_w = float(os.environ.get('ANKLE_W', '20'))   # 0이면 핀 안함(기존 여자유도)
+        # ★foot 기어비 스케일(설계검토): 저기어 → 속도한계↑·토크한계↓ (같은 베이스모터, 토크↔속도 맞교환)
+        _gf = float(os.environ.get('GEAR_FOOT', '1.0'))          # 0.5=기어 절반(14:1→7:1): 속도 14.8→29.6, 토크 168→84
+        if _gf != 1.0:
+            for aj in self._ankle_idx:
+                self._w_limit[aj] /= _gf; self._tau_peak[aj] *= _gf
         self.base_trail = _deque(maxlen=_tn)              # base 궤적(마젠타)
         self.foot_trail = [_deque(maxlen=_tn) for _ in range(4)]   # 발별 궤적
 
