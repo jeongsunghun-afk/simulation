@@ -659,6 +659,14 @@ class QuadSim:
             g = scn.geoms[scn.ngeom]
             mujoco.mjv_initGeom(g, typ, np.zeros(3), np.zeros(3), eye, np.asarray(c, np.float32))
             mujoco.mjv_connector(g, typ, w, np.asarray(a, float), np.asarray(b, float)); scn.ngeom += 1
+        # ── ★elevation map 시각화(ELEVMAP=1): 로봇중심 격자를 높이별 색 마커(파랑낮음→빨강높음) ──
+        if os.environ.get('ELEVMAP') and (self._stair is not None or self._elev):
+            _bx, _by = d.qpos[0], d.qpos[1]
+            for _gx in np.arange(_bx - 0.3, _bx + 1.2, 0.09):
+                for _gy in np.arange(_by - 0.4, _by + 0.41, 0.09):
+                    _h = self.terrain_height(_gx, _gy)
+                    _t = min(1.0, max(0.0, _h / 0.30))
+                    _sph([_gx, _gy, _h + 0.012], 0.02, [_t, 0.25, 1 - _t, 0.7])
         ZC = 0.02                                            # 발 접지판별(발끝 z<ZC=접지)
         fp = [self.foot_point(i).copy() for i in range(4)]; fz = [p[2] for p in fp]
         # 발 접촉링: 접지면 빨강
