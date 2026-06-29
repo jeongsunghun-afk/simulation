@@ -204,7 +204,7 @@ mpc_conf = dict(
     mu_init=float(_os.environ.get("MU_INIT", "1e-8")),     # 정규화(↑=안정·보수). 02_Leg 발산 완화
     max_iters=int(_os.environ.get("MAXITER", "1")),        # RTI 반복(↑=수렴↑·느림)
     num_threads=8,
-    swing_apex=0.15,
+    swing_apex=float(_os.environ.get("APEX","0.15")),   # ★step height env(고속 gait 검토)
     T_fly=T_ss,
     T_contact=T_ds,
     timestep=dt_mpc,
