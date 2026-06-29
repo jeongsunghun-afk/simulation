@@ -64,6 +64,12 @@ class QuadSim:
         _xmlp = mjcf or cfg['mjcf']
         self._stair = None                        # 계단 파라미터(H,D,N,X0) — 시각화/디버그용
         self._elev = os.environ.get('ELEV') is not None  # ★elevation 쿼리 강제 ON(실 depth/험지용, STAIRS 없이도 raycast)
+        # ★GUI 라이브 컨트롤(CMDFILE로 갱신): 배속·모니터표시·지형적응
+        self._rate = float(os.environ.get('RATE', '1.0'))            # 뷰어 배속(0=최대)
+        self._viz = os.environ.get('VIZ', '1') != '0'               # 모니터 overlay(GRF/CoM/궤적/elevation) 표시
+        self._terrain_on = False                                    # 지형적응(perception) — STAIRS/ELEV 확정 후 아래서 설정
+        self._body_terr = 0.0                                       # 틱당 캐시: 4hip 평균 지형높이(a_z+MPC 공유)
+        self._elev_cache = None; self._elev_t = -1.0                # elevation 시각화 격자 캐시(100ms마다 raycast)
         if os.environ.get('STAIRS'):              # ★계단 환경 주입: STAIR_H(단높이)·STAIR_D(단깊이)·STAIR_N(단수)·STAIR_X0(시작x)
             H = float(os.environ.get('STAIR_H', '0.05')); D = float(os.environ.get('STAIR_D', '0.25'))
             N = int(os.environ.get('STAIR_N', '6')); X0 = float(os.environ.get('STAIR_X0', '0.7'))
@@ -77,6 +83,7 @@ class QuadSim:
             self.m = mujoco.MjModel.from_xml_path(_tmp); os.remove(_tmp)
         else:
             self.m = mujoco.MjModel.from_xml_path(_xmlp)
+        self._terrain_on = bool(self._stair) or self._elev          # ★_stair 확정 후 지형적응 기본값 설정
         if _NOLIMIT:
             self.m.jnt_limited[:] = 0    # 관절 한계 해제 (테스트용)
         else:
@@ -213,7 +220,7 @@ class QuadSim:
         """지형 표면 높이 @ (x,y) [m] — ★표준 perceptive locomotion의 elevation-map 인터페이스.
         현재 백엔드: sim 지오메트리에 하향 raycast(=depth센서가 측정하는 것과 동일, 로봇 geom은 건너뜀).
         ★추후: 실제 depth센서 elevation map으로 이 메서드 백엔드만 교체(인터페이스 동일)."""
-        if self._stair is None and not self._elev:   # 평지+elev off: raycast 생략(성능, 평지=0)
+        if not self._terrain_on:                     # 지형적응 off(GUI 토글)/평지: raycast 생략(성능, 평지=0)
             return 0.0
         vec = np.array([0.0, 0.0, -1.0]); gid = np.zeros(1, np.int32); z = z_high
         for _ in range(8):                            # 로봇 geom 맞으면 그 아래서 재캐스트 → 지형(worldbody)만
@@ -452,7 +459,7 @@ class QuadSim:
         w_ori = float(os.environ.get('W_ORI', '5.0'))
         for j in range(3):
             P[3 + j, 3 + j] += w_ori; g[3 + j] -= w_ori * a_ori[j]
-        _th = np.mean([self.terrain_height(self.d.xpos[self.hip_bid[i]][0], self.d.xpos[self.hip_bid[i]][1]) for i in range(4)])  # ★4 hip 평균 지형높이(elevation, 불연속 완화)
+        _th = self._body_terr                                 # ★틱당 1회 캐시된 4hip 평균 지형높이(mode_trot서 갱신, raycast 절약)
         _zref = self.com_ref[2] + _th                         # 몸통 높이 기준을 지형따라 부드럽게 올림(평지=+0)
         self._dbg_terr = _th; self._dbg_clr = d.subtree_com[0][2] - _th   # 진단: 지형높이·clearance(몸-지면)
         a_z = 200 * (_zref - d.subtree_com[0][2]) - 25 * (Jc @ qv)[2]
@@ -649,6 +656,11 @@ class QuadSim:
         #   마젠타=base궤적 / 파란콘+초록화살표=마찰콘+GRF / 발별색선=발궤적
         d = self.d; m = self.m
         scn = v.user_scn; scn.ngeom = 0; eye = np.eye(3).flatten()
+        if not self._viz:                                    # ★모니터 표시 OFF(GUI 토글): overlay 전부 끔, 발색 복원
+            for i in range(4):
+                for g in self.foot_geoms[i]:
+                    self.m.geom_rgba[g] = self._foot_rgba0[g]
+            return
         def _sph(p, r, c):
             if scn.ngeom >= scn.maxgeom: return
             mujoco.mjv_initGeom(scn.geoms[scn.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE,
@@ -659,14 +671,17 @@ class QuadSim:
             g = scn.geoms[scn.ngeom]
             mujoco.mjv_initGeom(g, typ, np.zeros(3), np.zeros(3), eye, np.asarray(c, np.float32))
             mujoco.mjv_connector(g, typ, w, np.asarray(a, float), np.asarray(b, float)); scn.ngeom += 1
-        # ── ★elevation map 시각화(ELEVMAP=1): 로봇중심 격자를 높이별 색 마커(파랑낮음→빨강높음) ──
-        if os.environ.get('ELEVMAP') and (self._stair is not None or self._elev):
-            _bx, _by = d.qpos[0], d.qpos[1]
-            for _gx in np.arange(_bx - 0.3, _bx + 1.2, 0.09):
-                for _gy in np.arange(_by - 0.4, _by + 0.41, 0.09):
-                    _h = self.terrain_height(_gx, _gy)
-                    _t = min(1.0, max(0.0, _h / 0.30))
-                    _sph([_gx, _gy, _h + 0.012], 0.02, [_t, 0.25, 1 - _t, 0.7])
+        # ── ★elevation map 시각화(모니터 토글에 포함): 로봇중심 격자를 높이별 색(파랑낮음→빨강높음). 100ms캐시 ──
+        if self._terrain_on:
+            if self._elev_cache is None or d.time - self._elev_t > 0.1 or d.time < self._elev_t:
+                _bx, _by = d.qpos[0], d.qpos[1]; _cc = []
+                for _gx in np.arange(_bx - 0.3, _bx + 1.05, 0.12):
+                    for _gy in np.arange(_by - 0.36, _by + 0.37, 0.12):
+                        _cc.append((float(_gx), float(_gy), self.terrain_height(_gx, _gy)))
+                self._elev_cache = _cc; self._elev_t = d.time
+            for _gx, _gy, _h in self._elev_cache:
+                _t = min(1.0, max(0.0, _h / 0.30))
+                _sph([_gx, _gy, _h + 0.012], 0.022, [_t, 0.25, 1 - _t, 0.7])
         ZC = 0.02                                            # 발 접지판별(발끝 z<ZC=접지)
         fp = [self.foot_point(i).copy() for i in range(4)]; fz = [p[2] for p in fp]
         # 발 접촉링: 접지면 빨강
@@ -802,7 +817,7 @@ class QuadSim:
                         mujoco.mj_resetData(m, d); reset_fn()
                 _pc += 1
                 if _sp and _pc % 3 == 0: self.publish_state(_sp)    # GUI 모니터 패널(~30Hz)
-                self.draw_overlay(v)
+                self.draw_overlay(v)                                # (내부서 self._viz 체크해 overlay on/off)
                 # 좌상단: 시뮬 시간 / 우상단: 외란 힘 N
                 fext = max((float(np.linalg.norm(d.xfrc_applied[b, :3]))
                             for b in range(1, m.nbody)), default=0.0)
@@ -815,8 +830,8 @@ class QuadSim:
                     (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
                      'cmd vx/vy/wz', '%+.2f %+.2f %+.2f' % (cv[0], cv[1], cv[5]))])
                 v.sync()
-                if _rate > 0:                                   # RATE=0이면 sleep없이 최대속도
-                    dt = _re * m.opt.timestep / _rate - (time.time() - t0)
+                if self._rate > 0:                              # ★live 배속(GUI). RATE=0이면 sleep없이 최대속도
+                    dt = _re * m.opt.timestep / self._rate - (time.time() - t0)
                     if dt > 0:
                         time.sleep(dt)
 
@@ -1044,6 +1059,11 @@ def mode_trot():
                 _ph = S['step_h']; S['step_h'] = float(_c.get('step_h', S['step_h']))   # ★step height 슬라이더(live)
                 if os.environ.get('SHDBG') and abs(S['step_h'] - _ph) > 1e-4:
                     print('[step_h] %.3f → %.3f (GUI live)' % (_ph, S['step_h']), flush=True)
+                q._rate = float(_c.get('rate', q._rate))             # ★뷰어 배속 슬라이더(live)
+                q._viz = bool(_c.get('viz', q._viz))                 # ★모니터 표시 토글(live)
+                _tn = bool(_c.get('terrain', q._terrain_on))         # ★지형적응 토글: launch 기본(STAIRS) 보존 위해 edge-trigger
+                if 'terr_seen' not in S: S['terr_seen'] = _tn        # 첫폴링=GUI기본값 기록만(적용X)
+                elif _tn != S['terr_seen']: q._terrain_on = _tn; S['terr_seen'] = _tn   # 사용자 토글만 적용
                 if JUMP is not None:                                  # 점프 트리거(jump_seq 상승엣지)
                     _js = int(_c.get('jump_seq', 0))
                     if S['jseq'] is not None and _js > S['jseq'] and not S['jact']:  # 첫폴링=동기화(시작점프 방지)
@@ -1139,10 +1159,12 @@ def mode_trot():
         vx_w = V_eff * cy - Vy_eff * sy; vy_w = V_eff * sy + Vy_eff * cy        # body→world 속도
         S['x_ref'][2] = S['yaw_ref']; S['x_ref'][8] = W_eff                     # yaw각·yaw rate 참조
         S['x_ref'][9] = vx_w; S['x_ref'][10] = vy_w                            # world vx,vy
-        if q._stair is not None or q._elev:                                    # ★perceptive: MPC 높이 기준=평지값+지형(상승 GRF 계획). 정석=planner가 참조생성
+        if q._terrain_on:                                                      # ★perceptive: MPC 높이 기준=평지값+지형(상승 GRF 계획). 정석=planner가 참조생성
             S.setdefault('z_ref0', S['x_ref'][5])                             #   arming 평지 높이 저장(최초 1회)
-            _thx = np.mean([q.terrain_height(q.d.xpos[q.hip_bid[i]][0], q.d.xpos[q.hip_bid[i]][1]) for i in range(4)])
-            S['x_ref'][5] = S['z_ref0'] + _thx
+            q._body_terr = float(np.mean([q.terrain_height(q.d.xpos[q.hip_bid[i]][0], q.d.xpos[q.hip_bid[i]][1]) for i in range(4)]))  # ★틱당1회(a_z 재사용)
+            S['x_ref'][5] = S['z_ref0'] + q._body_terr
+        else:
+            q._body_terr = 0.0
         q.cmd_v[0] = V_eff; q.cmd_v[1] = Vy_eff; q.cmd_v[5] = W_eff             # 시각화(body명령)
         # ★ Di Carlo 식: gait 스케줄=primary, detect_contact=조기/지연 착지 보정.
         #   스케줄 stance → 힘제어. 스케줄 swing 후반(>0.7)+접촉감지 → 조기착지로 stance 승격.
