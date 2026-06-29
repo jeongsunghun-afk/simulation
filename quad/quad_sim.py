@@ -167,7 +167,6 @@ class QuadSim:
         _wmap = {'hip': 29.6, 'thigh': 29.6, 'calf': 19.7, 'foot': 14.8}
         self._w_limit = np.array([next((v for k, v in _wmap.items() if k in n), 29.6) for n in _jnames])
         self._motor_curve = os.environ.get('MOTOR_CURVE') is not None   # 토크-속도 곡선(고속서 가용토크↓)
-        self._vel_clip = float(os.environ.get('VEL_CLIP', '0'))         # 각속도 하드클립(×한계, 0=off; 1.0=한계서 클립)
         self._qdd_prev = np.zeros(self.nu)                              # JERK_LIM용 직전 q̈(관절)
         self._tau_prev = np.zeros(self.nu)                              # TAU_RATE용 직전 τ(관절)
         self._tau_filt = np.zeros(self.nu)                              # 출력 토크 LPF 상태
@@ -714,9 +713,6 @@ class QuadSim:
             _Lt, _Ldq, _Ltau = [], [], []
             for s in range(nsteps):
                 control_fn(); mujoco.mj_step(m, d)
-                if self._vel_clip > 0:   # ★각속도 하드클립 백스톱(±VEL_CLIP×한계). QP제약/모터곡선 넘어선 동적 초과 차단
-                    _wl = self._vel_clip * self._w_limit
-                    d.qvel[6:6 + self.nu] = np.clip(d.qvel[6:6 + self.nu], -_wl, _wl)
                 if _logj:
                     _Lt.append(d.time); _Ldq.append(d.qvel[6:6+self.nu].copy()); _Ltau.append(d.ctrl[:self.nu].copy())
                 if reset_on_fall and d.qpos[2] < 0.2:
