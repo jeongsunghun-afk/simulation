@@ -195,8 +195,8 @@ dynproblem.createProblem(
     model_handler.getReferenceState(), T, force_size, gravity[2], False
 )
 
-T_ds = 10
-T_ss = 30
+T_ds = int(_os.environ.get("TDS","10"))   # ★cadence env(빠른보폭=고속): 더블서포트/스윙 노드수
+T_ss = int(_os.environ.get("TSS","30"))
 
 mpc_conf = dict(
     support_force=-model_handler.getMass() * gravity[2],
