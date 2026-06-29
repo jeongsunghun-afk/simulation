@@ -161,6 +161,13 @@ class QuadSim:
         # per-joint Peak토크(QP 한계+클립용): jnt_actfrcrange = hip/thigh84·calf126·foot168, qpos/ctrl 순서 일치
         self._tau_peak = np.array([self.m.jnt_actfrcrange[j, 1] if self.m.jnt_actfrcrange[j, 1] > 0 else 1e8
                                    for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE])
+        # ★실모터 모델(sim2real): 관절별 각속도한계(no-load ω) — hip/thigh29.6·calf19.7·foot14.8 rad/s
+        _jnames = [mujoco.mj_id2name(self.m, mujoco.mjtObj.mjOBJ_JOINT, j) or ''
+                   for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
+        _wmap = {'hip': 29.6, 'thigh': 29.6, 'calf': 19.7, 'foot': 14.8}
+        self._w_limit = np.array([next((v for k, v in _wmap.items() if k in n), 29.6) for n in _jnames])
+        self._motor_curve = os.environ.get('MOTOR_CURVE') is not None   # 토크-속도 곡선(고속서 가용토크↓)
+        self._vel_clip = float(os.environ.get('VEL_CLIP', '0'))         # 각속도 하드클립(×한계, 0=off; 1.0=한계서 클립)
         # per-joint 위치 한계(WBIC QP, 가속도경계용): jnt_range
         _jl = [(self.m.jnt_range[j, 0], self.m.jnt_range[j, 1]) if self.m.jnt_limited[j] else (-1e9, 1e9)
                for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
@@ -302,7 +309,13 @@ class QuadSim:
         for k, J in enumerate(Js):
             tau -= J[:, 6:6 + self.nu].T @ lam[k]
         self.last_lam = lam
-        d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)   # per-joint Peak로 안전클립(QP가 이미 존중)
+        # ★토크 한계: 기본=Peak 상수클립. MOTOR_CURVE면 토크-속도 곡선(고속서 가용토크↓=실모터)
+        if self._motor_curve:
+            _w = d.qvel[6:6 + self.nu]
+            _avail = self._tau_peak * np.maximum(0.0, 1.0 - np.abs(_w) / self._w_limit)
+            d.ctrl[:] = np.clip(tau, -_avail, _avail)
+        else:
+            d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)   # per-joint Peak 클립(QP가 이미 존중)
         return tau, True
 
     # ── MPC (Linear Convex, gait_sim.controllers.mpc 재사용) + WBIC 추종 ──
@@ -438,6 +451,14 @@ class QuadSim:
             for j in range(self.nu):
                 _u = min(ub[6 + j], ub_p[j]); _l = max(lb[6 + j], lb_p[j])
                 if _l <= _u: ub[6 + j] = _u; lb[6 + j] = _l   # 일관시만 적용(infeasible 방지)
+        # ★각속도 한계 QP제약(controller-aware, sim2real): ω+q̈·T_la ∈ [−ωlim,ωlim] → q̈ 경계. POS_LIM과 동일구조.
+        if os.environ.get('VEL_LIM'):
+            _tlav = float(os.environ.get('VEL_TLA', '0.02'))   # 속도한계 lookahead[s]
+            dqv = qv[6:6 + self.nu]
+            ub_v = (self._w_limit - dqv) / _tlav; lb_v = (-self._w_limit - dqv) / _tlav
+            for j in range(self.nu):
+                _u = min(ub[6 + j], ub_v[j]); _l = max(lb[6 + j], lb_v[j])
+                if _l <= _u: ub[6 + j] = _u; lb[6 + j] = _l   # 일관시만(infeasible 방지)
         for k in range(K):
             o = nv + 3 * k; lb[o + 2] = LAMZ_MIN
             for sx, sy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
@@ -466,7 +487,13 @@ class QuadSim:
         for k, J in enumerate(Js):
             tau -= J[:, 6:6 + self.nu].T @ lam[k]
         self.last_lam = lam
-        d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)   # per-joint Peak로 안전클립(QP가 이미 존중)
+        # ★토크 한계: 기본=Peak 상수클립. MOTOR_CURVE면 토크-속도 곡선(고속서 가용토크↓=실모터)
+        if self._motor_curve:
+            _w = d.qvel[6:6 + self.nu]
+            _avail = self._tau_peak * np.maximum(0.0, 1.0 - np.abs(_w) / self._w_limit)
+            d.ctrl[:] = np.clip(tau, -_avail, _avail)
+        else:
+            d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)   # per-joint Peak 클립(QP가 이미 존중)
         return tau, True
 
     # ── 제어 ──────────────────────────────────────────
@@ -641,8 +668,15 @@ class QuadSim:
             nsteps = int(os.environ.get('STEPS', '1500'))
             pe = int(os.environ.get('PRINT_EVERY', '100'))   # 출력 간격(스텝). 첫사이클 관찰은 20 등
             falls = 0
+            _logj = os.environ.get('LOG_JOINTS')             # ★관절 각속도·토크 로깅 → npz(그래프용)
+            _Lt, _Ldq, _Ltau = [], [], []
             for s in range(nsteps):
                 control_fn(); mujoco.mj_step(m, d)
+                if self._vel_clip > 0:   # ★각속도 하드클립 백스톱(±VEL_CLIP×한계). QP제약/모터곡선 넘어선 동적 초과 차단
+                    _wl = self._vel_clip * self._w_limit
+                    d.qvel[6:6 + self.nu] = np.clip(d.qvel[6:6 + self.nu], -_wl, _wl)
+                if _logj:
+                    _Lt.append(d.time); _Ldq.append(d.qvel[6:6+self.nu].copy()); _Ltau.append(d.ctrl[:self.nu].copy())
                 if reset_on_fall and d.qpos[2] < 0.2:
                     falls += 1; mujoco.mj_resetData(m, d); reset_fn()
                 if _sp and s % 30 == 0: self.publish_state(_sp)   # GUI 모니터 패널
@@ -660,6 +694,10 @@ class QuadSim:
                     print('[hl] s=%d t=%.2f z=%.3f x=%+.3f y=%+.3f yaw=%+.0f tilt=%.1f 침투뒤/앞=%.1f/%.1fmm falls=%d'
                           % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], yaw, tilt, pr*1000, pf*1000, falls), flush=True)
             print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f' % (nsteps, falls, d.qpos[0]), flush=True)
+            if _logj:
+                _names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ('act%d'%i) for i in range(self.nu)]
+                np.savez(_logj, t=np.array(_Lt), dq=np.array(_Ldq), tau=np.array(_Ltau), names=np.array(_names))
+                print('[hl] 관절로그 저장: %s (%d스텝 %d관절)' % (_logj, len(_Lt), self.nu), flush=True)
             return
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
             v.opt.flags[mujoco.mjtVisFlag.mjVIS_COM] = 0
