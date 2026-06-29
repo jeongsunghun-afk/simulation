@@ -168,6 +168,8 @@ class QuadSim:
         self._w_limit = np.array([next((v for k, v in _wmap.items() if k in n), 29.6) for n in _jnames])
         self._motor_curve = os.environ.get('MOTOR_CURVE') is not None   # 토크-속도 곡선(고속서 가용토크↓)
         self._vel_clip = float(os.environ.get('VEL_CLIP', '0'))         # 각속도 하드클립(×한계, 0=off; 1.0=한계서 클립)
+        self._qdd_prev = np.zeros(self.nu)                              # JERK_LIM용 직전 q̈(관절)
+        self._tau_prev = np.zeros(self.nu)                              # TAU_RATE용 직전 τ(관절)
         # per-joint 위치 한계(WBIC QP, 가속도경계용): jnt_range
         _jl = [(self.m.jnt_range[j, 0], self.m.jnt_range[j, 1]) if self.m.jnt_limited[j] else (-1e9, 1e9)
                for j in range(self.m.njnt) if self.m.jnt_type[j] != mujoco.mjtJoint.mjJNT_FREE]
@@ -309,6 +311,7 @@ class QuadSim:
         for k, J in enumerate(Js):
             tau -= J[:, 6:6 + self.nu].T @ lam[k]
         self.last_lam = lam
+        self._qdd_prev = qdd[6:6 + self.nu].copy(); self._tau_prev = tau.copy()   # JERK_LIM/TAU_RATE 상태
         # ★토크 한계: 기본=Peak 상수클립. MOTOR_CURVE면 토크-속도 곡선(고속서 가용토크↓=실모터)
         if self._motor_curve:
             _w = d.qvel[6:6 + self.nu]
@@ -459,6 +462,13 @@ class QuadSim:
             for j in range(self.nu):
                 _u = min(ub[6 + j], ub_v[j]); _l = max(lb[6 + j], lb_v[j])
                 if _l <= _u: ub[6 + j] = _u; lb[6 + j] = _l   # 일관시만(infeasible 방지)
+        # ★저크 제한 QP제약(controller-aware): |q̈ − q̈_prev| ≤ Δmax → q̈∈[q̈_prev±Δ]. jerk≈Δq̈/dt 직접 제한.
+        if os.environ.get('JERK_LIM'):
+            _dmax = float(os.environ.get('JERK_DDQ', '300'))   # 스텝당 q̈ 변화 한계[rad/s²](jerk_max·dt_ctrl)
+            qp_ = self._qdd_prev
+            for j in range(self.nu):
+                _u = min(ub[6 + j], qp_[j] + _dmax); _l = max(lb[6 + j], qp_[j] - _dmax)
+                if _l <= _u: ub[6 + j] = _u; lb[6 + j] = _l   # 일관시만(infeasible 방지)
         for k in range(K):
             o = nv + 3 * k; lb[o + 2] = LAMZ_MIN
             for sx, sy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
@@ -468,7 +478,8 @@ class QuadSim:
         # ★토크 = M_act·q̈ + h_act − Σ Jᵀλ (z의 선형식 τ=T_mat·z+h_act). 한계(제약) + effort최소화(비용)
         _tau_lim = os.environ.get('TAU_LIM', '1') != '0'
         _w_tau = float(os.environ.get('W_TAU', '0'))        # 토크 effort 최소화 가중(기본0=off; 0.001~0.01 권장)
-        if _tau_lim or _w_tau > 0:
+        _tau_rate = os.environ.get('TAU_RATE')              # 토크 변화율 한계[Nm/step](기어박스 응력; 저크 직접)
+        if _tau_lim or _w_tau > 0 or _tau_rate:
             h_act = h[6:6 + self.nu]
             T_mat = np.zeros((self.nu, nz)); T_mat[:, :nv] = M[6:6 + self.nu, :]
             for k, J in enumerate(Js):
@@ -478,6 +489,10 @@ class QuadSim:
             if _tau_lim:                                    # per-joint 토크 한계 −τ_peak ≤ τ ≤ τ_peak
                 Gl.extend(list(T_mat));  hl.extend(list(self._tau_peak - h_act))
                 Gl.extend(list(-T_mat)); hl.extend(list(self._tau_peak + h_act))
+            if _tau_rate:                                   # |τ−τ_prev|≤Δτ : T_mat·z ∈ [τ_prev−Δ−h, τ_prev+Δ−h]
+                _dtau = float(_tau_rate)
+                Gl.extend(list(T_mat));  hl.extend(list(self._tau_prev + _dtau - h_act))
+                Gl.extend(list(-T_mat)); hl.extend(list(-(self._tau_prev - _dtau) + h_act))
         G = np.vstack(Gl) if Gl else None; hh = np.array(hl) if hl else None
         z = solve_qp(P, g, G, hh, A, b, lb, ub, solver='quadprog')
         if z is None:
@@ -487,6 +502,7 @@ class QuadSim:
         for k, J in enumerate(Js):
             tau -= J[:, 6:6 + self.nu].T @ lam[k]
         self.last_lam = lam
+        self._qdd_prev = qdd[6:6 + self.nu].copy(); self._tau_prev = tau.copy()   # JERK_LIM/TAU_RATE 상태
         # ★토크 한계: 기본=Peak 상수클립. MOTOR_CURVE면 토크-속도 곡선(고속서 가용토크↓=실모터)
         if self._motor_curve:
             _w = d.qvel[6:6 + self.nu]
