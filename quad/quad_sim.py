@@ -444,6 +444,14 @@ class QuadSim:
         for J in Js:
             Ac = np.zeros((3, nz)); Ac[:, :nv] = J
             A = np.vstack([A, Ac]); b = np.concatenate([b, np.zeros(3)])
+        # ★v13 ②식 발목 하드락(REAR_LOCK): 뒷발목 q̈를 home으로 임계감쇠 servo하는 등식제약.
+        #   소프트 ANKLE_W(스프링,동역학과싸워 악화)와 달리 여유 발목을 null-space에서 제거→flail 차단.
+        if os.environ.get('REAR_LOCK') and self._ankle_idx:
+            _lkp = float(os.environ.get('LOCK_KP', '400')); _lkd = float(os.environ.get('LOCK_KD', '40'))
+            for aj in self._ankle_idx:
+                row = np.zeros(nz); row[6 + aj] = 1.0
+                a_hold = _lkp * (self.q_home[aj] - d.qpos[7 + aj]) - _lkd * qv[6 + aj]
+                A = np.vstack([A, row]); b = np.concatenate([b, [a_hold]])
         lb = np.full(nz, -1e8); ub = np.full(nz, 1e8); Gl = []; hl = []
         # ★관절 위치 한계(구조3 kinematics_limits 차용): q(T_la)=q+dq·T_la+½q̈·T_la² ∈ [qmin,qmax]
         #   → q̈ 경계. lookahead T_la로 한계 전 부드럽게 감속. 모순(이미 한계초과)이면 relax.
@@ -912,6 +920,8 @@ def mode_trot():
     HOME_T = float(os.environ.get('HOME_T', '1.8'))         # 호밍 지속[s]: 제자리 trot로 발을 기본명목 재정렬
     HOME_TOL = float(os.environ.get('HOME_TOL', '0.03'))    # 발편차 이하면 호밍 생략(이미 기본자세)
     T_ST = T_TROT * (1 - SWING_FRAC)
+    T_SW = T_TROT * SWING_FRAC                               # swing 지속[s] (해석 v_des 위상율용)
+    SWING_VREF = os.environ.get('SWING_VREF') == '1'        # v13식 스플라인 해석 v_des. ★측정결과 net-negative(전체제한시 falls=1, jerk 가속악화) → OFF default (v13 use_spline_diff=False와 동일결론)
     S = {'armed': False, 't0': 0.0, 'nominal': None, 'liftoff': None, 'x_ref': None,
          'ptgt_prev': [None, None, None, None], 'lam_des': None, 'mpc_t': -1.0, 'bx': 0.0,
          'settle_until': SETTLE,
@@ -1112,8 +1122,14 @@ def mode_trot():
             q.foot_targets[i] = p_end                       # 착지 목표 시각화
             p_tgt = swing_foot_pos(s_, S['liftoff'][i], p_end,
                                    np.array([vcom[0], vcom[1], 0]), step_height=_sh, tau_land=1.0)
-            pv = S['ptgt_prev'][i]                          # 목표속도(차분, 노이즈 억제 위해 clip)
-            v_tgt = np.clip((p_tgt - pv) / dt, -1.0, 1.0) if pv is not None else np.zeros(3)
+            if SWING_VREF and s_ < 1.0:                     # ★v13식 일관 레퍼런스: 한 스텝 앞 위상 샘플=스플라인 해석속도
+                _ph = min(s_ + dt / T_SW, 0.999)            #   (차분+±1.0clip의 불일치 제거 → SW_KD 피드포워드 정확 → 저크↓)
+                _pa = swing_foot_pos(_ph, S['liftoff'][i], p_end,
+                                     np.array([vcom[0], vcom[1], 0]), step_height=_sh, tau_land=1.0)
+                v_tgt = (_pa - p_tgt) / dt
+            else:
+                pv = S['ptgt_prev'][i]                      # (기존) 차분+±1.0 clip
+                v_tgt = np.clip((p_tgt - pv) / dt, -1.0, 1.0) if pv is not None else np.zeros(3)
             S['ptgt_prev'][i] = p_tgt.copy(); swing[i] = (p_tgt, v_tgt)
         # ★ 표준 구조: MPC 저주파 재계획(DT_MPC=0.02s=50Hz), WBIC 풀주파(500Hz).
         #   MPC는 무겁고(긴 호라이즌 QP) 느리게 변하는 GRF 계획 → 매 스텝 풀 필요 없음.
