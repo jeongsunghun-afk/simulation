@@ -186,6 +186,19 @@ class QuadSim:
                 for k in range(self.nu):
                     if _grp in _jnames[k]:
                         self._w_limit[k] /= _g; self._tau_peak[k] *= _g
+        # ★기어박스 물리 모델(sim2real, MJCF엔 0 → flail 과장 보정): 반사관성 I_rotor·N² + 점성감쇠 + Coulomb마찰
+        #   GEARBOX=1로 켜고, 값은 env로 조정. 대략값 기본(실측 스펙 들어오면 교체).
+        _gearmap = {'hip': 7.0, 'thigh': 7.0, 'calf': 10.5, 'foot': 14.0}   # 관절별 감속비
+        if os.environ.get('GEARBOX') == '1':
+            _Irot = float(os.environ.get('ROTOR_I', '1e-4'))   # 모터 로터관성[kg·m²] (대략)
+            _jdmp = float(os.environ.get('JDAMP', '0.1'))      # 관절 점성감쇠[N·m·s/rad] (대략)
+            _jfrc = float(os.environ.get('JFRIC', '0.5'))      # 관절 Coulomb 마찰[N·m] (대략)
+            for k in range(self.nu):
+                _N = next((v for kk, v in _gearmap.items() if kk in _jnames[k]), 7.0)
+                _dof = 6 + k                                   # base free=0~5, 능동관절=6+k (qvel 규약 일치)
+                self.m.dof_armature[_dof] = _Irot * _N * _N    # ★반사관성: 발목14²=196배 → 유효관성↑로 flail 억제
+                self.m.dof_damping[_dof] = _jdmp
+                self.m.dof_frictionloss[_dof] = _jfrc
         self.base_trail = _deque(maxlen=_tn)              # base 궤적(마젠타)
         self.foot_trail = [_deque(maxlen=_tn) for _ in range(4)]   # 발별 궤적
 
@@ -710,11 +723,12 @@ class QuadSim:
             pe = int(os.environ.get('PRINT_EVERY', '100'))   # 출력 간격(스텝). 첫사이클 관찰은 20 등
             falls = 0
             _logj = os.environ.get('LOG_JOINTS')             # ★관절 각속도·토크 로깅 → npz(그래프용)
-            _Lt, _Ldq, _Ltau = [], [], []
+            _Lt, _Ldq, _Ltau, _Lq, _Lquat = [], [], [], [], []
             for s in range(nsteps):
                 control_fn(); mujoco.mj_step(m, d)
                 if _logj:
                     _Lt.append(d.time); _Ldq.append(d.qvel[6:6+self.nu].copy()); _Ltau.append(d.ctrl[:self.nu].copy())
+                    _Lq.append(d.qpos[7:7+self.nu].copy()); _Lquat.append(d.qpos[3:7].copy())
                 if reset_on_fall and d.qpos[2] < 0.2:
                     falls += 1; mujoco.mj_resetData(m, d); reset_fn()
                 if _sp and s % 30 == 0: self.publish_state(_sp)   # GUI 모니터 패널
@@ -734,7 +748,8 @@ class QuadSim:
             print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f' % (nsteps, falls, d.qpos[0]), flush=True)
             if _logj:
                 _names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ('act%d'%i) for i in range(self.nu)]
-                np.savez(_logj, t=np.array(_Lt), dq=np.array(_Ldq), tau=np.array(_Ltau), names=np.array(_names))
+                np.savez(_logj, t=np.array(_Lt), dq=np.array(_Ldq), tau=np.array(_Ltau), names=np.array(_names),
+                         q=np.array(_Lq), quat=np.array(_Lquat))
                 print('[hl] 관절로그 저장: %s (%d스텝 %d관절)' % (_logj, len(_Lt), self.nu), flush=True)
             return
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
