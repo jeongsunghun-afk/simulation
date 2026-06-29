@@ -26,9 +26,9 @@ class SportClient:
         self.path = path
         self.vmax = VMAX; self.wmax = WMAX          # 조이스틱 풀스케일(보행속도 게이지로 live 조절)
         self.cmd = {'v': 0.0, 'vy': 0.0, 'w': 0.0, 'mode': 'stand_up',   # 시작=Ready(서기). Walk 눌러야 보행
-                    'body_h': 0.52, 'step_h': 0.15, 'euler': [0.0, 0.0, 0.0], 'gait': 0,
+                    'body_h': 0.52, 'step_h': 0.10, 'euler': [0.0, 0.0, 0.0], 'gait': 0,
                     'vmax': VMAX, 'jump_seq': 0, 'home_seq': 0,
-                    'rate': 1.0, 'viz': True, 'terrain': False}   # ★rate=뷰어배속 viz=모니터표시 terrain=지형적응
+                    'rate': 1.0, 'viz': True, 'terrain': True}   # ★rate=뷰어배속 viz=모니터표시 terrain=지형적응
         self._pub()
 
     def SimRate(self, r):                           # 뷰어 배속(0.25~4, 0=최대) — live
@@ -290,7 +290,7 @@ with dpg.window(tag='main'):
                          min_value=0.34, max_value=0.52, default_value=0.52,
                          callback=lambda s, a: sc.BodyHeight(a))
     dpg.add_slider_float(label='Step Height [m]  (보행중 live 적용)', tag='sh',
-                         min_value=0.05, max_value=0.20, default_value=0.15,
+                         min_value=0.05, max_value=0.20, default_value=0.10,
                          callback=lambda s, a: sc.StepHeight(a))
     dpg.add_separator()
     dpg.add_text('뷰어/지형/모니터 (live)', color=(170, 175, 195))
@@ -298,7 +298,7 @@ with dpg.window(tag='main'):
                          min_value=0.0, max_value=4.0, default_value=1.0,
                          callback=lambda s, a: sc.SimRate(a))
     with dpg.group(horizontal=True):
-        dpg.add_checkbox(label='지형적응 (Terrain perception)', tag='terr', default_value=False,
+        dpg.add_checkbox(label='지형적응 (Terrain perception)', tag='terr', default_value=True,
                          callback=lambda s, a: sc.SetTerrain(a))
         dpg.add_spacer(width=20)
         dpg.add_checkbox(label='모니터 표시 (GRF/CoM/궤적/elevation)', tag='viz', default_value=True,

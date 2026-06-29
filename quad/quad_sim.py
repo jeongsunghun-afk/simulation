@@ -77,8 +77,12 @@ class QuadSim:
                 H = float(os.environ.get('STAIR_H', '0.05')); D = float(os.environ.get('STAIR_D', '0.25'))
                 N = int(os.environ.get('STAIR_N', '6')); X0 = float(os.environ.get('STAIR_X0', '0.7'))
                 self._stair = (H, D, N, X0)
-                _g = ''.join('<geom type="box" pos="%.4f 0 %.4f" size="%.4f 1.0 %.4f" rgba="0.55 0.55 0.62 1" friction="1.3 0.02 0.001" condim="3"/>\n'
-                             % (X0 + i*D + D/2, (i+1)*H/2, D/2, (i+1)*H/2) for i in range(N))
+                _box = '<geom type="box" pos="%.4f 0 %.4f" size="%.4f 1.0 %.4f" rgba="0.55 0.55 0.62 1" friction="1.3 0.02 0.001" condim="3"/>\n'
+                _g = ''.join(_box % (X0 + i*D + D/2, (i+1)*H/2, D/2, (i+1)*H/2) for i in range(N))   # 오름 N단
+                if os.environ.get('STAIR_UPDOWN'):    # ★올라갔다 내려오기: 정상 평지(2칸) + 내림 N단
+                    _g += _box % (X0 + N*D + D/2, N*H/2, D/2, N*H/2)                                  # 정상 발판(1칸)
+                    _g += ''.join(_box % (X0 + (N+1)*D + j*D + D/2, (N-1-j)*H/2, D/2, (N-1-j)*H/2)
+                                  for j in range(N-1))                                                # 내림(N-1단, 마지막=지면)
                 _xml = _xml.replace('</worldbody>', _g + '</worldbody>')
             if self._linefoot > 0:                # ★선-발: HL/HR에 2번째 접촉구(원점에서 후방 _linefoot)
                 for _L in ('HL', 'HR'):
@@ -219,7 +223,8 @@ class QuadSim:
             _jdmp = float(os.environ.get('JDAMP', '0.1'))      # 관절 점성감쇠[N·m·s/rad] (대략)
             _jfrc = float(os.environ.get('JFRIC', '0.5'))      # 관절 Coulomb 마찰[N·m] (대략)
             for k in range(self.nu):
-                _N = next((v for kk, v in _gearmap.items() if kk in _jnames[k]), 7.0)
+                _grp = next((kk for kk in _gearmap if kk in _jnames[k]), 'hip')
+                _N = _gearmap[_grp] * float(os.environ.get('GEAR_' + _grp.upper(), '1.0'))   # ★GEAR_* 반영 실효 기어
                 _dof = 6 + k                                   # base free=0~5, 능동관절=6+k (qvel 규약 일치)
                 self.m.dof_armature[_dof] = _Irot * _N * _N    # ★반사관성: 발목14²=196배 → 유효관성↑로 flail 억제
                 self.m.dof_damping[_dof] = _jdmp
@@ -999,7 +1004,7 @@ def mode_trot():
     SETTLE = 0.5
     T_TROT = float(os.environ.get('TROT_T', '0.50'))        # 레퍼런스 trot 프리셋
     SWING_FRAC = float(os.environ.get('TROT_SWF', '0.50'))  # D=swing 비율
-    STEP_H = float(os.environ.get('TROT_STEPH', '0.08'))
+    STEP_H = float(os.environ.get('TROT_STEPH', '0.10'))
     V = float(os.environ.get('TROT_V', '0.30'))     # 전진속도[m/s] 초기/기본
     VY = float(os.environ.get('TROT_VY', '0.0'))    # ★측방속도[m/s] (+좌 −우)
     WZ = float(os.environ.get('TROT_WZ', '0.0'))    # 선회각속도[rad/s] (+좌선회)
