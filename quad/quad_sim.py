@@ -70,15 +70,23 @@ class QuadSim:
         self._terrain_on = False                                    # 지형적응(perception) — STAIRS/ELEV 확정 후 아래서 설정
         self._body_terr = 0.0                                       # 틱당 캐시: 4hip 평균 지형높이(a_z+MPC 공유)
         self._elev_cache = None; self._elev_t = -1.0                # elevation 시각화 격자 캐시(100ms마다 raycast)
-        if os.environ.get('STAIRS'):              # ★계단 환경 주입: STAIR_H(단높이)·STAIR_D(단깊이)·STAIR_N(단수)·STAIR_X0(시작x)
-            H = float(os.environ.get('STAIR_H', '0.05')); D = float(os.environ.get('STAIR_D', '0.25'))
-            N = int(os.environ.get('STAIR_N', '6')); X0 = float(os.environ.get('STAIR_X0', '0.7'))
-            self._stair = (H, D, N, X0)
-            _g = ''.join('<geom type="box" pos="%.4f 0 %.4f" size="%.4f 1.0 %.4f" rgba="0.55 0.55 0.62 1" friction="1.3 0.02 0.001" condim="3"/>\n'
-                         % (X0 + i*D + D/2, (i+1)*H/2, D/2, (i+1)*H/2) for i in range(N))
+        self._linefoot = float(os.environ.get('LINEFOOT', '0'))   # ★뒷발 선-접촉: 2번째 접촉구 간격[m](0=off, 점발). 발목이 pitch모멘트 받음
+        if os.environ.get('STAIRS') or self._linefoot > 0:
             with open(_xmlp) as _f: _xml = _f.read()
-            _xml = _xml.replace('</worldbody>', _g + '</worldbody>')
-            _tmp = os.path.join(os.path.dirname(_xmlp), '_stairs_tmp.mjcf')   # 메시 상대경로 해석 위해 같은 폴더에
+            if os.environ.get('STAIRS'):          # ★계단: STAIR_H(단높이)·STAIR_D(단깊이)·STAIR_N(단수)·STAIR_X0(시작x)
+                H = float(os.environ.get('STAIR_H', '0.05')); D = float(os.environ.get('STAIR_D', '0.25'))
+                N = int(os.environ.get('STAIR_N', '6')); X0 = float(os.environ.get('STAIR_X0', '0.7'))
+                self._stair = (H, D, N, X0)
+                _g = ''.join('<geom type="box" pos="%.4f 0 %.4f" size="%.4f 1.0 %.4f" rgba="0.55 0.55 0.62 1" friction="1.3 0.02 0.001" condim="3"/>\n'
+                             % (X0 + i*D + D/2, (i+1)*H/2, D/2, (i+1)*H/2) for i in range(N))
+                _xml = _xml.replace('</worldbody>', _g + '</worldbody>')
+            if self._linefoot > 0:                # ★선-발: HL/HR에 2번째 접촉구(원점에서 후방 _linefoot)
+                for _L in ('HL', 'HR'):
+                    _orig = '<geom name="%s_sphere"' % _L
+                    _s2 = ('<geom name="%s_sphere2" type="sphere" size="0.018" pos="%.6f 0.000000e+00 -0.056668" '
+                           'rgba="0.3 0.4 0.95 1" friction="1.3 0.02 0.001" condim="3" />\n                ' % (_L, 0.024546 - self._linefoot)) + _orig
+                    _xml = _xml.replace(_orig, _s2, 1)
+            _tmp = os.path.join(os.path.dirname(_xmlp), '_inject_tmp.mjcf')   # 메시 상대경로 위해 같은 폴더
             with open(_tmp, 'w') as _f: _f.write(_xml)
             self.m = mujoco.MjModel.from_xml_path(_tmp); os.remove(_tmp)
         else:
@@ -144,6 +152,13 @@ class QuadSim:
                 gid = N(mujoco.mjtObj.mjOBJ_GEOM, cfg['foot_geom'].format(L=L))
                 fb = self.m.geom_bodyid[gid]; self.foot_r[i] = float(self.m.geom_size[gid][0])
             self.foot_bid[i] = fb; self.foot_gid[i] = gid
+        # ★선-발: 뒷발 2번째 접촉구(sphere2) 감지 → foot_point2/jac2·WBIC 2점 접촉용
+        self.foot_gid2 = [-1] * 4; self.foot_r2 = [0.0] * 4
+        if self._linefoot > 0:
+            for i, L in enumerate(self.legs):
+                g2 = N(mujoco.mjtObj.mjOBJ_GEOM, L + '_sphere2')
+                if g2 >= 0:
+                    self.foot_gid2[i] = g2; self.foot_r2[i] = float(self.m.geom_size[g2][0])
         # ★물리환경을 구조3(02leg9_fulldynamics_mujoco.py line54-58)과 동일하게 ──
         #   timestep(1kHz)·CONE(마찰콘)·STIFF(접촉강성 전 geom solref)·FRIC(마찰). 발 침투(soft 접촉) 해결 포함.
         self.m.opt.timestep = float(os.environ.get('TIMESTEP', '0.001'))    # 구조3 dt_simu=1kHz
@@ -241,6 +256,14 @@ class QuadSim:
     def foot_jac(self, i):
         jp = np.zeros((3, self.nv))
         mujoco.mj_jac(self.m, self.d, jp, None, self.foot_point(i), self.foot_bid[i])
+        return jp
+
+    def foot_point2(self, i):                            # ★선-발: 뒷발 2번째 접촉구 바닥점
+        return self.d.geom_xpos[self.foot_gid2[i]] - np.array([0, 0, self.foot_r2[i]])
+
+    def foot_jac2(self, i):
+        jp = np.zeros((3, self.nv))
+        mujoco.mj_jac(self.m, self.d, jp, None, self.foot_point2(i), self.foot_bid[i])
         return jp
 
     def _foot_pt(self, i, dat):
@@ -440,7 +463,15 @@ class QuadSim:
                 → swing 다리도 stance 와 일관된 토크로 풀려 별도 IK-PD 루프 불필요."""
         d, m, nv = self.d, self.m, self.nv
         swing = swing or {}
-        K = len(contacts); nz = nv + 3 * K
+        # ★선-발: 뒷발 stance면 2번째 접촉점 추가(=선접촉). cjac/cpos/clam=확장 접촉점들. MPC힘은 점들이 분할추종(차등=pitch모멘트→발목이 받음)
+        cjac = []; cpos = []; clam = []
+        for c in contacts:
+            _pts = [(self.foot_jac(c), self.foot_point(c))]
+            if self._linefoot > 0 and self.foot_gid2[c] >= 0:
+                _pts.append((self.foot_jac2(c), self.foot_point2(c)))
+            for _J, _P in _pts:
+                cjac.append(_J); cpos.append(_P); clam.append(lam_des[c] / len(_pts))
+        K = len(cjac); nz = nv + 3 * K
         sl = lambda k: slice(nv + 3 * k, nv + 3 * k + 3)
         M = self.fullM(); h = d.qfrc_bias.copy(); qv = d.qvel.copy()
         P = np.zeros((nz, nz)); g = np.zeros(nz)
@@ -476,8 +507,8 @@ class QuadSim:
                 w_post = 0.1 if (6 + j) in sw_vidx else _pw
             P[6 + j, 6 + j] += w_post; g[6 + j] -= w_post * a_post[j]
         P[:nv, :nv] += 1e-3 * np.eye(nv)
-        for k in range(K):           # λ tracking
-            P[sl(k), sl(k)] += w_lam * np.eye(3); g[sl(k)] -= w_lam * lam_des[contacts[k]]
+        for k in range(K):           # λ tracking (확장 접촉점별, 선-발은 분할된 clam)
+            P[sl(k), sl(k)] += w_lam * np.eye(3); g[sl(k)] -= w_lam * clam[k]
         # ★각운동량 보상(leg-heavy 고속): 총 centroidal 각운동량 h_ω 를 GRF 모멘트로 감쇠.
         #   Σ rᵢ×λᵢ ≈ −Kd·h_ω  (SRBD MPC가 무시하는 다리 swing 각운동량을 WBIC가 보상 → 고속 yaw/pitch 드리프트↓)
         _w_am = float(os.environ.get('W_AM', '0'))
@@ -487,13 +518,13 @@ class QuadSim:
             hdes = -float(os.environ.get('KD_AM', '8')) * h_ang
             com = d.subtree_com[0]
             A_am = np.zeros((3, nz))
-            for k, c in enumerate(contacts):
-                r = self.foot_point(c) - com             # 발 위치 − CoM
+            for k in range(K):
+                r = cpos[k] - com                        # 접촉점 위치 − CoM
                 A_am[0, sl(k)] = [0.0, -r[2], r[1]]      # skew(r)
                 A_am[1, sl(k)] = [r[2], 0.0, -r[0]]
                 A_am[2, sl(k)] = [-r[1], r[0], 0.0]
             P += _w_am * (A_am.T @ A_am); g -= _w_am * (A_am.T @ hdes)
-        Js = [self.foot_jac(c) for c in contacts]
+        Js = cjac                                        # 확장 접촉점 Jacobian들
         A = np.zeros((6, nz)); b = -h[0:6]; A[:, :nv] = M[0:6, :]
         for k, J in enumerate(Js):
             A[:, sl(k)] = -J[:, 0:6].T
