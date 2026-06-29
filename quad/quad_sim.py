@@ -62,7 +62,8 @@ class QuadSim:
         self.foot_z0 = cfg.get('foot_z0', 0.0)   # nominal 자세 발바닥 목표 z(접지=0). 과거 0.02→20mm 부양 버그
         global MU; MU = cfg['mu']
         _xmlp = mjcf or cfg['mjcf']
-        self._stair = None                        # 계단 파라미터(H,D,N,X0) — 발/몸높이 적응용
+        self._stair = None                        # 계단 파라미터(H,D,N,X0) — 시각화/디버그용
+        self._elev = os.environ.get('ELEV') is not None  # ★elevation 쿼리 강제 ON(실 depth/험지용, STAIRS 없이도 raycast)
         if os.environ.get('STAIRS'):              # ★계단 환경 주입: STAIR_H(단높이)·STAIR_D(단깊이)·STAIR_N(단수)·STAIR_X0(시작x)
             H = float(os.environ.get('STAIR_H', '0.05')); D = float(os.environ.get('STAIR_D', '0.25'))
             N = int(os.environ.get('STAIR_N', '6')); X0 = float(os.environ.get('STAIR_X0', '0.7'))
@@ -208,15 +209,21 @@ class QuadSim:
     def fullM(self):
         M = np.zeros((self.nv, self.nv)); mujoco.mj_fullM(self.m, M, self.d.qM); return M
 
-    def terrain_z(self, x):
-        """지형(계단) 표면 높이 @ x [m]. 평지=0. 계단 i단(x∈[X0+iD,X0+(i+1)D]) 윗면=(i+1)H."""
-        if self._stair is None:
+    def terrain_height(self, x, y, z_high=3.0):
+        """지형 표면 높이 @ (x,y) [m] — ★표준 perceptive locomotion의 elevation-map 인터페이스.
+        현재 백엔드: sim 지오메트리에 하향 raycast(=depth센서가 측정하는 것과 동일, 로봇 geom은 건너뜀).
+        ★추후: 실제 depth센서 elevation map으로 이 메서드 백엔드만 교체(인터페이스 동일)."""
+        if self._stair is None and not self._elev:   # 평지+elev off: raycast 생략(성능, 평지=0)
             return 0.0
-        H, D, N, X0 = self._stair
-        if x < X0:
-            return 0.0
-        i = int((x - X0) // D)
-        return N * H if i >= N else (i + 1) * H
+        vec = np.array([0.0, 0.0, -1.0]); gid = np.zeros(1, np.int32); z = z_high
+        for _ in range(8):                            # 로봇 geom 맞으면 그 아래서 재캐스트 → 지형(worldbody)만
+            dist = mujoco.mj_ray(self.m, self.d, np.array([float(x), float(y), z]), vec, None, 1, -1, gid)
+            if dist < 0.0:
+                return 0.0
+            if int(self.m.geom_bodyid[gid[0]]) == 0:  # worldbody = 지형(floor/stairs)
+                return z - dist
+            z = (z - dist) - 0.01                      # 로봇이면 그 바로 아래서 재시작
+        return 0.0                                     # 8회 내 지형 못맞춤 → 평지로
 
     def foot_point(self, i):
         if self.foot_kind == 'mesh':
@@ -445,19 +452,21 @@ class QuadSim:
         w_ori = float(os.environ.get('W_ORI', '5.0'))
         for j in range(3):
             P[3 + j, 3 + j] += w_ori; g[3 + j] -= w_ori * a_ori[j]
-        _th = np.mean([self.terrain_z(self.d.xpos[self.hip_bid[i]][0]) for i in range(4)])  # ★계단: 4 hip 평균 지형높이(불연속 완화)
+        _th = np.mean([self.terrain_height(self.d.xpos[self.hip_bid[i]][0], self.d.xpos[self.hip_bid[i]][1]) for i in range(4)])  # ★4 hip 평균 지형높이(elevation, 불연속 완화)
         _zref = self.com_ref[2] + _th                         # 몸통 높이 기준을 지형따라 부드럽게 올림(평지=+0)
+        self._dbg_terr = _th; self._dbg_clr = d.subtree_com[0][2] - _th   # 진단: 지형높이·clearance(몸-지면)
         a_z = 200 * (_zref - d.subtree_com[0][2]) - 25 * (Jc @ qv)[2]
         w_z = float(os.environ.get('W_Z', '150.0'))   # 높이 유지 강화(nose-dive 방지 핵심)
         P[:nv, :nv] += w_z * np.outer(Jc[2], Jc[2]); g[:nv] -= w_z * a_z * Jc[2]
         # posture — swing 관절엔 약한 규제(w=0.1)만: 발끝 3D task가 다리 DOF<4 면 여유도
         #   (4-DOF 발목)를 남기므로 null-space 규제 없으면 발목이 발산(flail). 약규제로 안정화.
         a_post = 60 * (self.q_home - d.qpos[7:7 + self.nu]) - 5 * qv[6:6 + self.nu]
+        _pw = float(os.environ.get('POSTURE_W', '1.0'))      # ★stance 다리 posture 가중(계단서 ↓하면 다리 신장 자유=몸 상승)
         for j in range(self.nu):
             if j in self._ankle_idx and self._ankle_w > 0:   # 뒷발목: REAR_ANKLE에 강하게 핀(여자유도 고정→대칭)
                 w_post = self._ankle_w
             else:
-                w_post = 0.1 if (6 + j) in sw_vidx else 1.0
+                w_post = 0.1 if (6 + j) in sw_vidx else _pw
             P[6 + j, 6 + j] += w_post; g[6 + j] -= w_post * a_post[j]
         P[:nv, :nv] += 1e-3 * np.eye(nv)
         for k in range(K):           # λ tracking
@@ -757,8 +766,11 @@ class QuadSim:
                                 pen[fi] = min(pen[fi], c.dist)
                     yaw = np.degrees(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
                     pr = min(pen[0], pen[1]); pf = min(pen[2], pen[3])  # 뒤/앞 최대침투
-                    print('[hl] s=%d t=%.2f z=%.3f x=%+.3f y=%+.3f yaw=%+.0f tilt=%.1f 침투뒤/앞=%.1f/%.1fmm falls=%d'
-                          % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], yaw, tilt, pr*1000, pf*1000, falls), flush=True)
+                    _ext = ''
+                    if self._stair is not None:               # 계단: 지형높이·clearance(몸-지면 간격, 일정해야 정상 등반)
+                        _ext = ' terr=%.2f clr=%.2f' % (getattr(self, '_dbg_terr', 0.0), getattr(self, '_dbg_clr', 0.0))
+                    print('[hl] s=%d t=%.2f z=%.3f x=%+.3f y=%+.3f yaw=%+.0f tilt=%.1f 침투뒤/앞=%.1f/%.1fmm falls=%d%s'
+                          % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], yaw, tilt, pr*1000, pf*1000, falls, _ext), flush=True)
             print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f' % (nsteps, falls, d.qpos[0]), flush=True)
             if _logj:
                 _names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ('act%d'%i) for i in range(self.nu)]
@@ -1119,6 +1131,10 @@ def mode_trot():
         vx_w = V_eff * cy - Vy_eff * sy; vy_w = V_eff * sy + Vy_eff * cy        # body→world 속도
         S['x_ref'][2] = S['yaw_ref']; S['x_ref'][8] = W_eff                     # yaw각·yaw rate 참조
         S['x_ref'][9] = vx_w; S['x_ref'][10] = vy_w                            # world vx,vy
+        if q._stair is not None or q._elev:                                    # ★perceptive: MPC 높이 기준=평지값+지형(상승 GRF 계획). 정석=planner가 참조생성
+            S.setdefault('z_ref0', S['x_ref'][5])                             #   arming 평지 높이 저장(최초 1회)
+            _thx = np.mean([q.terrain_height(q.d.xpos[q.hip_bid[i]][0], q.d.xpos[q.hip_bid[i]][1]) for i in range(4)])
+            S['x_ref'][5] = S['z_ref0'] + _thx
         q.cmd_v[0] = V_eff; q.cmd_v[1] = Vy_eff; q.cmd_v[5] = W_eff             # 시각화(body명령)
         # ★ Di Carlo 식: gait 스케줄=primary, detect_contact=조기/지연 착지 보정.
         #   스케줄 stance → 힘제어. 스케줄 swing 후반(>0.7)+접촉감지 → 조기착지로 stance 승격.
@@ -1161,14 +1177,20 @@ def mode_trot():
             tw = W_eff * T_ST * np.array([-r_xy[1], r_xy[0]])  # 선회 접선 발배치(yaw)
             pe_xy = hip_xy + Rw @ S['hip_off'][i] + rai + tw  # nominal도 몸따라 회전 + Raibert + 선회
             s_ = gait(i, tg)[1]
-            p_end = np.array([pe_xy[0], pe_xy[1], S['gz'][i] + q.terrain_z(pe_xy[0])])  # ★계단: 착지 z=평지명목+지형높이
+            p_end = np.array([pe_xy[0], pe_xy[1], S['gz'][i] + q.terrain_height(pe_xy[0], pe_xy[1])])  # ★착지 z=평지명목+지형높이(elevation)
             q.foot_targets[i] = p_end                       # 착지 목표 시각화
+            # ★계단: swing_foot_pos의 Z는 liftoff 높이로 되돌아옴(p_end[2] 무시) → 계단서 착지면 아래로 내리꽂음.
+            #   Z baseline을 liftoff→landing 높이로 s5 보간해 보정(평지=Δz0 → 무변화). _dzland 클로저로 재사용.
+            _liftz = S['liftoff'][i][2]; _dzl = p_end[2] - _liftz
+            _zfix = lambda ss: _dzl * (10 * ss**3 - 15 * ss**4 + 6 * ss**5)
             p_tgt = swing_foot_pos(s_, S['liftoff'][i], p_end,
                                    np.array([vcom[0], vcom[1], 0]), step_height=_sh, tau_land=1.0)
+            p_tgt[2] += _zfix(s_)
             if SWING_VREF and s_ < 1.0:                     # ★v13식 일관 레퍼런스: 한 스텝 앞 위상 샘플=스플라인 해석속도
                 _ph = min(s_ + dt / T_SW, 0.999)            #   (차분+±1.0clip의 불일치 제거 → SW_KD 피드포워드 정확 → 저크↓)
                 _pa = swing_foot_pos(_ph, S['liftoff'][i], p_end,
                                      np.array([vcom[0], vcom[1], 0]), step_height=_sh, tau_land=1.0)
+                _pa[2] += _zfix(_ph)
                 v_tgt = (_pa - p_tgt) / dt
             else:
                 pv = S['ptgt_prev'][i]                      # (기존) 차분+±1.0 clip
