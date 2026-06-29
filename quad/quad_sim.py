@@ -1001,7 +1001,8 @@ def mode_trot():
     T_SW = T_TROT * SWING_FRAC                               # swing 지속[s] (해석 v_des 위상율용)
     SWING_VREF = os.environ.get('SWING_VREF') == '1'        # v13식 스플라인 해석 v_des. ★측정결과 net-negative(전체제한시 falls=1, jerk 가속악화) → OFF default (v13 use_spline_diff=False와 동일결론)
     S = {'armed': False, 't0': 0.0, 'nominal': None, 'liftoff': None, 'x_ref': None,
-         'ptgt_prev': [None, None, None, None], 'lam_des': None, 'mpc_t': -1.0, 'bx': 0.0,
+         'ptgt_prev': [None, None, None, None], 'foothold': [None, None, None, None],   # foothold=지형서 스윙중 고정된 착지목표
+         'lam_des': None, 'mpc_t': -1.0, 'bx': 0.0,
          'settle_until': SETTLE,
          'Vt': V, 'Vyt': VY, 'Wt': WZ,                      # 목표명령(GUI가 갱신)
          'Vs': 0.0, 'Vys': 0.0, 'Ws': 0.0, 'cmd_t': -1.0,   # 스무딩 적용명령(0서 시작)
@@ -1176,6 +1177,7 @@ def mode_trot():
             early = USE_DETECT and (not sch_stance) and contact[i] and s_prog > 0.7
             if sch_stance or early:                         # 스케줄 stance OR 조기착지 → 힘제어
                 st.append(i); S['ptgt_prev'][i] = None      # 다음 swing 첫 프레임 v_des=0
+                S['foothold'][i] = None                     # ★stance=foothold 잠금해제(다음 스윙서 재선정)
             else:                                           # 스케줄 swing → 위치제어(들어올림)
                 sw.append(i)
                 if s_prog < 0.03:                           # swing 시작 시 liftoff 캡처
@@ -1202,13 +1204,24 @@ def mode_trot():
         _sh = _STH if S['homing'] else (                    # 호밍=풀 step height(발 어긋남 클리어), 보행=시작 ramp
             _STH * (0.2 + 0.8 * min(1.0, tg / WARMUP)) if WARMUP > 1e-6 else _STH)
         for i in sw:                                        # swing 발끝 작업공간 목표(p,v)
-            hip_xy = q.d.xpos[q.hip_bid[i]][:2]
-            r_xy = hip_xy - q.d.qpos[:2]                     # 몸중심→hip
-            tw = W_eff * T_ST * np.array([-r_xy[1], r_xy[0]])  # 선회 접선 발배치(yaw)
-            pe_xy = hip_xy + Rw @ S['hip_off'][i] + rai + tw  # nominal도 몸따라 회전 + Raibert + 선회
             s_ = gait(i, tg)[1]
-            p_end = np.array([pe_xy[0], pe_xy[1], S['gz'][i] + q.terrain_height(pe_xy[0], pe_xy[1])])  # ★착지 z=평지명목+지형높이(elevation)
-            q.foot_targets[i] = p_end                       # 착지 목표 시각화
+            if q._terrain_on and S['foothold'][i] is not None:  # ★지형: 스윙시작에 정한 foothold 고정(슬라이드X = 사용자기대)
+                p_end = S['foothold'][i]
+            else:                                           # 평지=매틱 reactive Raibert / 지형=스윙첫프레임 1회계산후 lock
+                hip_xy = q.d.xpos[q.hip_bid[i]][:2]
+                r_xy = hip_xy - q.d.qpos[:2]                # 몸중심→hip
+                tw = W_eff * T_ST * np.array([-r_xy[1], r_xy[0]])  # 선회 접선 발배치(yaw)
+                pe_xy = hip_xy + Rw @ S['hip_off'][i] + rai + tw  # nominal도 몸따라 회전 + Raibert + 선회
+                _ex, _ey = float(pe_xy[0]), float(pe_xy[1])
+                if q._stair is not None:                    # ★foothold를 tread 중앙쪽으로 snap(riser 모서리 6cm 회피)
+                    _H, _D, _N, _X0 = q._stair
+                    if _ex >= _X0:
+                        _ti = min(int((_ex - _X0) // _D), _N - 1)
+                        _ex = min(max(_ex, _X0 + _ti * _D + 0.06), _X0 + (_ti + 1) * _D - 0.06)
+                p_end = np.array([_ex, _ey, S['gz'][i] + q.terrain_height(_ex, _ey)])
+                if q._terrain_on:
+                    S['foothold'][i] = p_end                # ★lock(스윙 동안 고정)
+            q.foot_targets[i] = p_end                       # 착지 목표 시각화(고정된 빨강구)
             # ★계단: swing_foot_pos의 Z는 liftoff 높이로 되돌아옴(p_end[2] 무시) → 계단서 착지면 아래로 내리꽂음.
             #   Z baseline을 liftoff→landing 높이로 s5 보간해 보정(평지=Δz0 → 무변화). _dzland 클로저로 재사용.
             _liftz = S['liftoff'][i][2]; _dzl = p_end[2] - _liftz
