@@ -287,9 +287,11 @@ with dpg.window(tag='main'):
     dpg.add_separator()
     with dpg.group(horizontal=True):
         dpg.add_text('게이트:', color=(170, 175, 195))
-        dpg.add_radio_button(('trot', 'walk'), tag='gait', horizontal=True, default_value='trot',
-                             callback=lambda s, a: (sc.SetGait(a), _status()))
-        dpg.add_text('(trot=대각·빠름 / walk=순차·정적안정·저속)', color=(120, 125, 145))
+        dpg.add_button(label='trot 대각', width=100,
+                       callback=lambda: (sc.SetGait('trot'), _status()))
+        dpg.add_button(label='walk 순차', width=100,
+                       callback=lambda: (sc.SetGait('walk'), _status()))
+        dpg.add_text('(trot=빠름 / walk=정적안정·저속)', color=(120, 125, 145))
     dpg.add_separator()
     dpg.add_text('속도/높이 (Walk=보행속도 게이지·live / Body=서기 높이·live / Step=발 들림)', color=(170, 175, 195))
     dpg.add_slider_float(label='Walk Speed [m/s]  (조이스틱 풀스케일 · 양 컨트롤러 공통)', tag='ws',
