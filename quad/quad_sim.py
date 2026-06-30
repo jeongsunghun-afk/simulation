@@ -1100,6 +1100,7 @@ def mode_trot():
     GETUP_DONE = float(os.environ.get('GETUP_DONE', '0.40'))   # 이 높이 넘으면 정상 wbic_stance로 핸드오프
     GETUP_KP = float(os.environ.get('GETUP_KP', '90')); GETUP_KD = float(os.environ.get('GETUP_KD', '3'))
     GETUP_RATE = float(os.environ.get('GETUP_RATE', '0.18'))   # getup 높이 램프[m/s](느리게=안정)
+    REST_KD = float(os.environ.get('REST_KD', '3.0'))          # ★눕기 완료 후 damping(kd-only) 게인 — 능동 hold 제거=모터off 등가(실로봇 power-off 안전)
     HRATE = float(os.environ.get('HEIGHT_RATE', '0.3'))    # 높이 변경 속도[m/s] (body_h·Ground 부드럽게)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
@@ -1273,6 +1274,12 @@ def mode_trot():
             S['ht_cur'] += float(np.clip(_tgt - S['ht_cur'], -_rate * q.m.opt.timestep, _rate * q.m.opt.timestep))
             if abs(S['ht_cur'] - S['qhome_h']) > 6e-3:        # 높이 램프 q_home/com_ref IK 재계산
                 q.update_stand_qhome(S['ht_cur']); S['qhome_h'] = S['ht_cur']
+            if q.cmd_mode == 'stand_down' and S['ht_cur'] <= GROUND_Z + 0.02:
+                # ★눕기 완료(trunk 지면 접지) → damping(kd-only, 능동 hold 제거) = 모터 off 등가.
+                #   실로봇서 여기서 전원 차단해도 지면이 받쳐 추가 처짐 없음(Go2 'damping' 자세와 동일).
+                q.d.ctrl[:] = np.clip(-REST_KD * q.d.qvel[6:6 + q.nu], -q._tau_peak, q._tau_peak)
+                S['armed'] = False; q.cmd_v[:] = 0.0
+                return
             if S['ht_cur'] < GETUP_DONE and not S['homing']:  # ★낮은 자세 = 수평 PD fold(눕기/getup 공통, 안 뒤집힘)
                 tau = q.d.qfrc_bias[6:6 + q.nu] + GETUP_KP * (q.q_home - q.d.qpos[7:7 + q.nu]) \
                     - GETUP_KD * q.d.qvel[6:6 + q.nu]                        # 중력보상 + q_home PD
