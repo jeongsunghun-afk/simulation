@@ -209,8 +209,9 @@ class QuadSim:
         self._ankle_w = float(os.environ.get('ANKLE_W', '20'))   # 0이면 핀 안함(기존 여자유도)
         # ★기어비 재배분(설계검토): GEAR_xxx<1=저기어(속도↑·토크↓), >1=고기어(토크↑·속도↓). 같은 베이스모터 토크↔속도 맞교환.
         #   보행분석: thigh=토크병목·속도여유→GEAR_THIGH>1 이득 / calf·foot=속도병목·토크여유→GEAR<1 이득
+        _gdef = {'hip': '1.0', 'thigh': '1.0', 'calf': '0.7619', 'foot': '1.0'}   # ★calf 기본 8:1(10.5→8): 뒷calf 속도병목 해소(19.7→25.9, 토크126→96). foot은 flail이라 유지
         for _grp in ('hip', 'thigh', 'calf', 'foot'):
-            _g = float(os.environ.get('GEAR_' + _grp.upper(), '1.0'))
+            _g = float(os.environ.get('GEAR_' + _grp.upper(), _gdef[_grp]))
             if _g != 1.0:
                 for k in range(self.nu):
                     if _grp in _jnames[k]:
@@ -874,13 +875,14 @@ class QuadSim:
             pe = int(os.environ.get('PRINT_EVERY', '100'))   # 출력 간격(스텝). 첫사이클 관찰은 20 등
             falls = 0
             _logj = os.environ.get('LOG_JOINTS')             # ★관절 각속도·토크 로깅 → npz(그래프용)
-            _Lt, _Ldq, _Ltau, _Lq, _Lquat, _Lse = [], [], [], [], [], []
+            _Lt, _Ldq, _Ltau, _Lq, _Lquat, _Lse, _Lfho = [], [], [], [], [], [], []
             for s in range(nsteps):
                 control_fn(); mujoco.mj_step(m, d)
                 if _logj:
                     _Lt.append(d.time); _Ldq.append(d.qvel[6:6+self.nu].copy()); _Ltau.append(d.ctrl[:self.nu].copy())
                     _Lq.append(d.qpos[7:7+self.nu].copy()); _Lquat.append(d.qpos[3:7].copy())
                     _Lse.append([getattr(self, '_swing_err', 0.0), getattr(self, '_swing_errh', 0.0)])  # swing 추종오차(전체·수평)
+                    _Lfho.append(getattr(self, '_fho', [np.nan]*4))   # foothold-hip x offset(전진+) 4발
                 if reset_on_fall and d.qpos[2] < 0.2:
                     falls += 1; mujoco.mj_resetData(m, d); reset_fn()
                 if _sp and s % 30 == 0: self.publish_state(_sp)   # GUI 모니터 패널
@@ -904,7 +906,7 @@ class QuadSim:
             if _logj:
                 _names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ('act%d'%i) for i in range(self.nu)]
                 np.savez(_logj, t=np.array(_Lt), dq=np.array(_Ldq), tau=np.array(_Ltau), names=np.array(_names),
-                         q=np.array(_Lq), quat=np.array(_Lquat), swerr=np.array(_Lse))
+                         q=np.array(_Lq), quat=np.array(_Lquat), swerr=np.array(_Lse), fho=np.array(_Lfho))
                 print('[hl] 관절로그 저장: %s (%d스텝 %d관절)' % (_logj, len(_Lt), self.nu), flush=True)
             return
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
@@ -1455,6 +1457,8 @@ def mode_trot():
             _e=[q.foot_point(i)-swing[i][0] for i in sw]
             q._swing_err=max(np.linalg.norm(e) for e in _e); q._swing_errh=max(np.hypot(e[0],e[1]) for e in _e)
         else: q._swing_err=0.0; q._swing_errh=0.0
+        # ★foothold가 hip 기준 앞/뒤 어디 생기는지(전진+): 앞다리 뻗음 진단
+        q._fho=[float(q.foot_targets[i][0]-q.d.xpos[q.hip_bid[i]][0]) if q.foot_targets[i] is not None else np.nan for i in range(4)]
         # ★ 표준 구조: MPC 저주파 재계획(DT_MPC=0.02s=50Hz), WBIC 풀주파(500Hz).
         #   MPC는 무겁고(긴 호라이즌 QP) 느리게 변하는 GRF 계획 → 매 스텝 풀 필요 없음.
         #   WBIC는 빠른 외란/접촉 반응 위해 매 스텝.  → 긴 호라이즌도 실시간 감당.
