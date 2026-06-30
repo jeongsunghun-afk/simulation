@@ -1140,6 +1140,7 @@ def mode_trot():
          'body_h': q.base_z0, 'ht_cur': q.base_z0, 'qhome_h': q.base_z0,   # body_h슬라이더 · 보간높이 · q_home 계산높이
          'step_h': STEP_H,                                                # ★GUI step height(live 갱신)
          'gait': GAIT,                                                     # ★현 게이트(GUI walk/trot 토글 live)
+         'pos_hold': None,                                                 # ★정지 시 래치한 x,y(드리프트 보정 기준)
          'yaw_hold': None,                                                 # 선회정지 시 유지할 헤딩(드리프트 보정)
          'jseq': None, 'jact': False, 'jk': 0, 'jsub': 0,                  # 점프: 마지막seq · 재생중 · 현knot · sub카운터
          'prev_mode': q.cmd_mode, 'homing': False, 'home_t0': 0.0,        # Ready 호밍: 직전모드 · 진행중 · 시작시각
@@ -1306,6 +1307,17 @@ def mode_trot():
             S['yaw_ref'] = S['yaw_hold']
         cy, sy = np.cos(yaw_m), np.sin(yaw_m)
         vx_w = V_eff * cy - Vy_eff * sy; vy_w = V_eff * sy + Vy_eff * cy        # body→world 속도
+        # ★정지 시 위치 홀드(yaw_hold의 병진판): 게이트 체계바이어스(walk 후방드리프트) 보정.
+        #   정지명령서 현 x,y 래치 → 표류를 작은 보정속도로 되돌림(MPC vx추종 + Raibert 발배치 반영). 이동중 해제.
+        #   상태추정(odometry) 기반 외부루프 위치제어 = 실로봇도 동일(비물리 아님).
+        if os.environ.get('POS_HOLD', '1') != '0' and abs(V_eff) < 0.03 and abs(Vy_eff) < 0.03 and abs(W_eff) < 0.05:
+            if S['pos_hold'] is None:
+                S['pos_hold'] = (float(q.d.qpos[0]), float(q.d.qpos[1]))
+            _phk = float(os.environ.get('POS_HOLD_K', '0.6'))              # 위치오차→보정속도 게인
+            vx_w += float(np.clip(-_phk * (q.d.qpos[0] - S['pos_hold'][0]), -0.15, 0.15))
+            vy_w += float(np.clip(-_phk * (q.d.qpos[1] - S['pos_hold'][1]), -0.15, 0.15))
+        else:
+            S['pos_hold'] = None
         S['x_ref'][2] = S['yaw_ref']; S['x_ref'][8] = W_eff                     # yaw각·yaw rate 참조
         S['x_ref'][9] = vx_w; S['x_ref'][10] = vy_w                            # world vx,vy
         if q._terrain_on:                                                      # ★perceptive: MPC 높이 기준=평지값+지형(상승 GRF 계획). 정석=planner가 참조생성
