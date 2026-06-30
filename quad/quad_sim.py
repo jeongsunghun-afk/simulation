@@ -1095,6 +1095,7 @@ def mode_trot():
     HRATE = float(os.environ.get('HEIGHT_RATE', '0.3'))    # 높이 변경 속도[m/s] (body_h·Ground 부드럽게)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
+    FOOT_LOCK_S = float(os.environ.get('FOOT_LOCK_S', '0.5'))  # ★평지 foothold lock 시점(swing 위상): 이후 착지목표 고정→터치다운 스케이팅 방지(초반 reactive·후반 commit). 1.0=항상reactive(구동작)
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off
     # ── 점프: GUI Jump 트리거 시 offline 궤적(quad_hop.solve_jump) 재생(피드포워드 u* + 관절 PD) ──
     JUMP_NPZ = os.environ.get('JUMP_NPZ', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'jump_stand.npz'))
@@ -1348,9 +1349,9 @@ def mode_trot():
             _STH * (0.2 + 0.8 * min(1.0, tg / WARMUP)) if WARMUP > 1e-6 else _STH)
         for i in sw:                                        # swing 발끝 작업공간 목표(p,v)
             s_ = gait(i, tg)[1]
-            if q._terrain_on and S['foothold'][i] is not None:  # ★지형: 스윙시작에 정한 foothold 고정(슬라이드X = 사용자기대)
+            if S['foothold'][i] is not None:                # ★잠긴 foothold 사용(지형=스윙시작 / 평지=late-swing) → 착지목표 고정=매끄러운 터치다운
                 p_end = S['foothold'][i]
-            else:                                           # 평지=매틱 reactive Raibert / 지형=스윙첫프레임 1회계산후 lock
+            else:                                           # 평지 초반=매틱 reactive Raibert(적응) / 지형=스윙첫프레임 1회
                 hip_xy = q.d.xpos[q.hip_bid[i]][:2]
                 r_xy = hip_xy - q.d.qpos[:2]                # 몸중심→hip
                 tw = W_eff * T_ST * np.array([-r_xy[1], r_xy[0]])  # 선회 접선 발배치(yaw)
@@ -1362,8 +1363,8 @@ def mode_trot():
                         _ti = min(int((_ex - _X0) // _D), _N - 1)
                         _ex = min(max(_ex, _X0 + _ti * _D + 0.06), _X0 + (_ti + 1) * _D - 0.06)
                 p_end = np.array([_ex, _ey, S['gz'][i] + q.terrain_height(_ex, _ey)])
-                if q._terrain_on:
-                    S['foothold'][i] = p_end                # ★lock(스윙 동안 고정)
+                if q._terrain_on or s_ >= FOOT_LOCK_S:      # ★지형=스윙시작 lock / 평지=late-swing(s≥0.5) lock → 터치다운 스케이팅 방지
+                    S['foothold'][i] = p_end                # 초반 reactive 적응 + 후반 commit(착지목표 고정)
             q.foot_targets[i] = p_end                       # 착지 목표 시각화(고정된 빨강구)
             # ★계단: swing_foot_pos의 Z는 liftoff 높이로 되돌아옴(p_end[2] 무시) → 계단서 착지면 아래로 내리꽂음.
             #   Z baseline을 liftoff→landing 높이로 s5 보간해 보정(평지=Δz0 → 무변화). _dzland 클로저로 재사용.
