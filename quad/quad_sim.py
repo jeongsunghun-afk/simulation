@@ -616,6 +616,75 @@ class QuadSim:
             d.ctrl[:self.nu] = self._tau_filt
         return tau, True
 
+    def wbic_jump(self, com_ref, comv_ref, acom_ref, q_ref, dq_ref, contacts,
+                  kp_lin=120.0, kd_lin=22.0, kp_j=160.0, kd_j=12.0,
+                  w_lin=120.0, w_ori=8.0, w_j=2.0, w_lam=0.1):
+        """표준 trajectory-tracking WBC — offline 점프궤적을 GRF로 닫아 추종.
+           단일 QP z=[q̈; λ]: ①CoM 3-DOF(피드포워드 acom_ref + PD → GRF가 폭발푸시
+           실현 + 수평표류 억제) ②base 자세 upright ③관절추종(q_ref/dq_ref).
+           contacts=현 위상 디딘발(load/push/land/recover=4, flight=()).
+           open-loop(피드포워드+관절PD)와 달리 base를 닫아 표류 제거 = MIT-Cheetah류."""
+        d, m, nv, nu = self.d, self.m, self.nv, self.nu
+        M = self.fullM(); h = d.qfrc_bias.copy(); qv = d.qvel.copy()
+        K = len(contacts); nz = nv + 3 * K
+        sl = lambda k: slice(nv + 3 * k, nv + 3 * k + 3)
+        P = np.zeros((nz, nz)); g = np.zeros(nz)
+        # ① CoM 3-DOF 추종 (접촉 있을 때만; flight=탄도라 제어 불가)
+        if K > 0:
+            Jc = np.zeros((3, nv)); mujoco.mj_jacSubtreeCom(m, d, Jc, 0)
+            com = d.subtree_com[0]; comv = Jc @ qv
+            a_lin = acom_ref + kp_lin * (com_ref - com) + kd_lin * (comv_ref - comv)
+            P[:nv, :nv] += w_lin * (Jc.T @ Jc); g[:nv] -= w_lin * (Jc.T @ a_lin)
+        # ② base 자세 upright (점프는 수평 유지)
+        oerr = np.zeros(3); mujoco.mju_quat2Vel(oerr, d.qpos[3:7], 1.0)
+        a_ori = 150 * (-oerr) - 20 * qv[3:6]
+        for j in range(3):
+            P[3 + j, 3 + j] += w_ori; g[3 + j] -= w_ori * a_ori[j]
+        # ③ 관절 추종 (q_ref/dq_ref — 발목 포함 전관절 → 여자유도 flail 차단)
+        a_j = kp_j * (q_ref - d.qpos[7:7 + nu]) + kd_j * (dq_ref - qv[6:6 + nu])
+        for j in range(nu):
+            P[6 + j, 6 + j] += w_j; g[6 + j] -= w_j * a_j[j]
+        P[:nv, :nv] += 1e-3 * np.eye(nv)
+        for k in range(K):
+            P[sl(k), sl(k)] += w_lam * np.eye(3)
+        # EOM(floating-base 6) + 접촉 무가속(등식)
+        Js = [self.foot_jac(c) for c in contacts]
+        A = np.zeros((6, nz)); b = -h[0:6]; A[:, :nv] = M[0:6, :]
+        for k, J in enumerate(Js):
+            A[:, sl(k)] = -J[:, 0:6].T
+        for J in Js:
+            Ac = np.zeros((3, nz)); Ac[:, :nv] = J
+            A = np.vstack([A, Ac]); b = np.concatenate([b, np.zeros(3)])
+        # 마찰추(부등식) + λz 하한
+        lb = np.full(nz, -1e8); ub = np.full(nz, 1e8); Gl = []; hl = []
+        for k in range(K):
+            o = nv + 3 * k; lb[o + 2] = LAMZ_MIN
+            for sx, sy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+                row = np.zeros(nz); row[o] = sx; row[o + 1] = sy; row[o + 2] = -MU * MU_MARGIN
+                Gl.append(row); hl.append(0.0)
+        P = 0.5 * (P + P.T) + 1e-8 * np.eye(nz)
+        # per-joint 토크 한계(부등식): τ=M_act·q̈+h_act−ΣJᵀλ ∈ [±τ_peak]
+        h_act = h[6:6 + nu]
+        T_mat = np.zeros((nu, nz)); T_mat[:, :nv] = M[6:6 + nu, :]
+        for k, J in enumerate(Js):
+            T_mat[:, sl(k)] = -J[:, 6:6 + nu].T
+        Gl.extend(list(T_mat));  hl.extend(list(self._tau_peak - h_act))
+        Gl.extend(list(-T_mat)); hl.extend(list(self._tau_peak + h_act))
+        G = np.vstack(Gl) if Gl else None; hh = np.array(hl) if hl else None
+        z = solve_qp(P, g, G, hh, A, b, lb, ub, solver='quadprog')
+        if z is None:
+            return None, False
+        qdd = z[:nv]; lam = [z[sl(k)] for k in range(K)]
+        tau = M[6:6 + nu, :] @ qdd + h[6:6 + nu]
+        for k, J in enumerate(Js):
+            tau -= J[:, 6:6 + nu].T @ lam[k]
+        if self._motor_curve:
+            _w = qv[6:6 + nu]; _avail = self._tau_peak * np.maximum(0.0, 1.0 - np.abs(_w) / self._w_limit)
+            d.ctrl[:] = np.clip(tau, -_avail, _avail)
+        else:
+            d.ctrl[:] = np.clip(tau, -self._tau_peak, self._tau_peak)
+        return tau, True
+
     # ── 제어 ──────────────────────────────────────────
     def set_home(self):
         mujoco.mj_forward(self.m, self.d)
@@ -1023,11 +1092,22 @@ def mode_trot():
     if os.path.exists(JUMP_NPZ):
         _jd = np.load(JUMP_NPZ, allow_pickle=True)
         _aq = q.m.actuator_trnid[:, 0]                  # 액추에이터→조인트
+        _perm = q.m.jnt_qposadr[_aq] - 7                # 액추에이터 i → qpos 관절슬롯
+        _qp = np.zeros_like(_jd['q']); _qp[:, _perm] = _jd['q']     # qpos순서 q_ref(WBC용)
+        _dp = np.zeros_like(_jd['dq']); _dp[:, _perm] = _jd['dq']
+        _has_wbc = 'com_ref' in _jd                     # 신 npz(CoM기준궤적)=WBC추종 / 구=open-loop
         JUMP = {'q': _jd['q'], 'dq': _jd['dq'], 'tau': _jd['tau'], 'base_z': _jd['base_z'],
+                'q_qp': _qp, 'dq_qp': _dp,
                 'sub': max(1, round(float(_jd['dt']) / q.m.opt.timestep)), 'N': len(_jd['tau']),
-                'qadr': q.m.jnt_qposadr[_aq], 'vadr': q.m.jnt_dofadr[_aq]}
-        print('[trot] 점프 궤적 로드: %s (knots=%d sub=%d 정점z=%.2f)'
-              % (JUMP_NPZ, JUMP['N'], JUMP['sub'], JUMP['base_z'].max()), flush=True)
+                'qadr': q.m.jnt_qposadr[_aq], 'vadr': q.m.jnt_dofadr[_aq],
+                'wbc': _has_wbc and os.environ.get('JUMP_OPENLOOP') != '1',
+                'com_ref': _jd['com_ref'] if _has_wbc else None,
+                'comv_ref': _jd['comv_ref'] if _has_wbc else None,
+                'acom_ref': _jd['acom_ref'] if _has_wbc else None,
+                'sched': [str(s) for s in _jd['sched']] if 'sched' in _jd else None}
+        print('[trot] 점프 궤적 로드: %s (knots=%d sub=%d 정점z=%.2f 추종=%s)'
+              % (JUMP_NPZ, JUMP['N'], JUMP['sub'], JUMP['base_z'].max(),
+                 'WBC(base닫음)' if JUMP['wbc'] else 'open-loop'), flush=True)
     JKP = float(os.environ.get('JUMP_KP', '120')); JKD = float(os.environ.get('JUMP_KD', '3'))
     # ── Ready 호밍: 누르면 발을 명목 위치로 다시 디뎌 기본자세 복귀(대각쌍 2스텝) ──
     HOME_ON_READY = os.environ.get('HOME_ON_READY', '0') == '1'   # 기본 OFF(사용자 선택): Ready=그자리 stance 유지. =1이면 발구름 호밍
@@ -1115,12 +1195,22 @@ def mode_trot():
         _prev_mode = S['prev_mode']; S['prev_mode'] = q.cmd_mode    # 매틱 직전모드(호밍 진입엣지 감지)
         if q.cmd_mode == 'stand_up' and _prev_mode != 'stand_up':   # 다른모드→Ready 진입도 호밍 요청
             S['home_req'] = True
-        # ── 점프 재생: offline 궤적 피드포워드 u* + 관절 PD (WBIC 우회, base는 물리로) ──
+        # ── 점프 재생: WBC추종(base를 GRF로 닫음, 표준) 또는 open-loop(피드포워드+관절PD) ──
         if S['jact'] and JUMP is not None:
             k = min(S['jk'], JUMP['N'] - 1)
-            qcur = q.d.qpos[JUMP['qadr']]; dqcur = q.d.qvel[JUMP['vadr']]
-            tau = JUMP['tau'][k] + JKP * (JUMP['q'][k] - qcur) + JKD * (JUMP['dq'][k] - dqcur)
-            q.d.ctrl[:] = np.clip(tau, -q._tau_peak, q._tau_peak)
+            if JUMP['wbc']:                                          # ★표준 WBC: CoM 3-DOF 피드백 + 관절추종
+                _ph = JUMP['sched'][k] if JUMP['sched'] is not None else 'push'
+                _cts = () if _ph == 'flight' else (0, 1, 2, 3)       # flight=탄도(접촉없음)
+                _r = q.wbic_jump(JUMP['com_ref'][k], JUMP['comv_ref'][k], JUMP['acom_ref'][k],
+                                 JUMP['q_qp'][k], JUMP['dq_qp'][k], _cts)
+                if _r[0] is None:                                    # QP 실패 시 open-loop 폴백
+                    qcur = q.d.qpos[JUMP['qadr']]; dqcur = q.d.qvel[JUMP['vadr']]
+                    tau = JUMP['tau'][k] + JKP * (JUMP['q'][k] - qcur) + JKD * (JUMP['dq'][k] - dqcur)
+                    q.d.ctrl[:] = np.clip(tau, -q._tau_peak, q._tau_peak)
+            else:                                                    # open-loop(구 npz/JUMP_OPENLOOP=1)
+                qcur = q.d.qpos[JUMP['qadr']]; dqcur = q.d.qvel[JUMP['vadr']]
+                tau = JUMP['tau'][k] + JKP * (JUMP['q'][k] - qcur) + JKD * (JUMP['dq'][k] - dqcur)
+                q.d.ctrl[:] = np.clip(tau, -q._tau_peak, q._tau_peak)
             q.cmd_v[:] = 0.0
             S['jsub'] += 1
             if S['jsub'] >= JUMP['sub']:

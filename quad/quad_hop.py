@@ -63,10 +63,21 @@ def _tilt(x):
     return np.degrees(np.arccos(np.clip(R[2, 2], -1, 1)))
 
 
+_PEAK_NM = {'hip': 84.0, 'thigh': 84.0, 'calf': 126.0, 'foot': 168.0}
+
+
+def _peak_taulim(M):
+    """관절별 실 Peak 토크 한계(평면 80 대신) — 점프 푸시서 calf 126·발목 168 활용.
+       모터스펙(02leg-motor-spec): Hip/thigh 84·Knee(calf) 126·Ankle(foot) 168 Nm."""
+    return np.array([next((_PEAK_NM[t] for t in _PEAK_NM if t in M.model.names[j]), 80.0)
+                     for j in range(2, M.model.njoints)])
+
+
 def solve_hop(apex=0.04, dt=0.01, n_settle=30, n_push=25, n_land=70,
               z_takeoff=0.52, view=False, save=None):
     """제자리 호핑 궤적. apex=신전높이 위 정점(m). 반환 (M, xs, us, schedule)."""
     M = QN.NMPCModel('ours')
+    M.tau_lim = _peak_taulim(M)                         # per-joint Peak(발목/calf 활용)
     x0 = M.x0.copy()
     nq, nv = M.model.nq, M.model.nv
     z_crouch = float(x0[2])
@@ -100,9 +111,10 @@ def solve_hop(apex=0.04, dt=0.01, n_settle=30, n_push=25, n_land=70,
     problem = crocoddyl.ShootingProblem(M.x0, actions, terminal)
     solver = crocoddyl.SolverFDDP(problem)
     solver.setCallbacks([crocoddyl.CallbackVerbose()])
+    solver.th_stop = 1e-6          # 1e-9는 과엄격(궤적 양호해도 미수렴판정) → 실사용 수렴기준
     N = len(actions)
     t0 = time.time()
-    done = solver.solve([M.x0] * (N + 1), [np.zeros(M.nu)] * N, 500, False, 1e-9)
+    done = solver.solve([M.x0] * (N + 1), [np.zeros(M.nu)] * N, 1000, False, 1e-9)
     xs = np.array(solver.xs); us = np.array(solver.us)
     print('[HOP] done=%s iters=%d time=%.0fms cost=%.3e' %
           (done, solver.iter, (time.time() - t0) * 1e3, solver.cost))
@@ -148,6 +160,7 @@ def solve_jump(stand_z=0.52, crouch_z=0.30, apex=0.04, dist=0.0, dt=0.01,
         qs = quad_sim.QuadSim()
     finally:
         sys.argv = _a
+    M.tau_lim = _peak_taulim(M)                         # per-joint Peak(발목/calf 활용)
     if save is None:
         save = 'jump_fwd.npz' if dist > 1e-6 else 'jump_stand.npz'
     pin2mj, mj_to_pin = QN._bridge(M, qs)
@@ -163,15 +176,16 @@ def solve_jump(stand_z=0.52, crouch_z=0.30, apex=0.04, dist=0.0, dt=0.01,
     x_air = x_crouch.copy(); x_air[2] = z_takeoff + apex; x_air[0] = dist * 0.5; x_air[nq + 0] = vx_tk
     x_land = state_at(crouch_z, x0=dist)                             # 전방 착지(웅크림)
     x_recover = state_at(stand_z, x0=dist)                           # 전방 서기
-    wbx = 50.0 if dist > 1e-6 else 0.0; wbvx = 50.0 if dist > 1e-6 else 1.0
+    wbx = 50.0; wbvx = 50.0    # 제자리도 x위치·이륙vx 강제(전방표류 방지 → 수직점프)
     print('[JUMP] stand z=%.3f→crouch z=%.3f→apex z=%.3f  dist=%.2fm (vz_tk=%.2f vx_tk=%.2f flight=%d)' %
           (stand_z, crouch_z, z_takeoff + apex, dist, vz_tk, vx_tk, n_flight))
 
     actions, sched = [], []
     for _ in range(n_load):                                          # 웅크림(squat down, x=0)
-        actions.append(_hop_action(M, M.legs, x_crouch, dt, w_base_z=120.0)); sched.append('load')
+        actions.append(_hop_action(M, M.legs, x_crouch, dt, w_base_z=120.0, w_base_x=wbx)); sched.append('load')
     for _ in range(n_push):                                          # 푸시(이륙: 상승+전진)
-        actions.append(_hop_action(M, M.legs, x_push, dt, w_base_z=200.0, w_base_vz=50.0, w_base_vx=wbvx))
+        actions.append(_hop_action(M, M.legs, x_push, dt, w_base_z=200.0, w_base_vz=50.0,
+                                   w_base_x=wbx, w_base_vx=wbvx))
         sched.append('push')
     for _ in range(n_flight):                                        # 비행(접촉제거=탄도, 전방 이동)
         actions.append(_hop_action(M, [], x_air, dt, w_base_z=0.0, w_base_vz=0.0, w_base_vx=0.0, w_joint=2.0))
@@ -184,8 +198,9 @@ def solve_jump(stand_z=0.52, crouch_z=0.30, apex=0.04, dist=0.0, dt=0.01,
     terminal = QN.build_terminal(M, x_recover, w=w_T)
     problem = crocoddyl.ShootingProblem(x_stand, actions, terminal)
     solver = crocoddyl.SolverFDDP(problem)
+    solver.th_stop = 1e-6          # 1e-9는 과엄격 → 실사용 수렴기준
     N = len(actions); t0 = time.time()
-    done = solver.solve([x_stand] * (N + 1), [np.zeros(nu)] * N, 500, False, 1e-9)
+    done = solver.solve([x_stand] * (N + 1), [np.zeros(nu)] * N, 1000, False, 1e-9)
     xs = np.array(solver.xs); us = np.array(solver.us)
     bz = xs[:, 2]; bx = xs[:, 0]; footz = np.array([_foot_z(M, x[:nq]) for x in xs])
     tilts = np.array([_tilt(x) for x in xs]); air = (footz > 0.02).sum()
@@ -202,9 +217,18 @@ def solve_jump(stand_z=0.52, crouch_z=0.30, apex=0.04, dist=0.0, dt=0.01,
         qref[k][pin2mj] = xs[k][7:7 + nu]; dqref[k][pin2mj] = xs[k][nq + 6:nq + 6 + nu]
     for k in range(len(us)):
         tauff[k][pin2mj] = us[k]
+    # ★표준 WBC추종용 CoM 기준궤적(위치/속도/가속 피드포워드) — base 안정화 task 입력
+    com_ref = np.zeros((len(xs), 3)); comv_ref = np.zeros((len(xs), 3))
+    for k in range(len(xs)):
+        pin.centerOfMass(M.model, M.data, xs[k][:nq], xs[k][nq:nq + nv])
+        com_ref[k] = M.data.com[0]; comv_ref[k] = M.data.vcom[0]
+    acom_ref = np.zeros_like(comv_ref)                  # CoM 가속 피드포워드(유한차분)
+    acom_ref[:-1] = (comv_ref[1:] - comv_ref[:-1]) / dt
+    quat_ref = xs[:, 3:7].copy()                        # base 자세 ref(xyzw, pinocchio)
     path = save if os.path.isabs(save) else os.path.join(QN._HERE, save)
     np.savez(path, q=qref, dq=dqref, tau=tauff, dt=dt, base_z=bz,
-             sched=np.array(sched, dtype=object), stand_z=stand_z)
+             sched=np.array(sched, dtype=object), stand_z=stand_z,
+             com_ref=com_ref, comv_ref=comv_ref, acom_ref=acom_ref, quat_ref=quat_ref)
     print('[JUMP] 저장(MuJoCo순서):', path)
     ok = done and air >= 4 and footz.max() > 0.015 and tilts.max() < 25 \
         and abs(bz[-1] - stand_z) < 0.06 and (dist < 1e-6 or abs((bx[-1] - bx[0]) - dist) < 0.12)
