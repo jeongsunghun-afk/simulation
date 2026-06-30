@@ -1094,7 +1094,12 @@ def mode_trot():
     WARMUP = float(os.environ.get('TROT_WARMUP', '0.6'))  # 시작 제자리trot 시간[s]: 첫 사이클 리듬확립 후 이동(시작 lurch 완화)
     CMDFILE = os.environ.get('CMDFILE')             # ★GUI 연동: JSON(/tmp/quad_cmd.json) 폴링(v/vy/w/mode/body_h)
     if CMDFILE: q.cmd_mode = 'stand_up'             # ★GUI 모드: 시작=Ready(stand). Walk 버튼 눌러야 gait 시작 (standalone은 move=즉시보행)
-    GROUND_Z = float(os.environ.get('GROUND_Z', '0.28'))   # Ground(눕기) 목표 높이[m]
+    GROUND_Z = float(os.environ.get('GROUND_Z', '0.18'))   # Ground(눕기) 목표 높이[m] — 낮춰 prone(recovery 대상)
+    # ★Recovery getup: 누운 상태(base 낮음)서 Ready=서기 요청 → 중력보상 q_home PD로 일어남(wbic_stance는 발 몸아래 가정→prone실패)
+    GETUP_TRIG = float(os.environ.get('GETUP_TRIG', '0.32'))   # 이 높이 미만서 서기요청=getup(누움 감지)
+    GETUP_DONE = float(os.environ.get('GETUP_DONE', '0.40'))   # 이 높이 넘으면 정상 wbic_stance로 핸드오프
+    GETUP_KP = float(os.environ.get('GETUP_KP', '90')); GETUP_KD = float(os.environ.get('GETUP_KD', '3'))
+    GETUP_RATE = float(os.environ.get('GETUP_RATE', '0.18'))   # getup 높이 램프[m/s](느리게=안정)
     HRATE = float(os.environ.get('HEIGHT_RATE', '0.3'))    # 높이 변경 속도[m/s] (body_h·Ground 부드럽게)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
@@ -1255,10 +1260,25 @@ def mode_trot():
             return
         # ── 모드: move 외(Ready 서기/Ground 눕기/STOP)는 제자리 WBIC stance + 높이제어 ──
         if q.cmd_mode != 'move':
+            # ★낮은 자세(Ground 눕기 / Ready getup) = 중력보상 PD로 "수평" q_home 추종.
+            #   wbic_stance는 ~0.29 미만 못 내려가고, 무제어 collapse는 비대칭으로 뒤집힘 →
+            #   수평 q_home PD가 양방향(눕기↓·일어서기↑) 모두 몸을 수평 유지하며 fold. ≥GETUP_DONE이면 wbic_stance(균형/외란대응).
+            _bz = float(q.d.qpos[2])
+            if _bz < GETUP_TRIG and S['ht_cur'] > GETUP_DONE:               # ★낙상 등 실제론 낮은데 ht_cur 높음 → 동기화(getup 진입)
+                S['ht_cur'] = max(0.12, _bz)
+                print('[trot] recovery getup (base_z=%.2f → 서기)' % _bz, flush=True)
             _tgt = GROUND_Z if q.cmd_mode == 'stand_down' else S['body_h']   # 눕기=낮게, 서기=슬라이더 높이
-            S['ht_cur'] += float(np.clip(_tgt - S['ht_cur'], -HRATE * q.m.opt.timestep, HRATE * q.m.opt.timestep))  # 부드럽게 보간
-            if abs(S['ht_cur'] - S['qhome_h']) > 6e-3:        # 목표 바뀌면 q_home/com_ref IK 재계산(다리 굽힘 자세)
+            _low = (S['ht_cur'] < GETUP_DONE) or (_tgt < GETUP_DONE)
+            _rate = GETUP_RATE if _low else HRATE                            # 낮은 자세 fold는 느리게(안정)
+            S['ht_cur'] += float(np.clip(_tgt - S['ht_cur'], -_rate * q.m.opt.timestep, _rate * q.m.opt.timestep))
+            if abs(S['ht_cur'] - S['qhome_h']) > 6e-3:        # 높이 램프 q_home/com_ref IK 재계산
                 q.update_stand_qhome(S['ht_cur']); S['qhome_h'] = S['ht_cur']
+            if S['ht_cur'] < GETUP_DONE and not S['homing']:  # ★낮은 자세 = 수평 PD fold(눕기/getup 공통, 안 뒤집힘)
+                tau = q.d.qfrc_bias[6:6 + q.nu] + GETUP_KP * (q.q_home - q.d.qpos[7:7 + q.nu]) \
+                    - GETUP_KD * q.d.qvel[6:6 + q.nu]                        # 중력보상 + q_home PD
+                q.d.ctrl[:] = np.clip(tau, -q._tau_peak, q._tau_peak)
+                S['armed'] = False; q.cmd_v[:] = 0.0
+                return
             # ★ 기본자세 호밍 요청(Ready 버튼·Ready 진입·점프완료) → 정착 후 제자리 trot로 발 재정렬 트리거
             if (HOME_ON_READY and S['home_req'] and not S['homing']
                     and q.cmd_mode == 'stand_up' and t >= S['settle_until']):
