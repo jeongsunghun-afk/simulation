@@ -1101,6 +1101,7 @@ def mode_trot():
     GETUP_KP = float(os.environ.get('GETUP_KP', '90')); GETUP_KD = float(os.environ.get('GETUP_KD', '3'))
     GETUP_RATE = float(os.environ.get('GETUP_RATE', '0.18'))   # getup 높이 램프[m/s](느리게=안정)
     REST_KD = float(os.environ.get('REST_KD', '3.0'))          # ★눕기 완료 후 damping(kd-only) 게인 — 능동 hold 제거=모터off 등가(실로봇 power-off 안전)
+    JOINT_SLEW = float(os.environ.get('JOINT_SLEW', '1.5'))    # ★fold 관절목표 slew속도[rad/s] — 벌어진 다리 정리 시 q_home으로 점진이동(launch/튀어오름 방지)
     HRATE = float(os.environ.get('HEIGHT_RATE', '0.3'))    # 높이 변경 속도[m/s] (body_h·Ground 부드럽게)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
@@ -1150,6 +1151,7 @@ def mode_trot():
          'pos_hold_on': os.environ.get('POS_HOLD', '1') != '0',           # ★정지 위치홀드 on/off (GUI live 격리용)
          'foot_lock_on': os.environ.get('FOOT_LOCK_ON', '1') != '0',      # ★터치다운 foothold lock on/off (GUI live 격리용)
          'foot_lock_s': GP['LOCK'], 'fl_seen': None,                      # ★lock 시점(낮을수록 강함). 게이트전환=프리셋 / 슬라이더=오버라이드(엣지)
+         'q_ref': None,                                                   # ★fold 관절목표(slew용): 진입 시 현자세서 q_home으로 점진
          'yaw_hold': None,                                                 # 선회정지 시 유지할 헤딩(드리프트 보정)
          'jseq': None, 'jact': False, 'jk': 0, 'jsub': 0,                  # 점프: 마지막seq · 재생중 · 현knot · sub카운터
          'prev_mode': q.cmd_mode, 'homing': False, 'home_t0': 0.0,        # Ready 호밍: 직전모드 · 진행중 · 시작시각
@@ -1264,7 +1266,7 @@ def mode_trot():
             # ★전원 off = 능동제어 없이 damping만 → 로봇 쓰러짐(recovery 데모: off→ground→ready).
             if q.cmd_mode == 'off':
                 q.d.ctrl[:] = np.clip(-REST_KD * q.d.qvel[6:6 + q.nu], -q._tau_peak, q._tau_peak)
-                S['armed'] = False; q.cmd_v[:] = 0.0
+                S['armed'] = False; q.cmd_v[:] = 0.0; S['q_ref'] = None
                 return
             # ★낮은 자세(Ground 눕기 / Ready getup) = 중력보상 PD로 "수평" q_home 추종.
             #   wbic_stance는 ~0.29 미만 못 내려가고, 무제어 collapse는 비대칭으로 뒤집힘 →
@@ -1284,14 +1286,19 @@ def mode_trot():
                 # ★눕기 완료(trunk 지면 접지) → damping(kd-only, 능동 hold 제거) = 모터 off 등가.
                 #   실로봇서 여기서 전원 차단해도 지면이 받쳐 추가 처짐 없음(Go2 'damping' 자세와 동일).
                 q.d.ctrl[:] = np.clip(-REST_KD * q.d.qvel[6:6 + q.nu], -q._tau_peak, q._tau_peak)
-                S['armed'] = False; q.cmd_v[:] = 0.0
+                S['armed'] = False; q.cmd_v[:] = 0.0; S['q_ref'] = None      # damp=fold 종료 → q_ref 리셋
                 return
             if S['ht_cur'] < GETUP_DONE and not S['homing']:  # ★낮은 자세 = 수평 PD fold(눕기/getup 공통, 안 뒤집힘)
-                tau = q.d.qfrc_bias[6:6 + q.nu] + GETUP_KP * (q.q_home - q.d.qpos[7:7 + q.nu]) \
-                    - GETUP_KD * q.d.qvel[6:6 + q.nu]                        # 중력보상 + q_home PD
+                if S['q_ref'] is None:                                       # fold 진입=현 자세서 시작(벌어진 다리도 그자리서)
+                    S['q_ref'] = q.d.qpos[7:7 + q.nu].copy()
+                S['q_ref'] += np.clip(q.q_home - S['q_ref'],                 # ★관절목표 점진 slew → q_home (launch 방지)
+                                      -JOINT_SLEW * q.m.opt.timestep, JOINT_SLEW * q.m.opt.timestep)
+                tau = q.d.qfrc_bias[6:6 + q.nu] + GETUP_KP * (S['q_ref'] - q.d.qpos[7:7 + q.nu]) \
+                    - GETUP_KD * q.d.qvel[6:6 + q.nu]                        # 중력보상 + 점진목표 PD
                 q.d.ctrl[:] = np.clip(tau, -q._tau_peak, q._tau_peak)
                 S['armed'] = False; q.cmd_v[:] = 0.0
                 return
+            S['q_ref'] = None                                               # fold 벗어남(wbic/damp/off/move) → 다음 진입 시 현자세서 재시작
             # ★ 기본자세 호밍 요청(Ready 버튼·Ready 진입·점프완료) → 정착 후 제자리 trot로 발 재정렬 트리거
             if (HOME_ON_READY and S['home_req'] and not S['homing']
                     and q.cmd_mode == 'stand_up' and t >= S['settle_until']):
@@ -1305,7 +1312,7 @@ def mode_trot():
                 return
             # 호밍 중이면 아래 trot 경로로 진행(제자리 v=0, 발=기본명목 — MPC 균형 재활용)
         else:
-            S['homing'] = False                               # move(보행) 명령 = 호밍 취소
+            S['homing'] = False; S['q_ref'] = None            # move(보행) 명령 = 호밍 취소 + fold q_ref 리셋
         # ── trot 경로 (move 보행 또는 homing 제자리 재정렬) ──
         if S['homing'] and (t - S['home_t0'] > HOME_T):       # 호밍 종료 → stance 복귀
             S['homing'] = False; S['armed'] = False; S['settle_until'] = t + SETTLE
