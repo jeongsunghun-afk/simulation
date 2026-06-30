@@ -1261,20 +1261,26 @@ def mode_trot():
             return
         # ── 모드: move 외(Ready 서기/Ground 눕기/STOP)는 제자리 WBIC stance + 높이제어 ──
         if q.cmd_mode != 'move':
+            # ★전원 off = 능동제어 없이 damping만 → 로봇 쓰러짐(recovery 데모: off→ground→ready).
+            if q.cmd_mode == 'off':
+                q.d.ctrl[:] = np.clip(-REST_KD * q.d.qvel[6:6 + q.nu], -q._tau_peak, q._tau_peak)
+                S['armed'] = False; q.cmd_v[:] = 0.0
+                return
             # ★낮은 자세(Ground 눕기 / Ready getup) = 중력보상 PD로 "수평" q_home 추종.
             #   wbic_stance는 ~0.29 미만 못 내려가고, 무제어 collapse는 비대칭으로 뒤집힘 →
             #   수평 q_home PD가 양방향(눕기↓·일어서기↑) 모두 몸을 수평 유지하며 fold. ≥GETUP_DONE이면 wbic_stance(균형/외란대응).
             _bz = float(q.d.qpos[2])
-            if _bz < GETUP_TRIG and S['ht_cur'] > GETUP_DONE:               # ★낙상 등 실제론 낮은데 ht_cur 높음 → 동기화(getup 진입)
+            if _bz < GETUP_TRIG and S['ht_cur'] > GETUP_DONE:               # ★쓰러짐/off로 실제 낮은데 ht_cur 높음 → 동기화(현 높이서 fold 시작)
                 S['ht_cur'] = max(0.12, _bz)
-                print('[trot] recovery getup (base_z=%.2f → 서기)' % _bz, flush=True)
+                print('[trot] recovery (%s, base_z=%.2f)' % (q.cmd_mode, _bz), flush=True)
             _tgt = GROUND_Z if q.cmd_mode == 'stand_down' else S['body_h']   # 눕기=낮게, 서기=슬라이더 높이
             _low = (S['ht_cur'] < GETUP_DONE) or (_tgt < GETUP_DONE)
             _rate = GETUP_RATE if _low else HRATE                            # 낮은 자세 fold는 느리게(안정)
             S['ht_cur'] += float(np.clip(_tgt - S['ht_cur'], -_rate * q.m.opt.timestep, _rate * q.m.opt.timestep))
             if abs(S['ht_cur'] - S['qhome_h']) > 6e-3:        # 높이 램프 q_home/com_ref IK 재계산
                 q.update_stand_qhome(S['ht_cur']); S['qhome_h'] = S['ht_cur']
-            if q.cmd_mode == 'stand_down' and S['ht_cur'] <= GROUND_Z + 0.02:
+            _jerr = float(np.mean(np.abs(q.q_home - q.d.qpos[7:7 + q.nu])))   # 다리가 q_home(정리자세)에 얼마나 가까운지
+            if q.cmd_mode == 'stand_down' and abs(S['ht_cur'] - GROUND_Z) <= 0.02 and _jerr < 0.3:   # ★다리 정리(fold) 완료 후에만 damp(벌어진채 damp 방지)
                 # ★눕기 완료(trunk 지면 접지) → damping(kd-only, 능동 hold 제거) = 모터 off 등가.
                 #   실로봇서 여기서 전원 차단해도 지면이 받쳐 추가 처짐 없음(Go2 'damping' 자세와 동일).
                 q.d.ctrl[:] = np.clip(-REST_KD * q.d.qvel[6:6 + q.nu], -q._tau_peak, q._tau_peak)
@@ -1449,7 +1455,8 @@ def mode_trot():
     def reset():
         q.crouch_home(); S['armed'] = False
 
-    q.run_viewer(ctrl, reset_fn=reset)
+    # ★RESET_ON_FALL=0(GUI/복구용): 쓰러져도 자동 reset 안 함 → off→ground→ready 복구 가능. 기본 1(헤드리스 falls 측정).
+    q.run_viewer(ctrl, reset_fn=reset, reset_on_fall=os.environ.get('RESET_ON_FALL', '1') != '0')
 
 
 def main():

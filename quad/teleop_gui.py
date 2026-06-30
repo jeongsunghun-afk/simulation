@@ -295,6 +295,10 @@ with dpg.window(tag='main'):
         dpg.bind_item_theme(_jb, _jump_theme)
         _b = dpg.add_button(label='STOP', width=90, callback=lambda: (sc.StopMove(), _status()))
         dpg.bind_item_theme(_b, _stop_theme)
+    with dpg.group(horizontal=True):
+        _ob = dpg.add_button(label='Off 전원(쓰러짐)', width=130, callback=lambda: (_mode_btn('off'), _status()))
+        dpg.bind_item_theme(_ob, _stop_theme)
+        dpg.add_text('recovery 순서: Off(쓰러짐) → Ground(눕혀 정리) → Ready(일어서기)', color=(150, 155, 175))
     dpg.add_separator()
     with dpg.group(horizontal=True):
         dpg.add_text('게이트:', color=(170, 175, 195))
