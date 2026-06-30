@@ -1072,15 +1072,17 @@ def mode_trot():
     #   T=주기[s], SWF=swing비율(D), STEPH=발높이, V=기본속도.
     #   trot=대각쌍(HL+FR/HR+FL) 동적·2지지 / walk=순차(FR→HL→FL→HR) 정적안정·75%stance(3~4지지)
     GAIT = os.environ.get('GAIT', 'trot')
-    _GP = {
+    GAITS = {       # ★게이트 프리셋(gait_sim_v13 참조). 다리순서[HL,HR,FL,FR]. GUI gait 토글로 라이브 전환
         'trot': dict(OFFSET={0: 0.0, 1: 0.5, 2: 0.5, 3: 0.0}, T=0.50, SWF=0.50, STEPH=0.10, V=0.30),
         'walk': dict(OFFSET={0: 0.25, 1: 0.75, 2: 0.50, 3: 0.0}, T=1.00, SWF=0.25, STEPH=0.05, V=0.25),
-    }[GAIT]
-    OFFSET = _GP['OFFSET']      # trot=대각 A(HL,FR)=0·B(HR,FL)=0.5 / walk=순차 FR0→HL.25→FL.5→HR.75
-    # SWING_FRAC<0.5 → double-support 겹침(착지 후 이륙) → 공중(flight) 방지. walk(0.25)=항상 ≥3발 지지=정적안정
+    }
+    _GP = GAITS[GAIT]   # trot=대각 A(HL,FR)=0·B(HR,FL)=0.5 / walk=순차 FR0→HL.25→FL.5→HR.75(정적안정·75%stance)
+    # ★라이브 게이트 holder(GUI 토글이 갱신→재arm으로 위상 재앵커, 불연속 방지). gait()가 GP를 읽음
+    GP = {'OFFSET': _GP['OFFSET'], 'T': float(os.environ.get('TROT_T', str(_GP['T']))),
+          'SWF': float(os.environ.get('TROT_SWF', str(_GP['SWF'])))}
+    # SWING_FRAC<0.5 → double-support 겹침 → 공중(flight) 방지. walk(0.25)=항상 ≥3발 지지=정적안정
     SETTLE = 0.5
-    T_TROT = float(os.environ.get('TROT_T', str(_GP['T'])))        # 사이클 주기[s]
-    SWING_FRAC = float(os.environ.get('TROT_SWF', str(_GP['SWF'])))  # D=swing 비율
+    OFFSET = GP['OFFSET']; T_TROT = GP['T']; SWING_FRAC = GP['SWF']  # T_ST/T_SW(SWING_VREF 해석)용 초기값; 라이브는 gait()가 GP 사용
     STEP_H = float(os.environ.get('TROT_STEPH', str(_GP['STEPH'])))
     V = float(os.environ.get('TROT_V', str(_GP['V'])))     # 전진속도[m/s] 초기/기본
     VY = float(os.environ.get('TROT_VY', '0.0'))    # ★측방속도[m/s] (+좌 −우)
@@ -1133,6 +1135,7 @@ def mode_trot():
          'yaw_ref': 0.0, 'last_t': -1.0,                     # 선회 yaw각 참조(적분) · 직전 시각(reset 감지용)
          'body_h': q.base_z0, 'ht_cur': q.base_z0, 'qhome_h': q.base_z0,   # body_h슬라이더 · 보간높이 · q_home 계산높이
          'step_h': STEP_H,                                                # ★GUI step height(live 갱신)
+         'gait': GAIT,                                                     # ★현 게이트(GUI walk/trot 토글 live)
          'yaw_hold': None,                                                 # 선회정지 시 유지할 헤딩(드리프트 보정)
          'jseq': None, 'jact': False, 'jk': 0, 'jsub': 0,                  # 점프: 마지막seq · 재생중 · 현knot · sub카운터
          'prev_mode': q.cmd_mode, 'homing': False, 'home_t0': 0.0,        # Ready 호밍: 직전모드 · 진행중 · 시작시각
@@ -1140,8 +1143,8 @@ def mode_trot():
          'hseq': None, 'home_req': False}                                 # home_seq 마지막값 · 호밍 요청(엣지/Ready/점프완료 통합)
 
     def gait(i, tg):
-        ph = (tg / T_TROT + OFFSET[i]) % 1.0
-        return (ph >= SWING_FRAC, 0.0) if ph >= SWING_FRAC else (False, ph / SWING_FRAC)
+        ph = (tg / GP['T'] + GP['OFFSET'][i]) % 1.0     # ★라이브 게이트 파라미터(GP) — GUI 토글 반영
+        return (ph >= GP['SWF'], 0.0) if ph >= GP['SWF'] else (False, ph / GP['SWF'])
 
     def csched(tg):
         cs = np.zeros((q.N_MPC, 4), dtype=bool)
@@ -1184,6 +1187,12 @@ def mode_trot():
                 _ph = S['step_h']; S['step_h'] = float(_c.get('step_h', S['step_h']))   # ★step height 슬라이더(live)
                 if os.environ.get('SHDBG') and abs(S['step_h'] - _ph) > 1e-4:
                     print('[step_h] %.3f → %.3f (GUI live)' % (_ph, S['step_h']), flush=True)
+                _g = _c.get('gait', S['gait'])                       # ★게이트 토글(walk/trot 라이브 전환)
+                if _g != S['gait'] and _g in GAITS:
+                    S['gait'] = _g; GP['OFFSET'] = GAITS[_g]['OFFSET']
+                    GP['T'] = GAITS[_g]['T']; GP['SWF'] = GAITS[_g]['SWF']
+                    if S['armed']: S['armed'] = False                # 재arm=위상클럭 재앵커(현 stance서 새 게이트 리듬 재확립, 불연속 방지)
+                    print('[trot] 게이트 전환 → %s (재정렬)' % _g, flush=True)
                 q._rate = float(_c.get('rate', q._rate))             # ★뷰어 배속 슬라이더(live)
                 q._viz = bool(_c.get('viz', q._viz))                 # ★모니터 표시 토글(live)
                 _tn = bool(_c.get('terrain', q._terrain_on))         # ★지형적응 토글: launch 기본(STAIRS) 보존 위해 edge-trigger

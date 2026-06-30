@@ -26,7 +26,7 @@ class SportClient:
         self.path = path
         self.vmax = VMAX; self.wmax = WMAX          # 조이스틱 풀스케일(보행속도 게이지로 live 조절)
         self.cmd = {'v': 0.0, 'vy': 0.0, 'w': 0.0, 'mode': 'stand_up',   # 시작=Ready(서기). Walk 눌러야 보행
-                    'body_h': 0.52, 'step_h': 0.10, 'euler': [0.0, 0.0, 0.0], 'gait': 0,
+                    'body_h': 0.52, 'step_h': 0.10, 'euler': [0.0, 0.0, 0.0], 'gait': 'trot',
                     'vmax': VMAX, 'jump_seq': 0, 'home_seq': 0,
                     'rate': 1.0, 'viz': True, 'terrain': True}   # ★rate=뷰어배속 viz=모니터표시 terrain=지형적응
         self._pub()
@@ -39,6 +39,9 @@ class SportClient:
 
     def SetTerrain(self, on):                       # 지형적응(perception: 발/몸높이+elevation) on/off — live
         self.cmd['terrain'] = bool(on); self._pub()
+
+    def SetGait(self, g):                           # 게이트 walk/trot 라이브 전환(컨트롤러가 재arm으로 위상 재앵커)
+        self.cmd['gait'] = str(g); self._pub()
 
     def BodyHeight(self, h):                        # 서기 높이[m] (★보행중 무시 — 자세모드서만)
         self.cmd['body_h'] = float(h); self._pub()
@@ -281,6 +284,12 @@ with dpg.window(tag='main'):
         dpg.bind_item_theme(_jb, _jump_theme)
         _b = dpg.add_button(label='STOP', width=90, callback=lambda: (sc.StopMove(), _status()))
         dpg.bind_item_theme(_b, _stop_theme)
+    dpg.add_separator()
+    with dpg.group(horizontal=True):
+        dpg.add_text('게이트:', color=(170, 175, 195))
+        dpg.add_radio_button(('trot', 'walk'), tag='gait', horizontal=True, default_value='trot',
+                             callback=lambda s, a: (sc.SetGait(a), _status()))
+        dpg.add_text('(trot=대각·빠름 / walk=순차·정적안정·저속)', color=(120, 125, 145))
     dpg.add_separator()
     dpg.add_text('속도/높이 (Walk=보행속도 게이지·live / Body=서기 높이·live / Step=발 들림)', color=(170, 175, 195))
     dpg.add_slider_float(label='Walk Speed [m/s]  (조이스틱 풀스케일 · 양 컨트롤러 공통)', tag='ws',
