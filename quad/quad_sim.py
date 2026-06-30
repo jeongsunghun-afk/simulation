@@ -1141,6 +1141,8 @@ def mode_trot():
          'step_h': STEP_H,                                                # ★GUI step height(live 갱신)
          'gait': GAIT,                                                     # ★현 게이트(GUI walk/trot 토글 live)
          'pos_hold': None,                                                 # ★정지 시 래치한 x,y(드리프트 보정 기준)
+         'pos_hold_on': os.environ.get('POS_HOLD', '1') != '0',           # ★정지 위치홀드 on/off (GUI live 격리용)
+         'foot_lock_on': os.environ.get('FOOT_LOCK_ON', '1') != '0',      # ★터치다운 foothold lock on/off (GUI live 격리용)
          'yaw_hold': None,                                                 # 선회정지 시 유지할 헤딩(드리프트 보정)
          'jseq': None, 'jact': False, 'jk': 0, 'jsub': 0,                  # 점프: 마지막seq · 재생중 · 현knot · sub카운터
          'prev_mode': q.cmd_mode, 'homing': False, 'home_t0': 0.0,        # Ready 호밍: 직전모드 · 진행중 · 시작시각
@@ -1199,6 +1201,8 @@ def mode_trot():
                     GP['LOCK'] = float(_FLENV) if _FLENV else GAITS[_g]['LOCK']   # 게이트별 lock(trot=reactive/walk=commit)
                     if S['armed']: S['armed'] = False                # 재arm=위상클럭 재앵커(현 stance서 새 게이트 리듬 재확립, 불연속 방지)
                     print('[trot] 게이트 전환 → %s (재정렬)' % _g, flush=True)
+                S['pos_hold_on'] = bool(_c.get('pos_hold', S['pos_hold_on']))     # ★정지 위치홀드 토글(격리용)
+                S['foot_lock_on'] = bool(_c.get('foot_lock', S['foot_lock_on']))  # ★터치다운 lock 토글(격리용)
                 q._rate = float(_c.get('rate', q._rate))             # ★뷰어 배속 슬라이더(live)
                 q._viz = bool(_c.get('viz', q._viz))                 # ★모니터 표시 토글(live)
                 _tn = bool(_c.get('terrain', q._terrain_on))         # ★지형적응 토글: launch 기본(STAIRS) 보존 위해 edge-trigger
@@ -1310,7 +1314,7 @@ def mode_trot():
         # ★정지 시 위치 홀드(yaw_hold의 병진판): 게이트 체계바이어스(walk 후방드리프트) 보정.
         #   정지명령서 현 x,y 래치 → 표류를 작은 보정속도로 되돌림(MPC vx추종 + Raibert 발배치 반영). 이동중 해제.
         #   상태추정(odometry) 기반 외부루프 위치제어 = 실로봇도 동일(비물리 아님).
-        if os.environ.get('POS_HOLD', '1') != '0' and abs(V_eff) < 0.03 and abs(Vy_eff) < 0.03 and abs(W_eff) < 0.05:
+        if S['pos_hold_on'] and abs(V_eff) < 0.03 and abs(Vy_eff) < 0.03 and abs(W_eff) < 0.05:
             if S['pos_hold'] is None:
                 S['pos_hold'] = (float(q.d.qpos[0]), float(q.d.qpos[1]))
             _phk = float(os.environ.get('POS_HOLD_K', '0.6'))              # 위치오차→보정속도 게인
@@ -1379,7 +1383,8 @@ def mode_trot():
                         _ti = min(int((_ex - _X0) // _D), _N - 1)
                         _ex = min(max(_ex, _X0 + _ti * _D + 0.06), _X0 + (_ti + 1) * _D - 0.06)
                 p_end = np.array([_ex, _ey, S['gz'][i] + q.terrain_height(_ex, _ey)])
-                if q._terrain_on or s_ >= GP['LOCK']:       # ★지형=스윙시작 lock / 평지=게이트별 late-swing lock(walk0.5/trot1.0=reactive)
+                _locks = GP['LOCK'] if S['foot_lock_on'] else 1.0   # ★lock off=항상 reactive(격리 비교용)
+                if q._terrain_on or s_ >= _locks:           # ★지형=스윙시작 lock / 평지=게이트별 late-swing lock(walk0.5/trot1.0=reactive)
                     S['foothold'][i] = p_end                # 초반 reactive 적응 + 후반 commit(착지목표 고정)
             q.foot_targets[i] = p_end                       # 착지 목표 시각화(고정된 빨강구)
             # ★계단: swing_foot_pos의 Z는 liftoff 높이로 되돌아옴(p_end[2] 무시) → 계단서 착지면 아래로 내리꽂음.
