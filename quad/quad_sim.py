@@ -1073,13 +1073,16 @@ def mode_trot():
     #   trot=대각쌍(HL+FR/HR+FL) 동적·2지지 / walk=순차(FR→HL→FL→HR) 정적안정·75%stance(3~4지지)
     GAIT = os.environ.get('GAIT', 'trot')
     GAITS = {       # ★게이트 프리셋(gait_sim_v13 참조). 다리순서[HL,HR,FL,FR]. GUI gait 토글로 라이브 전환
-        'trot': dict(OFFSET={0: 0.0, 1: 0.5, 2: 0.5, 3: 0.0}, T=0.50, SWF=0.50, STEPH=0.10, V=0.30),
-        'walk': dict(OFFSET={0: 0.25, 1: 0.75, 2: 0.50, 3: 0.0}, T=1.00, SWF=0.25, STEPH=0.05, V=0.25),
+        # LOCK=평지 foothold lock 시점(swing 위상). 1.0=항상 reactive(고속 강건성) / <1=late-swing commit(저속 터치다운 매끄러움)
+        'trot': dict(OFFSET={0: 0.0, 1: 0.5, 2: 0.5, 3: 0.0}, T=0.50, SWF=0.50, STEPH=0.10, V=0.30, LOCK=1.0),
+        'walk': dict(OFFSET={0: 0.25, 1: 0.75, 2: 0.50, 3: 0.0}, T=1.00, SWF=0.25, STEPH=0.05, V=0.25, LOCK=0.5),
     }
     _GP = GAITS[GAIT]   # trot=대각 A(HL,FR)=0·B(HR,FL)=0.5 / walk=순차 FR0→HL.25→FL.5→HR.75(정적안정·75%stance)
     # ★라이브 게이트 holder(GUI 토글이 갱신→재arm으로 위상 재앵커, 불연속 방지). gait()가 GP를 읽음
+    _FLENV = os.environ.get('FOOT_LOCK_S')   # 설정 시 게이트 무관 강제(없으면 게이트별 LOCK)
     GP = {'OFFSET': _GP['OFFSET'], 'T': float(os.environ.get('TROT_T', str(_GP['T']))),
-          'SWF': float(os.environ.get('TROT_SWF', str(_GP['SWF'])))}
+          'SWF': float(os.environ.get('TROT_SWF', str(_GP['SWF']))),
+          'LOCK': float(_FLENV) if _FLENV else _GP['LOCK']}
     # SWING_FRAC<0.5 → double-support 겹침 → 공중(flight) 방지. walk(0.25)=항상 ≥3발 지지=정적안정
     SETTLE = 0.5
     OFFSET = GP['OFFSET']; T_TROT = GP['T']; SWING_FRAC = GP['SWF']  # T_ST/T_SW(SWING_VREF 해석)용 초기값; 라이브는 gait()가 GP 사용
@@ -1095,7 +1098,7 @@ def mode_trot():
     HRATE = float(os.environ.get('HEIGHT_RATE', '0.3'))    # 높이 변경 속도[m/s] (body_h·Ground 부드럽게)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
-    FOOT_LOCK_S = float(os.environ.get('FOOT_LOCK_S', '0.5'))  # ★평지 foothold lock 시점(swing 위상): 이후 착지목표 고정→터치다운 스케이팅 방지(초반 reactive·후반 commit). 1.0=항상reactive(구동작)
+    # ★평지 foothold lock = GP['LOCK'](게이트별: trot1.0=reactive고속강건 / walk0.5=저속 터치다운 매끄러움). env FOOT_LOCK_S로 강제 가능.
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off
     # ── 점프: GUI Jump 트리거 시 offline 궤적(quad_hop.solve_jump) 재생(피드포워드 u* + 관절 PD) ──
     JUMP_NPZ = os.environ.get('JUMP_NPZ', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'jump_stand.npz'))
@@ -1192,6 +1195,7 @@ def mode_trot():
                 if _g != S['gait'] and _g in GAITS:
                     S['gait'] = _g; GP['OFFSET'] = GAITS[_g]['OFFSET']
                     GP['T'] = GAITS[_g]['T']; GP['SWF'] = GAITS[_g]['SWF']
+                    GP['LOCK'] = float(_FLENV) if _FLENV else GAITS[_g]['LOCK']   # 게이트별 lock(trot=reactive/walk=commit)
                     if S['armed']: S['armed'] = False                # 재arm=위상클럭 재앵커(현 stance서 새 게이트 리듬 재확립, 불연속 방지)
                     print('[trot] 게이트 전환 → %s (재정렬)' % _g, flush=True)
                 q._rate = float(_c.get('rate', q._rate))             # ★뷰어 배속 슬라이더(live)
@@ -1363,7 +1367,7 @@ def mode_trot():
                         _ti = min(int((_ex - _X0) // _D), _N - 1)
                         _ex = min(max(_ex, _X0 + _ti * _D + 0.06), _X0 + (_ti + 1) * _D - 0.06)
                 p_end = np.array([_ex, _ey, S['gz'][i] + q.terrain_height(_ex, _ey)])
-                if q._terrain_on or s_ >= FOOT_LOCK_S:      # ★지형=스윙시작 lock / 평지=late-swing(s≥0.5) lock → 터치다운 스케이팅 방지
+                if q._terrain_on or s_ >= GP['LOCK']:       # ★지형=스윙시작 lock / 평지=게이트별 late-swing lock(walk0.5/trot1.0=reactive)
                     S['foothold'][i] = p_end                # 초반 reactive 적응 + 후반 commit(착지목표 고정)
             q.foot_targets[i] = p_end                       # 착지 목표 시각화(고정된 빨강구)
             # ★계단: swing_foot_pos의 Z는 liftoff 높이로 되돌아옴(p_end[2] 무시) → 계단서 착지면 아래로 내리꽂음.
