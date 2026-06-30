@@ -1068,13 +1068,21 @@ def mode_trot():
     # ★py(world y위치) 가중치=0 — x와 대칭으로 자유. (과거 100=직진 y앵커였으나 측방/대각·헤딩추종을 막음;
     #   위치 드리프트는 속도추종 vx/vy=10이 잡음). global y앵커 제거 → 선회 후 전진이 헤딩 따라감.
     TROT_Q = np.diag([200., 200., 100., 0., float(os.environ.get('WPY', '0.')), 200., 0., 0., 1., 10., 10., 1., 0.])
-    OFFSET = {0: 0.0, 3: 0.0, 1: 0.5, 2: 0.5}      # 대각쌍 A=HL,FR / B=HR,FL
-    # SWING_FRAC<0.5 → 대각 전환에 double-support 겹침(착지 후 이륙) → 공중(flight) 방지
+    # ★게이트 프리셋(gait_sim_v13 참조). 다리순서 [HL,HR,FL,FR]. OFFSET=위상오프셋(swing타이밍),
+    #   T=주기[s], SWF=swing비율(D), STEPH=발높이, V=기본속도.
+    #   trot=대각쌍(HL+FR/HR+FL) 동적·2지지 / walk=순차(FR→HL→FL→HR) 정적안정·75%stance(3~4지지)
+    GAIT = os.environ.get('GAIT', 'trot')
+    _GP = {
+        'trot': dict(OFFSET={0: 0.0, 1: 0.5, 2: 0.5, 3: 0.0}, T=0.50, SWF=0.50, STEPH=0.10, V=0.30),
+        'walk': dict(OFFSET={0: 0.25, 1: 0.75, 2: 0.50, 3: 0.0}, T=1.00, SWF=0.25, STEPH=0.05, V=0.25),
+    }[GAIT]
+    OFFSET = _GP['OFFSET']      # trot=대각 A(HL,FR)=0·B(HR,FL)=0.5 / walk=순차 FR0→HL.25→FL.5→HR.75
+    # SWING_FRAC<0.5 → double-support 겹침(착지 후 이륙) → 공중(flight) 방지. walk(0.25)=항상 ≥3발 지지=정적안정
     SETTLE = 0.5
-    T_TROT = float(os.environ.get('TROT_T', '0.50'))        # 레퍼런스 trot 프리셋
-    SWING_FRAC = float(os.environ.get('TROT_SWF', '0.50'))  # D=swing 비율
-    STEP_H = float(os.environ.get('TROT_STEPH', '0.10'))
-    V = float(os.environ.get('TROT_V', '0.30'))     # 전진속도[m/s] 초기/기본
+    T_TROT = float(os.environ.get('TROT_T', str(_GP['T'])))        # 사이클 주기[s]
+    SWING_FRAC = float(os.environ.get('TROT_SWF', str(_GP['SWF'])))  # D=swing 비율
+    STEP_H = float(os.environ.get('TROT_STEPH', str(_GP['STEPH'])))
+    V = float(os.environ.get('TROT_V', str(_GP['V'])))     # 전진속도[m/s] 초기/기본
     VY = float(os.environ.get('TROT_VY', '0.0'))    # ★측방속도[m/s] (+좌 −우)
     WZ = float(os.environ.get('TROT_WZ', '0.0'))    # 선회각속도[rad/s] (+좌선회)
     ACC = float(os.environ.get('TROT_ACC', '0.6'))  # 명령 가속도제한[m/s²]: 시작램프+GUI 급조작 완화
