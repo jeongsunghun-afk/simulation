@@ -27,9 +27,9 @@ MU, LAMZ_MIN = 0.6, 1.0          # 마찰계수(물리), 최소 수직지지력
 # μ_ctrl = μ/√2 로 elliptic cone 안쪽에 내접시켜 보수화. (추후 SOCP 로 정식 elliptic 대체)
 MU_MARGIN = float(os.environ.get('MU_MARGIN', '0.707'))
 # 통합 WBC(legged_control식) swing 발끝 작업공간 PD 게인/가중
-SW_KP = float(os.environ.get('SW_KP', '800.0'))
-SW_KD = float(os.environ.get('SW_KD', '80.0'))
-W_SW = float(os.environ.get('W_SW', '30.0'))
+SW_KP = float(os.environ.get('SW_KP', '2400.0'))   # ★스윙 발끝 추종게인↑(800→2400): 1.0m/s 추종오차 124→46mm. 약하면 발끝이 plan 못쫓아 lurching(calf 가짜 스파이크)
+SW_KD = float(os.environ.get('SW_KD', '110.0'))    # ↑(80→110): SW_KP 상향에 맞춘 임계감쇠(2√2400≈98)
+W_SW = float(os.environ.get('W_SW', '90.0'))        # ★스윙 task 가중치↑(30→90): QP서 발끝추종 우선순위↑
 _NOLIMIT = False                 # --nolimit: 관절 한계 해제 (가동범위 테스트용)
 
 # 로봇 설정 — 우리 모델 / Go2 (--robot 으로 선택). 다리 인덱스 0,3 / 1,2 = 대각쌍(둘 다 동일)
@@ -874,12 +874,13 @@ class QuadSim:
             pe = int(os.environ.get('PRINT_EVERY', '100'))   # 출력 간격(스텝). 첫사이클 관찰은 20 등
             falls = 0
             _logj = os.environ.get('LOG_JOINTS')             # ★관절 각속도·토크 로깅 → npz(그래프용)
-            _Lt, _Ldq, _Ltau, _Lq, _Lquat = [], [], [], [], []
+            _Lt, _Ldq, _Ltau, _Lq, _Lquat, _Lse = [], [], [], [], [], []
             for s in range(nsteps):
                 control_fn(); mujoco.mj_step(m, d)
                 if _logj:
                     _Lt.append(d.time); _Ldq.append(d.qvel[6:6+self.nu].copy()); _Ltau.append(d.ctrl[:self.nu].copy())
                     _Lq.append(d.qpos[7:7+self.nu].copy()); _Lquat.append(d.qpos[3:7].copy())
+                    _Lse.append([getattr(self, '_swing_err', 0.0), getattr(self, '_swing_errh', 0.0)])  # swing 추종오차(전체·수평)
                 if reset_on_fall and d.qpos[2] < 0.2:
                     falls += 1; mujoco.mj_resetData(m, d); reset_fn()
                 if _sp and s % 30 == 0: self.publish_state(_sp)   # GUI 모니터 패널
@@ -903,7 +904,7 @@ class QuadSim:
             if _logj:
                 _names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ('act%d'%i) for i in range(self.nu)]
                 np.savez(_logj, t=np.array(_Lt), dq=np.array(_Ldq), tau=np.array(_Ltau), names=np.array(_names),
-                         q=np.array(_Lq), quat=np.array(_Lquat))
+                         q=np.array(_Lq), quat=np.array(_Lquat), swerr=np.array(_Lse))
                 print('[hl] 관절로그 저장: %s (%d스텝 %d관절)' % (_logj, len(_Lt), self.nu), flush=True)
             return
         with mujoco.viewer.launch_passive(m, d, key_callback=self._key_callback) as v:
@@ -1449,6 +1450,11 @@ def mode_trot():
                 pv = S['ptgt_prev'][i]                      # (기존) 차분+±1.0 clip
                 v_tgt = np.clip((p_tgt - pv) / dt, -1.0, 1.0) if pv is not None else np.zeros(3)
             S['ptgt_prev'][i] = p_tgt.copy(); swing[i] = (p_tgt, v_tgt)
+        # ★swing 추종오차 계측(LOG_JOINTS시): 발끝이 target plan을 얼마나 못 쫓는지(수평/수직)
+        if sw:
+            _e=[q.foot_point(i)-swing[i][0] for i in sw]
+            q._swing_err=max(np.linalg.norm(e) for e in _e); q._swing_errh=max(np.hypot(e[0],e[1]) for e in _e)
+        else: q._swing_err=0.0; q._swing_errh=0.0
         # ★ 표준 구조: MPC 저주파 재계획(DT_MPC=0.02s=50Hz), WBIC 풀주파(500Hz).
         #   MPC는 무겁고(긴 호라이즌 QP) 느리게 변하는 GRF 계획 → 매 스텝 풀 필요 없음.
         #   WBIC는 빠른 외란/접촉 반응 위해 매 스텝.  → 긴 호라이즌도 실시간 감당.
