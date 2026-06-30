@@ -1108,6 +1108,8 @@ def mode_trot():
     HRATE = float(os.environ.get('HEIGHT_RATE', '0.3'))    # 높이 변경 속도[m/s] (body_h·Ground 부드럽게)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
+    RAIBERT_K = float(os.environ.get('RAIBERT_K', '0.5'))   # ★전방 reach 게인(0.5표준, ↑=앞으로 더 시원하게 뻗음) — GUI 슬라이더 live
+    RAI_CLIP = float(os.environ.get('RAI_CLIP', '0.25'))    # 최대 발배치[m] (reach 게인 올려도 클립 안 걸리게 여유)
     # ★평지 foothold lock = GP['LOCK'](게이트별: trot1.0=reactive고속강건 / walk0.5=저속 터치다운 매끄러움). env FOOT_LOCK_S로 강제 가능.
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off
     # ── 점프: GUI Jump 트리거 시 offline 궤적(quad_hop.solve_jump) 재생(피드포워드 u* + 관절 PD) ──
@@ -1149,6 +1151,7 @@ def mode_trot():
          'yaw_ref': 0.0, 'last_t': -1.0,                     # 선회 yaw각 참조(적분) · 직전 시각(reset 감지용)
          'body_h': q.base_z0, 'ht_cur': q.base_z0, 'qhome_h': q.base_z0,   # body_h슬라이더 · 보간높이 · q_home 계산높이
          'step_h': STEP_H,                                                # ★GUI step height(live 갱신)
+         'raibert_k': RAIBERT_K,                                          # ★전방 reach 게인(GUI 슬라이더 live)
          'gait': GAIT,                                                     # ★현 게이트(GUI walk/trot 토글 live)
          'pos_hold': None,                                                 # ★정지 시 래치한 x,y(드리프트 보정 기준)
          'pos_hold_on': os.environ.get('POS_HOLD', '1') != '0',           # ★정지 위치홀드 on/off (GUI live 격리용)
@@ -1214,6 +1217,7 @@ def mode_trot():
                     S['foot_lock_s'] = GP['LOCK']                    # 게이트전환=프리셋 lock으로 리셋(trot 고속 reactive 보장)
                     if S['armed']: S['armed'] = False                # 재arm=위상클럭 재앵커(현 stance서 새 게이트 리듬 재확립, 불연속 방지)
                     print('[trot] 게이트 전환 → %s (재정렬)' % _g, flush=True)
+                S['raibert_k'] = float(_c.get('raibert_k', S['raibert_k']))       # ★전방 reach 게인 슬라이더(live)
                 S['pos_hold_on'] = bool(_c.get('pos_hold', S['pos_hold_on']))     # ★정지 위치홀드 토글(격리용)
                 S['foot_lock_on'] = bool(_c.get('foot_lock', S['foot_lock_on']))  # ★터치다운 lock 토글(격리용)
                 _fl = _c.get('foot_lock_s')                          # ★lock 강도 슬라이더(엣지 오버라이드 → 게이트전환 리셋과 공존)
@@ -1408,7 +1412,7 @@ def mode_trot():
             mtot = float(q.m.body_mass.sum())
             _ag = float(os.environ.get('ALIP_G', '1.0'))    # ALIP 항 가중(튜닝)
             v_fb = v_fb + _ag * np.array([L[1], -L[0]]) / (mtot * H)
-        rai = np.clip(0.5 * T_ST * v_des + KCAP * (v_fb - v_des), -0.14, 0.14)
+        rai = np.clip(S['raibert_k'] * T_ST * v_des + KCAP * (v_fb - v_des), -RAI_CLIP, RAI_CLIP)   # ★전방 reach 게인(GUI 슬라이더 live) / 최대 발배치 클립
         q.foot_targets = [None, None, None, None]
         dt = q.m.opt.timestep; swing = {}
         Rw = np.array([[cy, -sy], [sy, cy]])                 # body→world(현재 yaw)

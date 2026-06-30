@@ -30,7 +30,7 @@ class SportClient:
                     'vmax': VMAX, 'jump_seq': 0, 'home_seq': 0,
                     'rate': 1.0, 'viz': True, 'terrain': True,   # ★rate=뷰어배속 viz=모니터표시 terrain=지형적응
                     'foot_lock': True, 'pos_hold': True,         # ★터치다운 foothold lock · 정지 위치홀드 (격리 비교용)
-                    'foot_lock_s': 0.35}                         # ★lock 시점(낮을수록 일찍 얼림=강함)
+                    'foot_lock_s': 0.35, 'raibert_k': 0.5}       # ★lock 시점 / 전방 reach 게인(앞으로 뻗는 정도)
         self._pub()
 
     def SimRate(self, r):                           # 뷰어 배속(0.25~4, 0=최대) — live
@@ -53,6 +53,9 @@ class SportClient:
 
     def SetFootLockS(self, s):                       # 터치다운 lock 시점(낮을수록 일찍 얼림=강함)
         self.cmd['foot_lock_s'] = float(s); self._pub()
+
+    def SetRaibertK(self, k):                        # 전방 reach 게인(↑=앞으로 더 시원하게 뻗음) — live
+        self.cmd['raibert_k'] = float(k); self._pub()
 
     def BodyHeight(self, h):                        # 서기 높이[m] (★보행중 무시 — 자세모드서만)
         self.cmd['body_h'] = float(h); self._pub()
@@ -317,6 +320,9 @@ with dpg.window(tag='main'):
     dpg.add_slider_float(label='터치다운 lock 강도  (낮을수록 강함: 0=스윙시작부터 고정 / 1=reactive)', tag='foot_lock_s',
                          min_value=0.0, max_value=1.0, default_value=0.35,
                          callback=lambda s, a: sc.SetFootLockS(a))
+    dpg.add_slider_float(label='전방 reach 게인  (0.5=표준 / ↑=앞으로 더 시원하게 뻗음)', tag='raibert_k',
+                         min_value=0.3, max_value=1.2, default_value=0.5,
+                         callback=lambda s, a: sc.SetRaibertK(a))
     dpg.add_separator()
     dpg.add_text('속도/높이 (Walk=보행속도 게이지·live / Body=서기 높이·live / Step=발 들림)', color=(170, 175, 195))
     dpg.add_slider_float(label='Walk Speed [m/s]  (조이스틱 풀스케일 · 양 컨트롤러 공통)', tag='ws',
