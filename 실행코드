@@ -92,6 +92,12 @@ cd /home/jsh/문서/jsh/simulation/quad && HEADLESS=1 TROT_V=1.0 STEPS=6000 PXI 
 #   env:  ★REAR_ANKLE(기본 -0.5, 앞뒤 대칭)·FRONT_ANKLE(따로 주면 앞발목 분리)  ANKLE_W(4발목 핀, 20)  나머지 A와 동일
 #   ★W_AM 기본 5(각운동량 보상 ON, 구14dof는 0): 37.9kg 전발목 고속 yaw발산 억제 → cmd1.5 공진밴드 제거·전속도(0.5~2.0) 균일안정. 실제 최대 ~1.4m/s(cmd2.0).
 #   ★sphere발 필수(ours_17dof_sphere): mesh발(ours_17dof)은 rocking으로 보행 불안정(구 모델과 동일).
+#   ─── ★동물형 발목 whip(paw-flick, 2026-07-01) ─────────────────────────
+#   발목 whip env: ANKLE_KP/ANKLE_KD(발목 컴플라이언트 PD, 기본60/5=강핀) · ANKLE_FLICK(능동flick 진폭,기본0) · FLICK_POW(윈도우) · GEAR_FOOT(발목기어)
+#   ★결론=고속 trot 수동 whip이 정답: 능동구동 없이 다리관성이 저절로 채찍질(path A). 안정성 비용 0(tilt0.6° @cmd2.0, arc88°).
+#     레시피: GEARBOX=1 VEL_LIM=1 MOTOR_CURVE=1 GEAR_FOOT=0.5714(발목8:1) ANKLE_W=5 ANKLE_KP=15 ANKLE_KD=3  (고속일수록 whip↑)
+#   ⚠️ walk 능동whip(ANKLE_FLICK+ANKLE_KP400)은 되지만 안정성 저하(tilt3~7°). 저속선 whip 억지구동=몸통교란. 실배포엔 고속 수동만 권장.
+#   ★하드웨어 함의: 동물형 발목(compliance+whip)=저기어 발목(8:1/QDD, backdrivable). 14:1(고기어)은 무겁고 비백드라이버블이라 둘다 어려움.
 
 
 ╔══════════════════════════════════════════════════════════════════╗

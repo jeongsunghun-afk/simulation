@@ -494,7 +494,7 @@ class QuadSim:
         P = np.zeros((nz, nz)); g = np.zeros(nz)
         # swing 발끝 작업공간 PD task (legged_control formulateSwingLegTask)
         sw_vidx = set()
-        for leg, (p_des, v_des) in swing.items():
+        for leg, (p_des, v_des, *_) in swing.items():
             J = self.foot_jac(leg)
             accel = SW_KP * (p_des - self.foot_point(leg)) + SW_KD * (v_des - J @ qv)
             P[:nv, :nv] += W_SW * (J.T @ J); g[:nv] -= W_SW * (J.T @ accel)
@@ -515,7 +515,26 @@ class QuadSim:
         P[:nv, :nv] += w_z * np.outer(Jc[2], Jc[2]); g[:nv] -= w_z * a_z * Jc[2]
         # posture — swing 관절엔 약한 규제(w=0.1)만: 발끝 3D task가 다리 DOF<4 면 여유도
         #   (4-DOF 발목)를 남기므로 null-space 규제 없으면 발목이 발산(flail). 약규제로 안정화.
-        a_post = 60 * (self.q_home - d.qpos[7:7 + self.nu]) - 5 * qv[6:6 + self.nu]
+        # ★능동 발목 flick(생체모방 paw-flick): 스윙 발 수직속도로 발목궤적 구동(상승→배굴/하강→저굴).
+        #   반사관성(GEARBOX)·속도한계(VEL_LIM) 안에서 능동 whip = 실물 재현가능한 동물형 발끝 채찍.
+        _flick = float(os.environ.get('ANKLE_FLICK', '0'))   # rad, 스윙 발목 능동 flick 진폭(0=off). ★위상기반: 스윙중 배굴→저굴 whip(walk·저속서도 확실)
+        _fpow = float(os.environ.get('FLICK_POW', '1'))      # 프로파일 뾰족함(>1=착지쪽 저굴 snap 집중)
+        q_ref = self.q_home if _flick == 0.0 else self.q_home.copy()
+        if _flick != 0.0:
+            for _lg, _sw in swing.items():
+                if self.leg_dof[_lg] == 4:
+                    _ph = _sw[2] if len(_sw) > 2 else 0.0     # 스윙 위상(0→1)
+                    _aj = int(self.legqv[_lg][3]) - 6
+                    # ★배굴(전반)→저굴(후반) whip. sin(π·ph) 윈도우로 양끝(liftoff·착지)서 위치·속도 0 → 착지 교란↓
+                    _prof = np.sin(2*np.pi*_ph) * (np.sin(np.pi*_ph)**_fpow)
+                    q_ref[_aj] = self.q_home[_aj] + _flick * float(_prof)
+        a_post = 60 * (q_ref - d.qpos[7:7 + self.nu]) - 5 * qv[6:6 + self.nu]
+        # ★발목 컴플라이언트 PD(path A 힘줄모방): kp↓=소프트스프링(뒤로끌렸다 튕김)·kd=감쇠. 기본 60/5(=강한 핀)
+        _akp = float(os.environ.get('ANKLE_KP', '60')); _akd = float(os.environ.get('ANKLE_KD', '5'))
+        if _akp != 60.0 or _akd != 5.0:
+            _qe = q_ref - d.qpos[7:7 + self.nu]; _dqj = qv[6:6 + self.nu]
+            for _aj in self._ankle_idx:
+                a_post[_aj] = _akp * _qe[_aj] - _akd * _dqj[_aj]
         _pw = float(os.environ.get('POSTURE_W', '1.0'))      # ★stance 다리 posture 가중(계단서 ↓하면 다리 신장 자유=몸 상승)
         for j in range(self.nu):
             if j in self._ankle_idx and self._ankle_w > 0:   # 뒷발목: REAR_ANKLE에 강하게 핀(여자유도 고정→대칭)
@@ -1482,7 +1501,7 @@ def mode_trot():
             else:
                 pv = S['ptgt_prev'][i]                      # (기존) 차분+±1.0 clip
                 v_tgt = np.clip((p_tgt - pv) / dt, -1.0, 1.0) if pv is not None else np.zeros(3)
-            S['ptgt_prev'][i] = p_tgt.copy(); swing[i] = (p_tgt, v_tgt)
+            S['ptgt_prev'][i] = p_tgt.copy(); swing[i] = (p_tgt, v_tgt, s_)   # ★s_=스윙위상(발목 능동flick용)
         # ★swing 추종오차 계측(LOG_JOINTS시): 발끝이 target plan을 얼마나 못 쫓는지(수평/수직)
         if sw:
             _e=[q.foot_point(i)-swing[i][0] for i in sw]
