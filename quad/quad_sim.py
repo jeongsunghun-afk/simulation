@@ -1113,7 +1113,7 @@ def mode_trot():
     HRATE = float(os.environ.get('HEIGHT_RATE', '0.3'))    # 높이 변경 속도[m/s] (body_h·Ground 부드럽게)
     KP_SW = float(os.environ.get('TROT_KPSW', '40.0')); KD_SW = 2.0
     KCAP = float(os.environ.get('TROT_KCAP', '0.16'))   # capture 게인 ≈√(z/g) (LIPM)
-    RAIBERT_K = float(os.environ.get('RAIBERT_K', '0.5'))   # ★전방 reach 게인(0.5표준, ↑=앞으로 더 시원하게 뻗음) — GUI 슬라이더 live
+    RAIBERT_K = float(os.environ.get('RAIBERT_K', '0.8'))   # ★전방 reach 게인 기본 0.8(시원한 reach + 고속안정 1.74m/s, 중간속도 손실11%뿐). 1.2는 과제동(명령1.0→0.48). ↑=발앞→제동↑=느림+안정. GUI 슬라이더 live
     RAI_CLIP = float(os.environ.get('RAI_CLIP', '0.25'))    # 최대 발배치[m] (reach 게인 올려도 클립 안 걸리게 여유)
     # ★평지 foothold lock = GP['LOCK'](게이트별: trot1.0=reactive고속강건 / walk0.5=저속 터치다운 매끄러움). env FOOT_LOCK_S로 강제 가능.
     USE_DETECT = os.environ.get('DETECT', '1') == '1'   # detect_contact 조기착지 보정 on/off
