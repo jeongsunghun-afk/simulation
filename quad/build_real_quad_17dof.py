@@ -68,10 +68,16 @@ ET.SubElement(wb, 'light', {'pos': '0 0 3', 'dir': '0 0 -1'})
 ET.SubElement(root, 'option', {'timestep': '0.002', 'gravity': '0 0 -9.81'})
 dft = ET.SubElement(root, 'default')
 ET.SubElement(dft, 'geom', {'friction': '1.3 0.02 0.001', 'condim': '3'})
-ET.SubElement(dft, 'motor', {'ctrllimited': 'true', 'ctrlrange': '-80 80'})
+ET.SubElement(dft, 'motor', {'ctrllimited': 'true', 'ctrlrange': '-200 200'})   # ★넓게(actfrcrange Peak가 실한계 되도록; 컨트롤러가 _tau_peak로 이미 클립)
 act = ET.SubElement(root, 'actuator')
 for jn in [j.get('name') for j in root.iter('joint') if j.get('name')]:
     ET.SubElement(act, 'motor', {'joint': jn, 'name': jn.replace('_joint', '')})
+# ★관절 actuatorfrcrange = Peak토크(84/84/126/168 = 3×Rated 데이터시트). URDF effort는 rated(28/42/56)라 덮어씀. 허리=hip(84)
+_peak = {'hip': 84, 'thigh': 84, 'calf': 126, 'foot': 168, 'waist': 84}
+for jt in root.iter('joint'):
+    nm = jt.get('name'); parts = nm.split('_') if nm else []
+    if len(parts) > 1 and parts[1] in _peak:
+        p = _peak[parts[1]]; jt.set('actuatorfrcrange', '-%d %d' % (p, p))
 ET.indent(tree, space='  '); tree.write(MJCF_OUT, encoding='unicode')
 
 # ── ④ 충돌 최저점 → 기립높이 보정 ──
