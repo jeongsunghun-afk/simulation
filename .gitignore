@@ -34,3 +34,4 @@ mujoco_menagerie/
 squashfs-root/
 *.AppImage
 quad/backup/logs/
+quad/meshes_sim_17dof/
