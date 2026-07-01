@@ -196,10 +196,12 @@ class MujocoRobot:
         # ── 텍스트 오버레이(좌상=sim time, 우상=외력, 좌하=명령) ──
         _fext=max((float(_np.linalg.norm(d.xfrc_applied[b,:3])) for b in range(1,m.nbody)),default=0.0)
         cv=self.cmd_v
+        _yw=_np.arctan2(2*(d.qpos[3]*d.qpos[6]+d.qpos[4]*d.qpos[5]),1-2*(d.qpos[5]**2+d.qpos[6]**2))
+        _vact=float(d.qvel[0]*_np.cos(_yw)+d.qvel[1]*_np.sin(_yw))   # 실제 전진속도(heading투영)
         self.viewer.set_texts([
             (_mj.mjtFont.mjFONT_BIG,_mj.mjtGridPos.mjGRID_TOPLEFT,'sim time','%.2f s'%d.time),
             (_mj.mjtFont.mjFONT_BIG,_mj.mjtGridPos.mjGRID_TOPRIGHT,'ext force','%.0f N'%_fext),
-            (_mj.mjtFont.mjFONT_BIG,_mj.mjtGridPos.mjGRID_BOTTOMLEFT,'cmd vx/vy/wz','%+.2f %+.2f %+.2f'%(cv[0],cv[1],cv[5]))])
+            (_mj.mjtFont.mjFONT_BIG,_mj.mjtGridPos.mjGRID_BOTTOMLEFT,'cmd vx/vy/wz\nactual vx','%+.2f %+.2f %+.2f\n%+.2f m/s'%(cv[0],cv[1],cv[5],_vact))])
     def _key(self,kc):                                           # teleop → SportClient.Move: ↑↓=vx ←→=vy ,/.=yaw X=정지
         import os as _o5
         s=self.sport; vmx=float(_o5.environ.get("VMAX_X","0.4")); vmy=float(_o5.environ.get("VMAX_Y","0.2")); wmx=float(_o5.environ.get("WMAX","0.3"))

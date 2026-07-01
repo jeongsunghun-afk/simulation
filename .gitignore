@@ -33,3 +33,4 @@ mujoco_menagerie/
 # RBQ GUI AppImage·추출물(대용량 참고자료)
 squashfs-root/
 *.AppImage
+quad/backup/logs/

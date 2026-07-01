@@ -6,7 +6,7 @@ Rainbow Robotics RBQ GUI 참고(JoystickThumbPad + motionStaticReady/Ground/Dyna
 
 사용:
   ① GUI:    python teleop_gui.py
-  ② 컨트롤러: cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
+  ② 컨트롤러: cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json ~/.pixi/bin/pixi run python examples/quad_fulldynamics.py
 좌스틱=전후/측방, 우스틱=선회. 버튼: Ready(서기)/Ground(눕기)/Walk(보행)/STOP.
 """
 import os

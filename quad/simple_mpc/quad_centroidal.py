@@ -56,6 +56,15 @@ class MujocoRobot:
         _um=_np.zeros(self.nu); _um[_PIN2MJ]=_np.asarray(tau).ravel()[:self.nu]; self.d.ctrl[:]=_um
         _mj.mj_step(self.m,self.d)
         if self.viewer:
+            d=self.d; m=self.m
+            _R=_np.zeros(9); _mj.mju_quat2Mat(_R,d.qpos[3:7]); _R=_R.reshape(3,3)
+            _vact=float((_R.T@d.qvel[0:3])[0])                      # 실제 전진속도(base local x)
+            _fext=max((float(_np.linalg.norm(d.xfrc_applied[b,:3])) for b in range(1,m.nbody)),default=0.0)
+            cv=getattr(self,'cmd_v',_np.zeros(6))
+            self.viewer.set_texts([                                # 좌상=시간 우상=외력 좌하=명령/실제
+                (_mj.mjtFont.mjFONT_BIG,_mj.mjtGridPos.mjGRID_TOPLEFT,'sim time','%.2f s'%d.time),
+                (_mj.mjtFont.mjFONT_BIG,_mj.mjtGridPos.mjGRID_TOPRIGHT,'ext force','%.0f N'%_fext),
+                (_mj.mjtFont.mjFONT_BIG,_mj.mjtGridPos.mjGRID_BOTTOMLEFT,'cmd vx/vy/wz\nactual vx','%+.2f %+.2f %+.2f\n%+.2f m/s'%(cv[0],cv[1],cv[5],_vact))])
             self.viewer.sync()
             import time as _t; _t.sleep(self.m.opt.timestep)   # 실시간 페이싱
     def changeCamera(self,*a,**k): pass
@@ -315,6 +324,7 @@ L_measured = []
 v = np.zeros(6); v[0]=float(_os.environ.get("VX","0.0"))  # 전진속도 명령(env)
 v[0] = float(_os.environ.get("VX","0.2"))
 mpc.velocity_base = v
+device.cmd_v = v                      # 뷰어 오버레이(cmd vx/vy/wz) 표시용
 import numpy as _npd
 _fell=False
 print("[MJ] velocity_base 명령 =", list(v))

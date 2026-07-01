@@ -1,14 +1,14 @@
-"""quad_sim — 실제 4족(02_Leg_UFDF_260610_7) MuJoCo 통합 테스트/제어.
+"""quad_mpc_wbic — 실제 4족(02_Leg_UFDF_260610_7) MuJoCo 통합 테스트/제어.
 
 biped wbic_balance.py 와 동일한 '단일 파일 + --mode' 관리 방식.
 모델: quad_real.mjcf  (build_real_quad.py 로 생성).
 
-  python3 quad_sim.py --mode view    # 정적 기립 (physics 정지, 자세 확인)
-  python3 quad_sim.py --mode stand   # 중력 하 PD(+중력보상) 기립
+  python3 quad_mpc_wbic.py --mode view    # 정적 기립 (physics 정지, 자세 확인)
+  python3 quad_mpc_wbic.py --mode stand   # 중력 하 PD(+중력보상) 기립
   (향후) stance(WBIC) → lipm → march → mpc → nmpc
   ※ check(모델/동역학 정합)는 stance(WBIC) 동작 시 자동 검증되므로 별도 단계 없음
 
-시각화: 구조3(02leg9_fulldynamics) 스타일 — footstep타겟·지지다각형·CoM투영·명령화살표·base/발궤적·마찰콘+GRF·텍스트. 항상표시.
+시각화: 구조3(quad_fulldynamics) 스타일 — footstep타겟·지지다각형·CoM투영·명령화살표·base/발궤적·마찰콘+GRF·텍스트. 항상표시.
 """
 import os
 import json
@@ -163,7 +163,7 @@ class QuadSim:
                 g2 = N(mujoco.mjtObj.mjOBJ_GEOM, L + '_sphere2')
                 if g2 >= 0:
                     self.foot_gid2[i] = g2; self.foot_r2[i] = float(self.m.geom_size[g2][0])
-        # ★물리환경을 구조3(02leg9_fulldynamics_mujoco.py line54-58)과 동일하게 ──
+        # ★물리환경을 구조3(quad_fulldynamics.py line54-58)과 동일하게 ──
         #   timestep(1kHz)·CONE(마찰콘)·STIFF(접촉강성 전 geom solref)·FRIC(마찰). 발 침투(soft 접촉) 해결 포함.
         self.m.opt.timestep = float(os.environ.get('TIMESTEP', '0.001'))    # 구조3 dt_simu=1kHz
         if os.environ.get('CONE'):
@@ -182,7 +182,7 @@ class QuadSim:
         self.foot_geoms = [[self.foot_gid[i]] for i in range(4)]
         self._foot_rgba0 = {g: self.m.geom_rgba[g].copy()
                             for gs in self.foot_geoms for g in gs}
-        # ── 시각화 궤적(구조3 02leg9_fulldynamics 스타일 통일) ──
+        # ── 시각화 궤적(구조3 quad_fulldynamics 스타일 통일) ──
         from collections import deque as _deque
         _tn = int(os.environ.get('TRAIL_N', '300'))
         self.cmd_v = np.zeros(6)                          # 명령속도(화살표·텍스트용; mode가 설정)
@@ -757,7 +757,7 @@ class QuadSim:
         pass                                            # 시각화는 항상 표시(구조3 스타일). 토글 없음.
 
     def draw_overlay(self, v):
-        # ★구조3(02leg9_fulldynamics_mujoco.py) 스타일로 시각화 통일:
+        # ★구조3(quad_fulldynamics.py) 스타일로 시각화 통일:
         #   빨강구=타겟footstep(swing) / 청록선=지지다각형 / 노랑구+선=CoM지면투영 / 노랑화살표=명령방향
         #   마젠타=base궤적 / 파란콘+초록화살표=마찰콘+GRF / 발별색선=발궤적
         d = self.d; m = self.m
@@ -801,7 +801,7 @@ class QuadSim:
             if ft is not None and fz[i] > ZC:
                 _sph([ft[0], ft[1], 0.008], 0.012, [1, 0.1, 0.1, 0.9])
         # ── 지지다각형(접지 발 연결, 청록 지면선) ──
-        _ord = [2, 3, 1, 0]                                  # FL,FR,HR,HL 둘레순(quad_sim legs=HL,HR,FL,FR)
+        _ord = [2, 3, 1, 0]                                  # FL,FR,HR,HL 둘레순(quad_mpc_wbic legs=HL,HR,FL,FR)
         sp = [fp[i] for i in _ord if fz[i] < ZC]
         for k in range(len(sp)):
             if len(sp) < 2: break
@@ -943,13 +943,16 @@ class QuadSim:
                 fext = max((float(np.linalg.norm(d.xfrc_applied[b, :3]))
                             for b in range(1, m.nbody)), default=0.0)
                 cv = self.cmd_v
-                v.set_texts([                                    # 구조3와 동일: 좌상=시간 우상=외력 좌하=명령
+                _yw = math.atan2(2 * (d.qpos[3] * d.qpos[6] + d.qpos[4] * d.qpos[5]),
+                                 1 - 2 * (d.qpos[5] ** 2 + d.qpos[6] ** 2))
+                _vact = float(d.qvel[0] * math.cos(_yw) + d.qvel[1] * math.sin(_yw))  # 실제 전진속도(heading투영)
+                v.set_texts([                                    # 구조3와 동일: 좌상=시간 우상=외력 좌하=명령/실제
                     (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPLEFT,
                      'sim time', '%.2f s' % d.time),
                     (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_TOPRIGHT,
                      'ext force', '%.0f N' % fext),
                     (mujoco.mjtFont.mjFONT_BIG, mujoco.mjtGridPos.mjGRID_BOTTOMLEFT,
-                     'cmd vx/vy/wz', '%+.2f %+.2f %+.2f' % (cv[0], cv[1], cv[5]))])
+                     'cmd vx/vy/wz\nactual vx', '%+.2f %+.2f %+.2f\n%+.2f m/s' % (cv[0], cv[1], cv[5], _vact))])
                 v.sync()
                 if self._rate > 0:                              # ★live 배속(GUI). RATE=0이면 sleep없이 최대속도
                     dt = _re * m.opt.timestep / self._rate - (time.time() - t0)
