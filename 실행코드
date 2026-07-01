@@ -1,7 +1,12 @@
 ════════════════════════════════════════════════════════════════════
- 02_Leg 실행 코드   ★본선 = 구조3 (simple-mpc FullDynamics, full-body MPC+RTI)
+ 02_Leg 실행 코드   ★★본선(02_Leg 성능) = quad_mpc_wbic (MPC+WBIC, ~1.2 m/s)
+                    ·연구용 = 구조3 (FullDynamics, ~0.27 m/s marginal)
+                    ·폐기 = 구조1(proxddp)·구조2(proxddp_tsid)   [2026-06-26 결정·삭제]
 ────────────────────────────────────────────────────────────────────
- 공통:  PXI=/home/jsh/miniforge3/envs/proxddp/bin/python   (구조1·2·quad_sim용)
+ 결론: 02_Leg=heavy-leg(다리79%) → 반응형 발배치가 안정 핵심. 디커플드(quad_mpc_wbic)에만 맞음.
+       구조3(커플드 OCP)=full-body+직접토크/Riccati로 작동하나 marginal·반응형발배치 거부.
+       TSID계열(구조2/kinodyn)=02_Leg 부적합(2×2 실험으로 종결). 상세=메모리.
+ 공통:  PXI=/home/jsh/miniforge3/envs/proxddp/bin/python   (quad_mpc_wbic용)
         구조3은 simple-mpc pixi env: cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi run python ...
         작업폴더: cd /home/jsh/문서/jsh/simulation/quad
  상세 연구노트: simulation/실행코드_상세.txt  /  메모리  /  git history
@@ -9,93 +14,133 @@
 
 
 ╔══════════════════════════════════════════════════════════════════╗
-║  ★ 구조3 — 본선 (전방향 0.1~0.5 m/s, thread-robust)                ║
+║  ★★ quad_mpc_wbic — 본선 (convex MPC(GRF) + WBIC trot, ~1.2 m/s)        ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-# (1) 뷰어 단독 — 무한보행 + 키보드 teleop (↑↓전진 ←→측방 ,/.선회 X정지)
-cd /home/jsh/simple-mpc && VIEW=1 RATE=0 NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
-
-# (2) ★ GUI + 뷰어 동시 (RBQ 스타일 조이스틱·모션버튼·IMU/Actuator 패널) — ★시작=Ready(서기), Walk 눌러야 보행
-#   ── 터미널 1 : GUI ──
-/home/jsh/miniforge3/envs/proxddp/bin/python /home/jsh/문서/jsh/simulation/quad/teleop_gui.py
-#   ── 터미널 2 : 뷰어 (GUI 명령 수신) ──
-cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
-
-# (3) 헤드리스 — 유한 STEPS, 초기속도 VX/VY/WZ
-cd /home/jsh/simple-mpc && VIEW=0 STEPS=400 VX=0.4 NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
-
-#  env:  VX/VY/WZ(초기속도)  NTH=8(스레드)  STIFF=0.005(접촉)  T=50(호라이즌)  ★RATE(뷰어 배속, 2=2배·0=최대속도)  RENDER_EVERY(기본10)
-#        WBVX/WBVY/WBWZ(전진·측방·선회 추종가중)  ASYNC=1(비동기)  EST/ESTCL=1(상태추정)
-#  ★[OCP 정식화] 비선형 OCP(proxDDP, RTI 1뉴턴스텝/100Hz). ★FullDynamics=동역학모델이 전신강체(=full-body). 변수=전신 상태궤적x+토크u(T스텝).
-#    목적(cost): base속도추종(WBVX400/WBVY200/WBWZ10)·발프레임추종(WFRAME1000)·centroidal운동량(0.04, 전신상태서 뽑은 파생량=shaping)·posture(뒷발목 ANKLE_W=50)·토크/힘 정규화(1e-4).
-#    제약: ①전신강체동역학(등식 EOM+접촉) ②토크한계 ±Peak(torque_limits, effortLimit×3) ③관절위치한계(kinematics_limits, qmin/qmax) ④마찰콘(force_cone μ0.8) ⑤착지(land_cstr) ⑥stance 접지.
-#  예(2배속): cd /home/jsh/simple-mpc && VIEW=1 RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/02leg9_fulldynamics_mujoco.py
-#  빌드(최초 1회):  cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi install && ~/.pixi/bin/pixi run build && ~/.pixi/bin/pixi run install
-
-
-╔══════════════════════════════════════════════════════════════════╗
-║  구조1 — 우리 Python NMPC (quad_proxddp.py)  02_Leg 0.32 m/s 무한안정 ║
-╚══════════════════════════════════════════════════════════════════╝
-
-# 02_Leg 전진 (뷰어, 무한)
-cd /home/jsh/문서/jsh/simulation/quad && PW_ORI=250 PW_BV=5 /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp.py --test loop --robot ours --exec-robot ours_sphere --vel 0.3 --gait-T 0.35 --step-h 0.05 --total-T 120
-#   측방보행:  --vel 0.0 --vel-y 0.3      대각선:  --vel 0.2 --vel-y 0.2      go2:  --robot go2 (가중 env 불필요)
-#   정지버티기: --test hold --robot go2   (02_Leg 정지는 구조2 권장)
-#   GUI 연동:  위 명령에 --cmd json 추가  +  별터미널 teleop_gui.py
-#   로그:  --noview --log logs/quad_log.csv  →  분석: PXI plot_log.py logs/quad_log.csv
-
-
-╔══════════════════════════════════════════════════════════════════╗
-║  구조2 차용본 — TSID (quad_proxddp_tsid.py)  02_Leg 정적기립 우수    ║
-╚══════════════════════════════════════════════════════════════════╝
-
-# 정지버티기 (02_Leg ✅, full-QP가 pin↔MuJoCo 불일치 흡수)
-cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python quad_proxddp_tsid.py --test hold --robot ours --exec-robot ours_sphere --total-T 30
-#   standing 검증: --test stand --robot go2     보행(~2.5s 한계): --test loop --robot go2 --vel 0.3
-
-
-╔══════════════════════════════════════════════════════════════════╗
-║  quad_sim — convex MPC(GRF) + WBIC trot (별도 스택, Di Carlo)        ║
-╚══════════════════════════════════════════════════════════════════╝
-
-# 전방향 trot 보행 (02_Leg ✅ sphere발, go2도 가능). ★최대 전진 ~1.1~1.2 m/s(구조3의 2.4배)·측방·선회 모두 OK
-cd /home/jsh/문서/jsh/simulation/quad && TROT_V=1.0 /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
+# 전방향 trot 보행 (02_Leg ✅ sphere발, go2도 가능). ★최대 전진 ~1.1~1.2 m/s·측방·선회 모두 OK
+cd /home/jsh/문서/jsh/simulation/quad && TROT_V=1.0 /home/jsh/miniforge3/envs/proxddp/bin/python quad_mpc_wbic.py --robot ours_sphere --mode trot
 #   측방:  TROT_V=0 TROT_VY=0.2    선회:  TROT_WZ=0.4    대각/원호:  TROT_V=0.3 TROT_VY=0.2 (또는 TROT_WZ=0.3)
-#   ★GUI + 뷰어 동시 (구조3와 동일 teleop_gui: 조이스틱 v/vy/w + 모션버튼 + 모니터패널):
-#     터미널1:  cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
-#     터미널2:  cd /home/jsh/문서/jsh/simulation/quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
-#     · ★시작=Ready(서기), Walk 눌러야 보행 · 조이스틱→v/vy/w · STOP·Ready=제자리 stance · ★Ground(눕기)=낮게 내려감(GROUND_Z 0.28) · ★Body Height 슬라이더=서기높이 실시간(q_home IK 재계산) · IMU/Actuator 패널 · 기본=최적자세(REAR_ANKLE=-0.7·base0.52)
-#     env: GROUND_Z(눕기높이, 기본0.28)  HEIGHT_RATE(높이변경 속도[m/s], 기본0.3)
-#   ★뷰어 배속:  RATE=2(2배 빠르게)·RATE=4·RATE=0(최대속도/sleep없음).  RENDER_EVERY(렌더당 물리스텝, 기본10).  예: RATE=3 TROT_V=0.5 ...quad_sim.py ...
-#   헤드리스 정량:  HEADLESS=1 STEPS=3000 PRINT_EVERY=500 ...  (z·x·y·yaw·tilt·발침투·falls 출력; 1kHz라 STEPS=시간/0.001)
-#   정지/기립:  --mode stance(WBIC) / stand(중력보상PD) / mpc(MPC+WBIC) / view
-#   env:  TROT_V/VY/WZ(전진·측방·선회 속도)  TROT_ACC(명령 가속도제한, 기본0.6)  ★TROT_WARMUP(시작 제자리trot[s], 기본0.6=리듬확립후 이동, 시작 lurch완화; 0=즉시)  CMDFILE(GUI폴링)  TROT_T(주기)  TROT_KCAP
-#   ★REAR_ANKLE(뒷발목 각도[rad], ★기본=-0.7 최적자세): 4-DoF 여유 해소 — 같은 발 궤적에 뒷다리 자세만(발목접힘). 0=폄. TROT_Z(base높이, 기본0.52=자연·고속최적; 0.45=웅크림 저속미관용). ★1.0m/s 최적=base 0.50~0.52(높을수록 안정·토크↓, 토크는 병목아님).
-#   ★ANKLE_W(뒷발목 핀 가중치, 기본20): 4-DoF 여자유도라 WBIC가 발목을 자유롭게 풀어 한 사이클 ±25° 흔들림→HL/HR 비대칭. REAR_ANKLE에 강하게 핀해 흔들림 ±7°↓·일관·대칭. 0=핀안함(기존). 높일수록 더 고정.
-#   ★물리환경 = 구조3(02leg9_fulldynamics)와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단; 발침투 -37mm→-2mm)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
-#   ★[2계층 정식화] ①convex MPC(Di Carlo SRBD, GRF 호라이즌 최적화)→λ계획  ②WBIC=순간 QP(quadprog, 변수 z=[q̈;λ], 전신동역학 사용).
-#     WBIC 목적(cost): swing발SE3·base자세/높이·posture·λ(MPC GRF)추종.  제약: ①전신동역학(등식) ②stance 무가속 ③마찰콘 ④토크한계(아래) ⑤위치한계(아래). +발배치=Raibert+capture(MPC밖).
-#     ※구조3와 차이: 구조3=전신 비선형 OCP 단일(호라이즌·predictive) / quad_sim=convex MPC(GRF)+순간WBIC 2계층(reactive). WBIC 동역학모델은 전신.
-#     W_TAU(토크 effort 최소화 가중, 기본0): min||τ||² 항. 단 posture/λ추종이 해를 거의 결정해 redundancy 적음→실효 미미(W_TAU=1도 토크 ~1%만↓). 프레임워크만 보유.
-#   ★관절 위치한계(POS_LIM, 기본 켜짐, 구조3 kinematics_limits 차용): WBIC QP에 q(T_la)∈[qmin,qmax]를 가속도경계로(jnt_range). lookahead POS_TLA(기본0.05s)로 한계전 감속. 검증: -10°로 좁히면 -10.3°서 묶임. 보행무영향. POS_LIM=0=끄기.
 
+#   ★GUI + 뷰어 동시 (RBQ 스타일 조이스틱 v/vy/w + 모션버튼 + 모니터패널):
 # 터미널1
 cd /home/jsh/문서/jsh/simulation/quad && /home/jsh/miniforge3/envs/proxddp/bin/python teleop_gui.py
 # 터미널2 (기본=최적자세·Ready 시작)
-cd /home/jsh/문서/jsh/simulation/quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_sim.py --robot ours_sphere --mode trot
+cd /home/jsh/문서/jsh/simulation/quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json /home/jsh/miniforge3/envs/proxddp/bin/python quad_mpc_wbic.py --robot ours_sphere --mode trot
+#     · ★시작=Ready(서기), Walk 눌러야 보행 · 조이스틱→v/vy/w · STOP·Ready=제자리 stance · Ground(눕기)=낮게(GROUND_Z 0.28)
+#     · ★Body Height 슬라이더=서기높이 실시간(q_home IK 재계산) · ★Step Height 슬라이더=보행중 live 적용(2026-06-26) · IMU/Actuator 패널
+
+#   ★뷰어 배속:  RATE=2(2배)·RATE=4·RATE=0(최대속도/sleep없음).  RENDER_EVERY(렌더당 물리스텝, 기본10).
+#   헤드리스 정량:  HEADLESS=1 STEPS=3000 PRINT_EVERY=500 ... --mode trot  (z·x·y·yaw·tilt·발침투·falls; 1kHz라 STEPS=시간/0.001)
+#                  ★--mode 필수(positional 아님). 예: HEADLESS=1 TROT_V=1.0 STEPS=8000 PXI quad_mpc_wbic.py --mode trot --robot ours_sphere
+#   정지/기립:  --mode stance(WBIC) / stand(중력보상PD) / mpc(MPC+WBIC) / view
+#   env:  ★GAIT(게이트, 기본 trot): trot=대각쌍 동적·2지지 / walk=순차(FR→HL→FL→HR) 정적안정·75%stance(항상≥3발지지, 저속안정). gait_sim_v13 프리셋 참조
+#         TROT_V/VY/WZ(전진·측방·선회 속도)  TROT_ACC(명령 가속도제한, 기본0.6)  ★TROT_WARMUP(시작 제자리trot[s], 기본0.6; 0=즉시)
+#         CMDFILE(GUI폴링; v/vy/w·mode·body_h·step_h live)  TROT_T(주기)  TROT_KCAP  TROT_STEPH(초기 step height, 기본0.08; GUI가 live override)  SHDBG=1(step_h 변경 디버그)
+#         GROUND_Z(눕기높이, 기본0.28)  HEIGHT_RATE(높이변경 속도[m/s], 기본0.3)
+#   ★REAR_ANKLE(뒷발목 각도[rad], ★기본=-0.7 최적자세): 4-DoF 여유 해소. 0=폄. TROT_Z(base높이, 기본0.52=자연·고속최적; 0.45=웅크림 저속).
+#   ★ANKLE_W(뒷발목 핀 가중치, 기본20): 4-DoF라 WBIC가 발목 자유롭게 풀어 ±25° 흔들림→REAR_ANKLE에 핀해 ±7°↓·대칭. 0=핀안함.
+#   ★물리환경 = 구조3와 동일: TIMESTEP(기본0.001=1kHz)  STIFF(접촉강성, 기본0.005=단단)  CONE(0=pyramid 1=ellip)  FRIC(마찰)
+#   ★[2계층 정식화] ①convex MPC(Di Carlo SRBD, GRF 호라이즌 최적화)→λ계획  ②WBIC=순간 QP(quadprog, z=[q̈;λ], 전신동역학).
+#     +발배치=Raibert+capture+ALIP(MPC밖, 반응형 — 디커플드라 자연히 맞음 = quad_mpc_wbic이 02_Leg서 빠른 핵심).
+#     WBIC 목적: swing발SE3·base자세/높이·posture·λ(MPC GRF)추종. 제약: 전신동역학·stance무가속·마찰콘·토크/위치한계.
+#   ★관절 위치한계(POS_LIM, 기본 켜짐): WBIC QP에 q∈[qmin,qmax] 가속도경계로(lookahead POS_TLA 기본0.05s). POS_LIM=0=끄기.
+#
+#   ─── ★sim2real 물리 (2026-06-29) ───────────────────────────────────
+#   VEL_LIM=1 (각속도 QP제약, controller-aware)  MOTOR_CURVE=1 (토크-속도곡선=실모터 포화)
+#   ★GEARBOX=1 (기어박스 물리: 반사관성 armature=ROTOR_I·N² + 감쇠 JDAMP + Coulomb마찰 JFRIC)
+#       대략값 ROTOR_I=1e-4·JDAMP=0.1·JFRIC=0.5 (★실 모터/기어 스펙 들어오면 교체). 기본 off라 켜야 반영.
+#       → 뒷발목 flail(sim아티팩트) 억제: 발목 21→7 rad/s. (감속비 hip/thigh7·calf10.5·foot14)
+#   GEAR_HIP/THIGH/CALF/FOOT (기어비 스케일, <1=저기어 속도↑·토크↓): 검토상 foot=0.5(7:1)만 권장.
+#   토크/속도 한계: 각관절 Peak 84/84/126/168Nm·무부하 29.6/19.7/14.8 rad/s. (VEL_CLIP 하드클립=비물리, 삭제됨)
+#   ★★★실측 스펙 교체 TODO (나중에) ─────────────────────────────────────
+#     [ ] 모터 로터관성 I_rotor → env ROTOR_I (현재 대략 1e-4)  ※armature=I·N²의 핵심
+#     [ ] 기어박스 Coulomb마찰 → env JFRIC (현재 0.5) / 점성감쇠 → env JDAMP (현재 0.1)
+#     [ ] 모터 토크-속도곡선 실측형상 → MOTOR_CURVE (현재 선형근사 τ=τ_peak·(1−ω/ω_noload))
+#     [ ] 감속비 확정 + 기어 재선정 적용 (1.1m/s 분석: calf·foot 8:1 균형 / 계단겸용시 10:1)
+#     → 데이터시트(로터관성·토크속도곡선) + 기어박스 스펙(마찰/감쇠) 들어오면 위 대략값 교체.
+#        상세=메모리 sim2real-checklist. thigh는 모터 고정(변경X), 운용 1.1m/s 권장.
+#   ────────────────────────────────────────────────────────────────────
+#   sim2real 수정 체크리스트 = 메모리(sim2real-checklist).
+#
+#   ─── ★계단 보행 perceptive (2026-06-29) ────────────────────────────
+#   STAIRS=1 (box계단 주입)  STAIR_H(단높이,0.05)·STAIR_D(단깊이,0.32)·STAIR_N(단수,6)·STAIR_X0(시작x,0.9)
+#   terrain_height(x,y) = ★elevation-map 인터페이스(현재 raycast=depth센서 대체, 추후 실 depth로 백엔드만 교체).
+#       ELEV=1=STAIRS 없이도 raycast 강제(험지).  ELEVMAP=1=뷰어에 elevation 격자 시각화(파랑낮음→빨강높음).
+#   ★발 착지·몸통 높이가 지형따라 자동 적응(MPC x_ref[5] 상승 → 상승 GRF, clearance 일정).  W_AM=5 KD_AM=8(드리프트 보상).
+#   권장: TROT_V=0.25~0.3. 5cm계단 full 등반 확인(clr 0.45 유지). 잔여=상단 측방드리프트.
+#   헤드리스: HEADLESS=1 STAIRS=1 STAIR_H=0.05 TROT_V=0.25 GEARBOX=1 W_AM=5 KD_AM=8 STEPS=14000 PXI quad_mpc_wbic.py --mode trot --robot ours_sphere
+#   GUI+뷰어 계단데모: 아래 터미널2에 STAIRS=1 ELEVMAP=1 GEARBOX=1 W_AM=5 KD_AM=8 추가
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  구조3 — 연구용 보존 (simple-mpc FullDynamics, full-body MPC+RTI)   ║
+╚══════════════════════════════════════════════════════════════════╝
+#  ★02_Leg ~0.27 m/s marginal(4~8s 후 완만발산). 반응형발배치 거부(커플드 OCP) → 본선 아님. NMPC계열 검증·연구용.
+
+# (1) 뷰어 단독 — 무한보행 + 키보드 teleop (↑↓전진 ←→측방 ,/.선회 X정지)
+cd /home/jsh/simple-mpc && VIEW=1 RATE=0 NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/quad_fulldynamics.py
+
+# (2) GUI + 뷰어 동시 (teleop_gui 공통) — 시작=Ready(서기), Walk 눌러야 보행
+#   터미널1: /home/jsh/miniforge3/envs/proxddp/bin/python /home/jsh/문서/jsh/simulation/quad/teleop_gui.py
+#   터미널2: cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/quad_fulldynamics.py
+
+# (3) 헤드리스 — 유한 STEPS, 초기속도 VX.  ★ITERS=4=Full SQP 안정보행(14s+, RTI는 4.8s붕괴; 단 6Hz 헤드리스용)
+cd /home/jsh/simple-mpc && VIEW=0 VX=0.3 ITERS=4 STEPS=1500 NTH=8 STIFF=0.005 ~/.pixi/bin/pixi run python examples/quad_fulldynamics.py
+
+#  env:  VX/VY/WZ(초기속도)  NTH=8(스레드)  STIFF=0.005(접촉)  T=50(호라이즌)  RATE(뷰어 배속)  RENDER_EVERY(기본10)
+#        WBVX/WBVY/WBWZ(전진·측방·선회 추종가중)  WBYAW(heading가중, 기본0; >0=과구속 악화주의)  TDS/TSS(cadence, 기본8/20=최적)
+#        ★RIC(Riccati 피드백 스케일, 기본1.0; 0=피드포워드만→보행 2.1s붕괴=Riccati 안정화 확인용)
+#        ★ITERS(SQP 반복=max_iters, 기본1=RTI/실시간13Hz but 보행 4.8s붕괴). ITERS=4=Full SQP → VX0.3 보행 4.8s→14s+ 안정(tilt5).
+#              단 솔브 155ms=6Hz=실시간부적합(헤드리스 연구용). ITERS≤3 불안정. 속도천장(0.4+)은 구조적 불변. TIMING=1=솔브시간 출력.
+#        KCAP/ALIP(반응형발배치 capture/ALIP 게인, 기본0; >0=커플드 OCP와 충돌·악화. 디커플드 구조용 코드 보존)
+#        ★PREDFOOT(OCP예측 발배치, 기본0; 1=발을 OCP예측 착지몸통위치에=Raibert feedforward 한계보완). KCAP/ALIP(capture).
+#        ★★0.4 지속보행 레시피: PREDFOOT=1.0 WBVY=400 WBWZ=40 ITERS=4 → VX0.4 22s+안정(~0.35m/s). (측정피드백+측방/yaw드리프트억제)
+#           예: VX=0.4 ITERS=4 PREDFOOT=1.0 WBVY=400 WBWZ=40 ...quad_fulldynamics... (RTI는 예측부정확→Full SQP필요)
+#        ★W_FOOT_REF(STEP2 capture-point body-consistent, ALIP). PREDFOOT에 [결합]시 속도천장↑: +W_FOOT_REF=0.5~0.7로 VX0.5 8s(1.2s→).
+#           고속 예: VX=0.5 ITERS=4 PREDFOOT=1.0 W_FOOT_REF=0.7 WBVY=400 WBWZ=40 ALIP=1.0 ...(0.45-0.5는 8-10s 미지속, 0.4는 지속)
+#  ★[OCP] 비선형 OCP(proxDDP, RTI 1뉴턴스텝/100Hz). FullDynamics=전신강체. 변수=전신상태궤적x+토크u. 적용=us[0]+Riccati K·δx 직접(TSID 없음).
+#  빌드:  cd /home/jsh/simple-mpc && ~/.pixi/bin/pixi install && ~/.pixi/bin/pixi run build && ~/.pixi/bin/pixi run install   (★install 필수! build만으론 site-packages 반영안됨)
+
+
+╔══════════════════════════════════════════════════════════════════╗
+║  B — Centroidal OCP 연구용 (simple-mpc Kinodynamics NMPC+TSID-ID)   ║
+╚══════════════════════════════════════════════════════════════════╝
+#  ★02_Leg ~0.2 m/s 12s+ 안정(발 자유최적화 FOOT_DECISION+측방억제). go2 ✅.
+
+# (1) 뷰어 단독 — 고정속도(VX env). 뷰어 좌하단 cmd/actual vx 표시
+cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 VIEW=1 ~/.pixi/bin/pixi run python examples/quad_centroidal.py
+
+# (2) ★GUI + 뷰어 동시 (2026-07-01 연동추가: CMDFILE 라이브속도 + STATE_PUB 모니터, A/C와 동일)
+#   터미널1: /home/jsh/miniforge3/envs/proxddp/bin/python /home/jsh/문서/jsh/simulation/quad/teleop_gui.py
+#   터미널2: cd /home/jsh/simple-mpc && VIEW=1 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json CONE=0 STIFF=0.002 ~/.pixi/bin/pixi run python examples/quad_centroidal.py
+#     · 조이스틱 v/vy/w → velocity_base(가속제한 ramp, ACC env 기본0.6) · IMU/Actuator 패널 실시간
+#     · ⚠️ B는 OCP 워커라 pose모드(Ready/Ground) 없음 — v=0=제자리스텝. Walk버튼 무관, 조이스틱 속도만 반영.
+
+#   ★02_Leg centroidal 똑바로 보행 레시피(~0.2m/s, 12s+): 발 OCP 자유결정(FOOT_DECISION)+측방억제(WBVY)
+#     REAR_LOCK=3000 ANKLE_W=5000 W_FOOT_REF=0.5 FOOT_DECISION=0.6 WBVY=150 ALIP=1.0 MAXITER=10 MU_INIT=1e-5 CONE=0 STIFF=0.005 FCONE=1 LAND=1 VX=0.2 ...quad_centroidal
+#     · STEP3=w_frame↓(FOOT_DECISION)로 발 자유최적화 → WBVY 측방페널티 수용 → 똑바로. (WBVY 단독=과구속 실패)
+#     · 진실: centroidal 실패=다리무게/비대칭 아니라 [동적 발배치](go2+무거운다리 멀쩡 반증)
+#   env(연구용): FOOT_DECISION·WBVY·W_FOOT_REF·REAR_LOCK·KCAP/ALIP/PREDFOOT·LEG_MASS_SCALE·DIAG·STAND·ANKLE_W
+
 
 ╔══════════════════════════════════════════════════════════════════╗
 ║  레퍼런스 / 기타                                                    ║
 ╚══════════════════════════════════════════════════════════════════╝
-
-# 구조2 simple-mpc Kinodynamics (NMPC+TSID-ID, 비교·레퍼런스)
-cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 VIEW=1 ~/.pixi/bin/pixi run python examples/02leg9_kinodynamics_mujoco.py
-# go2 레퍼런스: examples/go2_kinodynamics_mujoco.py / go2_fulldynamics.py
+# 깨끗한칸 실험(FullDynamics OCP + TSID, marginal 증명): backup/old_code/02leg9_fulldyn_tsid_mujoco.py  (아카이브·examples 심링크 제거)
+# go2 레퍼런스: examples/go2_fulldynamics.py (stock)  ·  go2_kinodynamics=backup/old_code/go2_kinodynamics_mujoco.py
 # biped MPC+WBIC: cd /home/jsh/문서/jsh/simulation/biped && python3 wbic_balance.py --mode mpc
 
-# 파일:  quad_proxddp.py(구조1)  quad_proxddp_tsid.py(구조2차용)  quad_sim.py(MPC+WBIC)
-#        quad_nmpc.py(NMPC모델)  teleop_gui.py(GUI)  build_real_quad.py(MJCF생성)  plot_log.py(로그)
-#        quad_real_pt.mjcf(구조3 점접촉)  quad_real_sphere.mjcf(구조1 sphere)  quad_real.mjcf(mesh)
-#        urdf/02_Leg_UFDF_260610_9.urdf(앞발목 fixed, 기본)
-# GitHub: jeongsunghun-afk/simulation  브랜치 biped-wbic-mpc
+# ─── ★파일 구조 (2026-07-01 정리) ─────────────────────────────────────
+# 관리 대상 4개 (나머지는 backup/, 필요시 꺼내씀):
+#   A  quad_mpc_wbic.py                 — 본선 Convex MPC + WBIC          [구 quad_sim.py]
+#   B  simple_mpc/quad_centroidal.py    — Centroidal OCP 연구용           [구 02leg9_kinodynamics_mujoco.py]
+#   C  simple_mpc/quad_fulldynamics.py  — FullDynamics OCP 연구용(구조3)  [구 02leg9_fulldynamics_mujoco.py]
+#   GUI teleop_gui.py
+#   에셋(유지): quad_real_sphere.mjcf(A)·quad_real_pt.mjcf(B/C 점접촉)·quad_real.mjcf(mesh)·urdf/·meshes/(URDF)·meshes_sim/(MuJoCo)
+#   B/C 실행: cd /home/jsh/simple-mpc && pixi run python examples/quad_centroidal.py | examples/quad_fulldynamics.py  (심링크→simple_mpc/)
+# backup/ (관리안함):
+#   old_code/ quad_nmpc·quad_hop·build_real_quad·plot_log·quad_proxddp(구조1)·quad_proxddp_tsid(구조2)·quad_sim_A·02leg9_fulldyn_tsid·go2·.patch
+#   data/ jump npz  ·  graphs/ 분석png  ·  docs/ 논문pdf  ·  logs/ 구 csv
+# GitHub: jeongsunghun-afk/simulation  (master)
 ════════════════════════════════════════════════════════════════════
+       

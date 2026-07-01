@@ -328,8 +328,21 @@ device.cmd_v = v                      # 뷰어 오버레이(cmd vx/vy/wz) 표시
 import numpy as _npd
 _fell=False
 print("[MJ] velocity_base 명령 =", list(v))
+_CMDFILE=_os.environ.get("CMDFILE")      # GUI(teleop_gui) JSON 명령 채널 → velocity_base (A/C와 동일 연동)
+_STATE_PUB=_os.environ.get("STATE_PUB")  # 상태 발행 → GUI IMU·actuator 모니터 패널
+_JN=[_mj.mj_id2name(device.m,_mj.mjtObj.mjOBJ_JOINT,_j).replace('_joint','')
+     for _j in range(device.m.njnt) if device.m.jnt_type[_j]!=_mj.mjtJoint.mjJNT_FREE]
+_vt=v.copy(); _ACC=float(_os.environ.get("ACC","0.6"))   # CMDFILE 목표속도 + 가속도제한 ramp
 for step in range(int(_os.environ.get("STEPS","300"))):
-    mpc.velocity_base = v
+    if _CMDFILE and step % 5 == 0:        # GUI JSON 채널 소비(20Hz) → 목표 v/vy/w
+        try:
+            import json as _json
+            with open(_CMDFILE) as _f: _cj=_json.load(_f)
+            _vt[0]=float(_cj.get('v',_vt[0])); _vt[1]=float(_cj.get('vy',0.0)); _vt[5]=float(_cj.get('w',0.0))
+        except Exception: pass
+    if _CMDFILE:
+        v[:] = v + np.clip(_vt - v, -_ACC*dt_mpc, _ACC*dt_mpc)   # 가속도제한 ramp(급조작 완화)
+    mpc.velocity_base = v; device.cmd_v = v
     if step % 30 == 0 or step == 299:
         _z=device.d.qpos[2]; _x=device.d.qpos[0]; _y=device.d.qpos[1]
         _t=_npd.degrees(_npd.arccos(_npd.clip(1-2*(device.d.qpos[4]**2+device.d.qpos[5]**2),-1,1)))
@@ -435,6 +448,23 @@ for step in range(int(_os.environ.get("STEPS","300"))):
         device.execute(tau_cmd)
         u_multibody.append(copy.deepcopy(tau_cmd))
         x_multibody.append(x_measured)
+    if _STATE_PUB and step % 3 == 0:      # 상태 발행(~33Hz) → GUI IMU·actuator 패널 (C와 동일 스키마)
+        try:
+            import json as _j2
+            _dd=device.d
+            _qw2,_qx2,_qy2,_qz2=_dd.qpos[3],_dd.qpos[4],_dd.qpos[5],_dd.qpos[6]
+            _roll=_npd.degrees(_npd.arctan2(2*(_qw2*_qx2+_qy2*_qz2),1-2*(_qx2*_qx2+_qy2*_qy2)))
+            _pitch=_npd.degrees(_npd.arcsin(_npd.clip(2*(_qw2*_qy2-_qz2*_qx2),-1,1)))
+            _yaw2=_npd.degrees(_npd.arctan2(2*(_qw2*_qz2+_qx2*_qy2),1-2*(_qy2*_qy2+_qz2*_qz2)))
+            _st={'mode':'move','base_z':float(_dd.qpos[2]),'t':step*dt_mpc,
+                 'rpy':[float(_roll),float(_pitch),float(_yaw2)],'gyro':[float(_g) for _g in _dd.qvel[3:6]],
+                 'names':_JN,'q':[float(_x) for _x in _dd.qpos[7:7+device.nu]],
+                 'dq':[float(_x) for _x in _dd.qvel[6:6+device.nu]],'tau':[float(_x) for _x in _dd.ctrl[:device.nu]],
+                 'cmd':[float(v[0]),float(v[1]),float(v[5])]}
+            _tmp2=_STATE_PUB+'.tmp'
+            with open(_tmp2,'w') as _f2: _j2.dump(_st,_f2)
+            _os.replace(_tmp2,_STATE_PUB)
+        except Exception: pass
 
 
 force_FL = np.array(force_FL)
