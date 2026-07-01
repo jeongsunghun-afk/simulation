@@ -881,8 +881,15 @@ class QuadSim:
             falls = 0
             _logj = os.environ.get('LOG_JOINTS')             # ★관절 각속도·토크 로깅 → npz(그래프용)
             _Lt, _Ldq, _Ltau, _Lq, _Lquat, _Lse, _Lfho = [], [], [], [], [], [], []
+            _push = os.environ.get('PUSH')                    # ★외란 테스트: 지정시각에 base에 측방 임펄스
+            _pf = float(os.environ.get('PUSH_F', '150')); _pt = float(os.environ.get('PUSH_T', '8'))
+            _pdur = float(os.environ.get('PUSH_DUR', '0.1')); _maxtilt = 0.0
             for s in range(nsteps):
+                if _push:                                     # 측방(y) 힘 주입 후 해제
+                    d.xfrc_applied[1, 1] = _pf if _pt <= d.time < _pt + _pdur else 0.0
                 control_fn(); mujoco.mj_step(m, d)
+                if _push and d.time > _pt:
+                    _x, _y = d.qpos[4], d.qpos[5]; _maxtilt = max(_maxtilt, np.degrees(np.arccos(max(-1, min(1, 1 - 2 * (_x*_x + _y*_y))))))
                 if _logj:
                     _Lt.append(d.time); _Ldq.append(d.qvel[6:6+self.nu].copy()); _Ltau.append(d.ctrl[:self.nu].copy())
                     _Lq.append(d.qpos[7:7+self.nu].copy()); _Lquat.append(d.qpos[3:7].copy())
@@ -907,7 +914,8 @@ class QuadSim:
                         _ext = ' terr=%.2f clr=%.2f' % (getattr(self, '_dbg_terr', 0.0), getattr(self, '_dbg_clr', 0.0))
                     print('[hl] s=%d t=%.2f z=%.3f x=%+.3f y=%+.3f yaw=%+.0f tilt=%.1f 침투뒤/앞=%.1f/%.1fmm falls=%d%s'
                           % (s, d.time, d.qpos[2], d.qpos[0], d.qpos[1], yaw, tilt, pr*1000, pf*1000, falls, _ext), flush=True)
-            print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f' % (nsteps, falls, d.qpos[0]), flush=True)
+            print('[hl] 종료: %d스텝 falls=%d 최종 x=%+.3f%s' % (nsteps, falls, d.qpos[0],
+                  (' push후최대tilt=%.1f°' % _maxtilt) if _push else ''), flush=True)
             if _logj:
                 _names = [mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_ACTUATOR, i) or ('act%d'%i) for i in range(self.nu)]
                 np.savez(_logj, t=np.array(_Lt), dq=np.array(_Ldq), tau=np.array(_Ltau), names=np.array(_names),
