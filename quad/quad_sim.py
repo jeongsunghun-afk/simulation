@@ -856,11 +856,16 @@ class QuadSim:
         rpy = [math.degrees(math.atan2(Rm[2, 1], Rm[2, 2])),
                math.degrees(math.asin(max(-1, min(1, -Rm[2, 0])))),
                math.degrees(math.atan2(Rm[1, 0], Rm[0, 0]))]
+        # ★전진 실제속도(heading 방향, EMA 필터) vs 명령속도 — cmd/actual 차이 모니터
+        _yaw = math.radians(rpy[2])
+        _vf = float(d.qvel[0] * math.cos(_yaw) + d.qvel[1] * math.sin(_yaw))
+        self._vf_filt = 0.97 * getattr(self, '_vf_filt', _vf) + 0.03 * _vf
         st = {'mode': self.cmd_mode, 'base_z': float(d.qpos[2]), 't': float(d.time),
               'rpy': rpy, 'gyro': [float(x) for x in d.qvel[3:6]], 'names': self._jnames,
               'q': [float(x) for x in d.qpos[7:7 + self.nu]],
               'dq': [float(x) for x in d.qvel[6:6 + self.nu]],
-              'tau': [float(x) for x in d.ctrl[:self.nu]]}
+              'tau': [float(x) for x in d.ctrl[:self.nu]],
+              'v_cmd': float(self.cmd_v[0]), 'v_act': self._vf_filt}   # 명령/실제 전진속도[m/s]
         tmp = path + '.tmp'
         with open(tmp, 'w') as f:
             json.dump(st, f)

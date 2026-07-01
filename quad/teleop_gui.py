@@ -211,9 +211,13 @@ class StatusPanel(Panel):
     def build(self):
         with dpg.collapsing_header(label='Robot State', default_open=True):
             dpg.add_text('-', tag='rs_text')
+            dpg.add_text('-', tag='rs_spd', color=(150, 220, 150))   # ★cmd vs 실제 전진속도
     def update(self, st):
         dpg.set_value('rs_text', 'mode = %s     base_z = %.3f m     t = %.1f s'
                       % (st.get('mode', '?'), st.get('base_z', 0.0), st.get('t', 0.0)))
+        _vc = st.get('v_cmd', 0.0); _va = st.get('v_act', 0.0)
+        _gap = (_va - _vc) / _vc * 100 if abs(_vc) > 0.05 else 0.0
+        dpg.set_value('rs_spd', '전진속도: 명령 %+.2f  →  실제 %+.2f m/s   (차이 %+.0f%%)' % (_vc, _va, _gap))
 
 
 class IMUPanel(Panel):
