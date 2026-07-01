@@ -90,6 +90,7 @@ cd /home/jsh/문서/jsh/simulation/quad && HEADLESS=1 TROT_V=1.0 STEPS=6000 PXI 
 # 터미널1: PXI teleop_gui_17dof.py
 # 터미널2: cd .../quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json PXI quad_mpc_wbic_17dof.py --robot ours_17dof_sphere --mode trot
 #   env:  ★REAR_ANKLE(기본 -0.5, 앞뒤 대칭)·FRONT_ANKLE(따로 주면 앞발목 분리)  ANKLE_W(4발목 핀, 20)  나머지 A와 동일
+#   ★W_AM 기본 5(각운동량 보상 ON, 구14dof는 0): 37.9kg 전발목 고속 yaw발산 억제 → cmd1.5 공진밴드 제거·전속도(0.5~2.0) 균일안정. 실제 최대 ~1.4m/s(cmd2.0).
 #   ★sphere발 필수(ours_17dof_sphere): mesh발(ours_17dof)은 rocking으로 보행 불안정(구 모델과 동일).
 
 

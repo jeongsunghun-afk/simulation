@@ -528,7 +528,7 @@ class QuadSim:
             P[sl(k), sl(k)] += w_lam * np.eye(3); g[sl(k)] -= w_lam * clam[k]
         # ★각운동량 보상(leg-heavy 고속): 총 centroidal 각운동량 h_ω 를 GRF 모멘트로 감쇠.
         #   Σ rᵢ×λᵢ ≈ −Kd·h_ω  (SRBD MPC가 무시하는 다리 swing 각운동량을 WBIC가 보상 → 고속 yaw/pitch 드리프트↓)
-        _w_am = float(os.environ.get('W_AM', '0'))
+        _w_am = float(os.environ.get('W_AM', '5'))   # ★17dof 기본 5(각운동량 보상 ON): 37.9kg 전발목 고속 yaw발산 억제 → cmd1.5 공진밴드 제거·전속도 균일안정. 구14dof는 0(평지)
         if _w_am > 0 and K > 0:
             mujoco.mj_subtreeVel(m, d)
             h_ang = d.subtree_angmom[0].copy()           # 총 각운동량 about CoM (world)
