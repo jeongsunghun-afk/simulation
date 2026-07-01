@@ -73,6 +73,27 @@ cd /home/jsh/문서/jsh/simulation/quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STA
 
 
 ╔══════════════════════════════════════════════════════════════════╗
+║  A' — 17-DOF 신모델 (260701, A 포팅) — quad_mpc_wbic_17dof         ║
+╚══════════════════════════════════════════════════════════════════╝
+# 새 URDF 02_Leg_UFDF_260701_3: 허리 yaw(FB_waist) + 앞다리도 4-DOF = 17-DOF.
+#   ★허리는 fixed 잠금 → 16-DOF 전(全)발목 4족으로 운용(허리 능동화는 추후). 총질량 37.9kg.
+#   검증: stand tilt0° / trot cmd1.3 falls=0(실제~0.63m/s). 모터 Peak 84/84/126/168(허리=hip).
+
+# (1) 모델 빌드 (URDF→MJCF, 최초 1회 또는 URDF 갱신 시)
+cd /home/jsh/문서/jsh/simulation/quad && PXI build_real_quad_17dof.py --force   # → quad_real_17dof.mjcf (+meshes_sim_17dof)
+cd /home/jsh/문서/jsh/simulation/quad && PXI gen_sphere_17dof.py                # → quad_real_17dof_sphere.mjcf (sphere발)
+
+# (2) 헤드리스 보행 검증
+cd /home/jsh/문서/jsh/simulation/quad && HEADLESS=1 TROT_V=1.0 STEPS=6000 PXI quad_mpc_wbic_17dof.py --robot ours_17dof_sphere --mode trot
+
+# (3) GUI + 뷰어 (16관절)
+# 터미널1: PXI teleop_gui_17dof.py
+# 터미널2: cd .../quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json PXI quad_mpc_wbic_17dof.py --robot ours_17dof_sphere --mode trot
+#   env:  ★REAR_ANKLE(기본 -0.5, 앞뒤 대칭)·FRONT_ANKLE(따로 주면 앞발목 분리)  ANKLE_W(4발목 핀, 20)  나머지 A와 동일
+#   ★sphere발 필수(ours_17dof_sphere): mesh발(ours_17dof)은 rocking으로 보행 불안정(구 모델과 동일).
+
+
+╔══════════════════════════════════════════════════════════════════╗
 ║  구조3 — 연구용 보존 (simple-mpc FullDynamics, full-body MPC+RTI)   ║
 ╚══════════════════════════════════════════════════════════════════╝
 #  ★02_Leg ~0.27 m/s marginal(4~8s 후 완만발산). 반응형발배치 거부(커플드 OCP) → 본선 아님. NMPC계열 검증·연구용.
@@ -131,8 +152,10 @@ cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 VIEW=1 ~/.pixi/bin/pixi run
 # biped MPC+WBIC: cd /home/jsh/문서/jsh/simulation/biped && python3 wbic_balance.py --mode mpc
 
 # ─── ★파일 구조 (2026-07-01 정리) ─────────────────────────────────────
-# 관리 대상 4개 (나머지는 backup/, 필요시 꺼내씀):
+# 관리 대상 (나머지는 backup/, 필요시 꺼내씀):
 #   A  quad_mpc_wbic.py                 — 본선 Convex MPC + WBIC          [구 quad_sim.py]
+#   A' quad_mpc_wbic_17dof.py           — ★260701 신모델(16-DOF 전발목, 허리 fixed). teleop_gui_17dof.py
+#      build_real_quad_17dof.py·gen_sphere_17dof.py·quad_real_17dof(_sphere).mjcf (Peak 84/126/168)
 #   B  simple_mpc/quad_centroidal.py    — Centroidal OCP 연구용           [구 02leg9_kinodynamics_mujoco.py]
 #   C  simple_mpc/quad_fulldynamics.py  — FullDynamics OCP 연구용(구조3)  [구 02leg9_fulldynamics_mujoco.py]
 #   GUI teleop_gui.py
