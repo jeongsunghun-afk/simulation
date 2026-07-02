@@ -43,6 +43,8 @@ struct QuadControl {
       m->jnt_solref[j*2]=0.004; m->jnt_solref[j*2+1]=1.0;
       m->jnt_solimp[j*5]=0.95; m->jnt_solimp[j*5+1]=0.99; m->jnt_solimp[j*5+2]=0.001;
       m->jnt_solimp[j*5+3]=0.5; m->jnt_solimp[j*5+4]=2.0; }
+    // ★접촉 강성(Python STIFF=0.005, 전 geom): 기본 0.02는 물렁→발 35mm 침투. solref 시정수↓로 침투 3mm
+    for(int g=0;g<m->ngeom;g++){ m->geom_solref[g*2]=0.005; m->geom_solref[g*2+1]=1.0; }
     d=mj_makeData(m); nq=m->nq; nv=m->nv; nu=m->nu;
     const char* JT[4]={"hip","thigh","calf","foot"};
     for(int i=0;i<4;i++){
