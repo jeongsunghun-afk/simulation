@@ -76,7 +76,7 @@ int main(int argc,char**argv){
 
   double RATE = getenv("RATE")?atof(getenv("RATE")):1.0;   // 재생 배속(env, 1=실시간·0.5=슬로모)
   const char* CMDFILE = getenv("CMDFILE");                 // ★GUI 연동: /tmp/quad_cmd.json 폴링(v/vy/w)
-  int falls=0; double max_tilt=0; long frame=0;
+  int falls=0; double max_tilt=0; long frame=0; bool fallen=false; long reset_seen=-1;
   auto wall0=std::chrono::steady_clock::now(); double sim0=d->time;
   while(!glfwWindowShouldClose(win)){
     // ★GUI 명령 폴링(~20Hz): teleop_gui가 쓴 v/vy/w 반영
@@ -90,14 +90,19 @@ int main(int argc,char**argv){
         ctrl.mode = json_str(c,"mode","move");                  // move/stand_up(서기)/stand_down(눕기)/off
         ctrl.set_gait(json_str(c,"gait","trot"));               // trot/walk 게이트 토글
         ctrl.body_h = json_get(c,"body_h",ctrl.body_h);         // 서기 높이 슬라이더
-        double rt=json_get(c,"rate",RATE); if(rt>0) RATE=rt; } }
+        double rt=json_get(c,"rate",RATE); if(rt>0) RATE=rt;
+        long rseq=(long)json_get(c,"reset_seq",reset_seen);     // ★RESET 버튼(상승엣지): mj_resetData+crouch_home+상태초기화
+        if(reset_seen<0) reset_seen=rseq;                       //   첫폴링=동기화(시작리셋 방지)
+        else if(rseq>reset_seen){ reset_seen=rseq; mj_resetData(m,d); q.crouch_home(); ctrl.reset(); falls=0; fallen=false;
+          wall0=std::chrono::steady_clock::now(); sim0=d->time; } } }
     // ★벽시계 기준 실시간 페이싱: sim_time이 wall_time×RATE 따라가도록(모니터 refresh 무관)
     double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-wall0).count();
     double target=sim0+wall*RATE; int guard=0;
     while(d->time < target && guard++ < 200){   // 따라잡기(최대 200스텝/프레임=폭주 방지)
       ctrl.control(); mj_step(m,d);
       double td=ctrl.tiltdeg(); max_tilt=std::max(max_tilt,td);
-      if(td>50||d->qpos[2]<0.2){ falls++; ctrl.armed=false; ctrl.settle_until=d->time+TC_SETTLE; q.crouch_home(); }
+      // ★낙상 시 자동재시작 안 함(그대로 쓰러진 채 유지 → RESET 버튼으로 복구). 낙상은 엣지로만 카운트
+      bool low=(td>50||d->qpos[2]<0.2); if(low && !fallen) falls++; fallen=low;
     }
     if(d->time-sim0 > wall*RATE+0.5){ wall0=std::chrono::steady_clock::now(); sim0=d->time; }  // 드리프트 리셋
     mjrRect vp={0,0,0,0}; glfwGetFramebufferSize(win,&vp.width,&vp.height);

@@ -1231,7 +1231,7 @@ def mode_trot():
          'jseq': None, 'jact': False, 'jk': 0, 'jsub': 0,                  # 점프: 마지막seq · 재생중 · 현knot · sub카운터
          'prev_mode': q.cmd_mode, 'homing': False, 'home_t0': 0.0,        # Ready 호밍: 직전모드 · 진행중 · 시작시각
          'home_phase': -1, 'home_lift': None,                             #   현 스텝위상 · liftoff 캡처
-         'hseq': None, 'home_req': False}                                 # home_seq 마지막값 · 호밍 요청(엣지/Ready/점프완료 통합)
+         'hseq': None, 'home_req': False, 'rseq': None}                   # home_seq · 호밍요청 · ★reset_seq 마지막값(RESET 버튼)
 
     def gait(i, tg):
         ph = (tg / GP['T'] + GP['OFFSET'][i]) % 1.0     # ★라이브 게이트 파라미터(GP) — GUI 토글 반영
@@ -1308,6 +1308,14 @@ def mode_trot():
                 if S['hseq'] is not None and _hs > S['hseq']:
                     S['home_req'] = True
                 S['hseq'] = _hs
+                _rs = int(_c.get('reset_seq', 0))                    # ★RESET 버튼 → 시뮬 리셋(넘어짐 복구)
+                if S['rseq'] is not None and _rs > S['rseq']:
+                    mujoco.mj_resetData(q.m, q.d); q.crouch_home()   # 깨끗한 상태 + 기립자세
+                    S['armed'] = False; S['lam_des'] = None; S['ptgt_prev'] = [None, None, None, None]
+                    S['settle_until'] = q.d.time + SETTLE; S['yaw_ref'] = 0.0
+                    S['Vs'] = S['Vys'] = S['Ws'] = 0.0; S['bx'] = float(q.d.qpos[0]); S['last_t'] = q.d.time
+                    print('[trot] RESET 버튼 → 시뮬 리셋', flush=True)
+                S['rseq'] = _rs
             except Exception: pass
         _prev_mode = S['prev_mode']; S['prev_mode'] = q.cmd_mode    # 매틱 직전모드(호밍 진입엣지 감지)
         if q.cmd_mode == 'stand_up' and _prev_mode != 'stand_up':   # 다른모드→Ready 진입도 호밍 요청
@@ -1554,7 +1562,9 @@ def mode_trot():
         q.crouch_home(); S['armed'] = False
 
     # ★RESET_ON_FALL=0(GUI/복구용): 쓰러져도 자동 reset 안 함 → off→ground→ready 복구 가능. 기본 1(헤드리스 falls 측정).
-    q.run_viewer(ctrl, reset_fn=reset, reset_on_fall=os.environ.get('RESET_ON_FALL', '1') != '0')
+    # ★GUI 연동(CMDFILE) 시 낙상 자동리셋 OFF → RESET 버튼으로만 복구(C++와 일관). 헤드리스/standalone은 기존 동작.
+    q.run_viewer(ctrl, reset_fn=reset,
+                 reset_on_fall=(os.environ.get('RESET_ON_FALL', '1') != '0') and not CMDFILE)
 
 
 def main():

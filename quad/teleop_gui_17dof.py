@@ -27,7 +27,7 @@ class SportClient:
         self.vmax = VMAX; self.wmax = WMAX          # 조이스틱 풀스케일(보행속도 게이지로 live 조절)
         self.cmd = {'v': 0.0, 'vy': 0.0, 'w': 0.0, 'mode': 'stand_up',   # 시작=Ready(서기). Walk 눌러야 보행
                     'body_h': 0.52, 'step_h': 0.10, 'euler': [0.0, 0.0, 0.0], 'gait': 'trot',
-                    'vmax': VMAX, 'jump_seq': 0, 'home_seq': 0,
+                    'vmax': VMAX, 'jump_seq': 0, 'home_seq': 0, 'reset_seq': 0,
                     'rate': 1.0, 'viz': True, 'terrain': True,   # ★rate=뷰어배속 viz=모니터표시 terrain=지형적응
                     'foot_lock': True, 'pos_hold': True,         # ★터치다운 foothold lock · 정지 위치홀드 (격리 비교용)
                     'foot_lock_s': 0.35, 'raibert_k': 0.8, 'swing_w': 1.0}  # ★lock시점 / reach게인 / whip억제(스윙여유도)
@@ -87,6 +87,10 @@ class SportClient:
 
     def StopMove(self):
         self.cmd.update(v=0.0, vy=0.0, w=0.0); self._pub()
+
+    def Reset(self):                                 # ★시뮬 리셋(넘어짐 복구): reset_seq 상승엣지 → 컨트롤러가 mj_resetData+crouch_home
+        self.cmd['reset_seq'] = int(self.cmd.get('reset_seq', 0)) + 1
+        self.cmd.update(v=0.0, vy=0.0, w=0.0, mode='stand_up'); self._pub()
 
     def SetMode(self, m):
         self.cmd['mode'] = m
@@ -303,7 +307,7 @@ with dpg.window(tag='main'):
         dpg.add_button(label='Walk 보행', width=120, callback=lambda: _mode_btn('move'))
         _jb = dpg.add_button(label='Jump 점프', width=110, callback=lambda: (sc.Jump(), _status()))
         dpg.bind_item_theme(_jb, _jump_theme)
-        _b = dpg.add_button(label='STOP', width=90, callback=lambda: (sc.StopMove(), _status()))
+        _b = dpg.add_button(label='RESET', width=90, callback=lambda: (sc.Reset(), _status()))
         dpg.bind_item_theme(_b, _stop_theme)
     with dpg.group(horizontal=True):
         _ob = dpg.add_button(label='Off 전원(쓰러짐)', width=130, callback=lambda: (_mode_btn('off'), _status()))

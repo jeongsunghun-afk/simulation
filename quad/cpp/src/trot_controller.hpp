@@ -69,6 +69,11 @@ struct TrotCtrl {
     double ph=std::fmod(tg/gp_T+gp_off[i],1.0); if(ph<0) ph+=1.0;
     if(ph>=gp_SWF){ stance=true; sprog=0.0; } else { stance=false; sprog=ph/gp_SWF; }
   }
+  void reset(){   // ★시뮬 리셋(RESET 버튼): 컨트롤러 상태 초기화(crouch_home 후 호출)
+    armed=false; settle_until=q.d->time+TC_SETTLE; have_qref=false;
+    Vs=Vys=Ws=0; yaw_hold_set=false; mpc_t=-1.0;
+    ht_cur=qhome_h=body_h=q.base_z0; for(int i=0;i<4;i++) have_prev[i]=false;
+  }
 
   // 1틱 제어: d->ctrl 설정(mj_step은 호출자). q.d->time 기준.
   void control(){
