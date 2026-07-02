@@ -25,7 +25,8 @@ struct QuadControl {
   double base_z0=0.52, REAR_ANKLE=-0.7, FRONT_ANKLE=-0.7;  // 14dof:ours_sphere / 17dof: 0.5234,-0.5
   double W_AM=0.0, KD_AM=8.0;                            // 각운동량 보상(14dof평지=0, 17dof튜닝=12/24)
   double w_ori=5.0;                                      // wbic_track 자세 task 가중(14dof=5, 17dof튜닝=20)
-  double swing_w=0.1;                                     // 스윙다리 여유도 posture 가중(↑=whip 억제; eiquadprog nullspace 매끈화)
+  double swing_w_r=0.1, swing_w_f=0.1;                    // 스윙다리 여유도 posture(앞/뒤 별도, ↑=whip 억제)
+  std::vector<char> is_front;                             // actuator별 앞다리(FL/FR) 여부
   bool stance_pin_ankle=false;                           // 17dof: stance서도 여유발목 핀(전4다리4DOF redundancy 표류차단)
   VectorXd q_home; Vector3d com_ref;
   VectorXd tau_peak, qmin, qmax; std::vector<char> is_ankle;
@@ -60,6 +61,9 @@ struct QuadControl {
       if(m->jnt_limited[j]){ qmin[a]=m->jnt_range[j*2]; qmax[a]=m->jnt_range[j*2+1]; } else { qmin[a]=-1e9; qmax[a]=1e9; }
       a++; }
     for(int i=0;i<4;i++) if(leg_dof[i]==4) is_ankle[legqv[i][3]-6]=1;
+    is_front.assign(nu,0);   // FL/FR 다리의 actuator = 앞다리
+    for(int i=0;i<4;i++){ bool fr=(std::string(legs[i])=="FL"||std::string(legs[i])=="FR");
+      for(int t=0;t<leg_dof[i];t++){ int a=legqv[i][t]-6; if(a>=0&&a<nu) is_front[a]=fr; } }
     q_home.resize(nu);
   }
   Vector3d foot_point(int i){ Vector3d p(d->geom_xpos[fgid[i]*3],d->geom_xpos[fgid[i]*3+1],d->geom_xpos[fgid[i]*3+2]); p[2]-=fr[i]; return p; }
@@ -197,7 +201,8 @@ struct QuadControl {
     double a_z=200*(zref-d->subtree_com[2])-25*Jcqv[2];
     P.topLeftCorner(nv,nv)+=150.0*(Jc.row(2).transpose()*Jc.row(2)); g.head(nv)-=150.0*a_z*Jc.row(2).transpose();
     for(int j=0;j<nu;j++){ double a_post=60*(q_home[j]-d->qpos[7+j])-5*qv[6+j];
-      double w_post = (is_ankle[j])?20.0 : (sw_vidx.count(6+j)?swing_w:1.0);   // 스윙 여유도=swing_w(↑=calf/thigh whip 억제)
+      double sw=(is_front[j]?swing_w_f:swing_w_r);                              // 앞/뒤 스윙 여유도 별도
+      double w_post = (is_ankle[j])?20.0 : (sw_vidx.count(6+j)?sw:1.0);         // ↑=calf/thigh whip 억제
       P(6+j,6+j)+=w_post; g[6+j]-=w_post*a_post; }
     P.topLeftCorner(nv,nv)+=1e-3*MatrixXd::Identity(nv,nv);
     for(int k=0;k<Kc;k++){ P.block(sl(k),sl(k),3,3)+=w_lam*Matrix3d::Identity(); g.segment(sl(k),3)-=w_lam*clam[k]; }

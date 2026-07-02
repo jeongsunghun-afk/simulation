@@ -86,7 +86,9 @@ int main(int argc,char**argv){
         ctrl.V=json_get(c,"v",ctrl.V); ctrl.VY=json_get(c,"vy",ctrl.VY); ctrl.WZ=json_get(c,"w",ctrl.WZ);
         ctrl.step_h=json_get(c,"step_h",ctrl.step_h);          // step height 슬라이더
         ctrl.raibert_k=json_get(c,"raibert_k",ctrl.raibert_k); // 전방 reach 슬라이더
-        double sw=json_get(c,"swing_w",-1); if(sw>=0) q.swing_w=sw;  // ★whip 슬라이더
+        double sw=json_get(c,"swing_w",-1); if(sw>=0){ q.swing_w_r=sw; q.swing_w_f=sw; }  // 통합(하위호환)
+        double swf=json_get(c,"swing_w_f",-1); if(swf>=0) q.swing_w_f=swf;   // ★앞다리 whip
+        double swr=json_get(c,"swing_w_r",-1); if(swr>=0) q.swing_w_r=swr;   // ★뒷다리 whip
         ctrl.mode = json_str(c,"mode","move");                  // move/stand_up(서기)/stand_down(눕기)/off
         ctrl.set_gait(json_str(c,"gait","trot"));               // trot/walk 게이트 토글
         ctrl.body_h = json_get(c,"body_h",ctrl.body_h);         // 서기 높이 슬라이더

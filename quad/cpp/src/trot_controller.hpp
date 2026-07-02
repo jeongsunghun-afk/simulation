@@ -158,6 +158,8 @@ static inline void apply_env_gains(QuadControl& q){
   if(getenv("W_AM")) q.W_AM=atof(getenv("W_AM"));
   if(getenv("KD_AM")) q.KD_AM=atof(getenv("KD_AM"));
   if(getenv("W_ORI")) q.w_ori=atof(getenv("W_ORI"));
-  if(getenv("SWING_W")) q.swing_w=atof(getenv("SWING_W"));
+  if(getenv("SWING_W")){ double v=atof(getenv("SWING_W")); q.swing_w_r=v; q.swing_w_f=v; }
+  if(getenv("SWING_W_R")) q.swing_w_r=atof(getenv("SWING_W_R"));
+  if(getenv("SWING_W_F")) q.swing_w_f=atof(getenv("SWING_W_F"));
   if(getenv("PIN_ANKLE")) q.stance_pin_ankle=true;
 }
