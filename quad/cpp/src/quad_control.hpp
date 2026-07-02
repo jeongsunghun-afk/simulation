@@ -22,7 +22,9 @@ struct QuadControl {
   const char* legs[4]={"HL","HR","FL","FR"};
   // 상수
   double MU=0.6, MU_MARGIN=0.707, LAMZ_MIN=1.0;         // wbic 마찰
-  double base_z0=0.52, REAR_ANKLE=-0.7;                  // ours_sphere
+  double base_z0=0.52, REAR_ANKLE=-0.7, FRONT_ANKLE=-0.7;  // 14dof:ours_sphere / 17dof: 0.5234,-0.5
+  double W_AM=0.0, KD_AM=8.0;                            // 각운동량 보상(14dof평지=0, 17dof=5)
+  bool stance_pin_ankle=false;                           // 17dof: stance서도 여유발목 핀(전4다리4DOF redundancy 표류차단)
   VectorXd q_home; Vector3d com_ref;
   VectorXd tau_peak, qmin, qmax; std::vector<char> is_ankle;
   std::array<Vector2d,4> foot_hip_off; std::array<double,4> foot_gz0;
@@ -33,6 +35,11 @@ struct QuadControl {
     char err[1000]=""; m=mj_loadXML(path,nullptr,err,1000);
     if(!m){ std::fprintf(stderr,"load fail: %s\n",err); std::exit(1); }
     m->opt.timestep = 0.001;   // ★Python과 동일(1kHz, TIMESTEP env 기본). mjcf 0.002 오버라이드
+    // ★관절한계 강화(Python line 119-120): soft 기본이 동적충격에 뚫림 → 시정수↓·impedance↑
+    for(int j=0;j<m->njnt;j++) if(m->jnt_limited[j]){
+      m->jnt_solref[j*2]=0.004; m->jnt_solref[j*2+1]=1.0;
+      m->jnt_solimp[j*5]=0.95; m->jnt_solimp[j*5+1]=0.99; m->jnt_solimp[j*5+2]=0.001;
+      m->jnt_solimp[j*5+3]=0.5; m->jnt_solimp[j*5+4]=2.0; }
     d=mj_makeData(m); nq=m->nq; nv=m->nv; nu=m->nu;
     const char* JT[4]={"hip","thigh","calf","foot"};
     for(int i=0;i<4;i++){
@@ -61,11 +68,12 @@ struct QuadControl {
   // crouch_home: 넓은 발위치 유지 무릎굽힘 → q_home/com_ref/standing. + foot_hip_off/foot_gz0
   void crouch_home(double bz=-1){
     double base_z = (bz>0? bz : base_z0), foot_z0=0.0;
-    for(int i=0;i<nq;i++) d->qpos[i]=0; d->qpos[3]=1;
+    if(m->nkey>0) mj_resetDataKeyframe(m,d,0); else { for(int i=0;i<nq;i++) d->qpos[i]=0; d->qpos[3]=1; }
     d->qpos[2]=0.60; mj_forward(m,d);
     Vector2d foot_xy[4]; for(int i=0;i<4;i++) foot_xy[i]=foot_point(i).head(2);
     d->qpos[2]=base_z;
-    for(int i=0;i<4;i++) if(leg_dof[i]==4) d->qpos[legqp[i][3]]=REAR_ANKLE;
+    for(int i=0;i<4;i++) if(leg_dof[i]==4){ double ang=(std::string(legs[i])=="FL"||std::string(legs[i])=="FR")?FRONT_ANKLE:REAR_ANKLE;
+      if(ang!=0.0) d->qpos[legqp[i][3]]=ang; }
     for(int it=0;it<300;it++){ mj_kinematics(m,d); mj_comPos(m,d);
       for(int i=0;i<4;i++){ Vector3d tgt(foot_xy[i][0],foot_xy[i][1],foot_z0); Vector3d e=tgt-foot_point(i);
         Matrix<double,3,Dynamic> Jf=foot_jac(i); Matrix3d J; for(int r=0;r<3;r++)for(int cc=0;cc<3;cc++) J(r,cc)=Jf(r,legqv[i][cc]);
@@ -134,7 +142,9 @@ struct QuadControl {
     P.topLeftCorner(nv,nv)+=Jc.transpose()*Jc; g.head(nv)-=Jc.transpose()*a_com;
     double oerr[3]; mju_quat2Vel(oerr,&d->qpos[3],1.0);
     for(int j=0;j<3;j++){ double a=150*(-oerr[j])-20*qv[3+j]; P(3+j,3+j)+=5.0; g[3+j]-=5.0*a; }
-    for(int j=0;j<nu;j++){ double a=60*(q_home[j]-d->qpos[7+j])-5*qv[6+j]; P(6+j,6+j)+=1.0; g[6+j]-=a; }
+    for(int j=0;j<nu;j++){ double a=60*(q_home[j]-d->qpos[7+j])-5*qv[6+j];
+      double w=(stance_pin_ankle&&is_ankle[j])?20.0:1.0;   // ★17dof: 여유발목(4개) stance 핀→nullptr 표류 차단
+      P(6+j,6+j)+=w; g[6+j]-=w*a; }
     P.topLeftCorner(nv,nv)+=1e-4*MatrixXd::Identity(nv,nv);
     for(int k=0;k<K;k++) P.block(nv+3*k,nv+3*k,3,3)+=1e-3*Matrix3d::Identity();
     int neq=6+3*K; MatrixXd A=MatrixXd::Zero(neq,nz); VectorXd b=VectorXd::Zero(neq);
@@ -181,6 +191,14 @@ struct QuadControl {
       P(6+j,6+j)+=w_post; g[6+j]-=w_post*a_post; }
     P.topLeftCorner(nv,nv)+=1e-3*MatrixXd::Identity(nv,nv);
     for(int k=0;k<Kc;k++){ P.block(sl(k),sl(k),3,3)+=w_lam*Matrix3d::Identity(); g.segment(sl(k),3)-=w_lam*clam[k]; }
+    // 각운동량 보상(leg-heavy 고속): Σ rᵢ×λᵢ ≈ −KD_AM·h_ω (17dof=5, 14dof평지=0)
+    if(W_AM>0 && Kc>0){ mj_subtreeVel(m,d);
+      Vector3d h_ang(d->subtree_angmom[0],d->subtree_angmom[1],d->subtree_angmom[2]);
+      Vector3d hdes=-KD_AM*h_ang; Vector3d com(d->subtree_com[0],d->subtree_com[1],d->subtree_com[2]);
+      MatrixXd A_am=MatrixXd::Zero(3,nzt);
+      for(int k=0;k<Kc;k++){ Vector3d r=cpos[k]-com; int o=sl(k);
+        A_am(0,o+1)=-r[2]; A_am(0,o+2)=r[1]; A_am(1,o)=r[2]; A_am(1,o+2)=-r[0]; A_am(2,o)=-r[1]; A_am(2,o+1)=r[0]; }
+      P+=W_AM*(A_am.transpose()*A_am); g-=W_AM*(A_am.transpose()*hdes); }
     int neq=6+3*Kc; MatrixXd A=MatrixXd::Zero(neq,nzt); VectorXd b=VectorXd::Zero(neq);
     A.block(0,0,6,nv)=M.topRows(6); b.head(6)=-h.head(6);
     for(int k=0;k<Kc;k++) A.block(0,sl(k),6,3)=-cjac[k].leftCols(6).transpose();

@@ -52,7 +52,16 @@ int main(int argc,char**argv){
   double V = getenv("TROT_V")?atof(getenv("TROT_V")):0.30;
   bool ALIP = !(getenv("ALIP") && !strcmp(getenv("ALIP"),"0"));
   bool POS_HOLD = !(getenv("POS_HOLD") && !strcmp(getenv("POS_HOLD"),"0"));
-  QuadControl q; q.load(path); q.crouch_home(); q.setup_mpc();
+  QuadControl q; q.load(path);
+  // 모델별 파라미터(14dof 기본 / 17dof는 env로: BASE_Z0=0.5234 REAR_ANKLE=-0.5 W_AM=5)
+  if(getenv("BASE_Z0")) q.base_z0=atof(getenv("BASE_Z0"));
+  if(getenv("REAR_ANKLE")){ q.REAR_ANKLE=atof(getenv("REAR_ANKLE")); q.FRONT_ANKLE=q.REAR_ANKLE; }
+  if(getenv("FRONT_ANKLE")) q.FRONT_ANKLE=atof(getenv("FRONT_ANKLE"));
+  if(getenv("W_AM")) q.W_AM=atof(getenv("W_AM"));
+  if(getenv("PIN_ANKLE")) q.stance_pin_ankle=true;   // (실험용) stance 발목핀
+  q.crouch_home(); q.setup_mpc();
+  if(getenv("DBG")) std::printf("[dbg] nu=%d leg_dof=[%d %d %d %d] standing_z=%.5f com_ref=[%.5f %.5f %.5f]\n",
+      q.nu,q.leg_dof[0],q.leg_dof[1],q.leg_dof[2],q.leg_dof[3],q.d->qpos[2],q.com_ref[0],q.com_ref[1],q.com_ref[2]);
   mjModel*m=q.m; mjData*d=q.d; int nv=q.nv;
   double dt=m->opt.timestep;
   // 상태
