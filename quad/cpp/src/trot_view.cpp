@@ -6,6 +6,18 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <chrono>
+#include <thread>
+#include <fstream>
+#include <sstream>
+#include <string>
+
+// 평면 JSON에서 "key": 숫자 추출(GUI cmd 파일용, 경량)
+static double json_get(const std::string& s,const char* key,double def){
+  std::string k=std::string("\"")+key+"\""; auto p=s.find(k);
+  if(p==std::string::npos) return def; p=s.find(':',p);
+  if(p==std::string::npos) return def; return atof(s.c_str()+p+1);
+}
 
 static mjvCamera cam; static mjvOption opt; static mjvScene scn; static mjrContext con;
 static bool btnL=false, btnR=false, btnM=false; static double lastx=0, lasty=0;
@@ -54,14 +66,25 @@ int main(int argc,char**argv){
   glfwSetKeyCallback(win,kb); glfwSetMouseButtonCallback(win,mouse_btn);
   glfwSetCursorPosCallback(win,mouse_move); glfwSetScrollCallback(win,scroll);
 
-  int falls=0; double max_tilt=0;
+  double RATE = getenv("RATE")?atof(getenv("RATE")):1.0;   // 재생 배속(env, 1=실시간·0.5=슬로모)
+  const char* CMDFILE = getenv("CMDFILE");                 // ★GUI 연동: /tmp/quad_cmd.json 폴링(v/vy/w)
+  int falls=0; double max_tilt=0; long frame=0;
+  auto wall0=std::chrono::steady_clock::now(); double sim0=d->time;
   while(!glfwWindowShouldClose(win)){
-    double simstart=d->time;
-    while(d->time-simstart < 1.0/60.0){    // 실시간(60fps) 만큼 물리 진행
+    // ★GUI 명령 폴링(~20Hz): teleop_gui가 쓴 v/vy/w 반영
+    if(CMDFILE && (frame++ %3==0)){
+      std::ifstream f(CMDFILE);
+      if(f){ std::stringstream ss; ss<<f.rdbuf(); std::string c=ss.str();
+        ctrl.V=json_get(c,"v",ctrl.V); ctrl.VY=json_get(c,"vy",ctrl.VY); ctrl.WZ=json_get(c,"w",ctrl.WZ); } }
+    // ★벽시계 기준 실시간 페이싱: sim_time이 wall_time×RATE 따라가도록(모니터 refresh 무관)
+    double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-wall0).count();
+    double target=sim0+wall*RATE; int guard=0;
+    while(d->time < target && guard++ < 200){   // 따라잡기(최대 200스텝/프레임=폭주 방지)
       ctrl.control(); mj_step(m,d);
       double td=ctrl.tiltdeg(); max_tilt=std::max(max_tilt,td);
       if(td>50||d->qpos[2]<0.2){ falls++; ctrl.armed=false; ctrl.settle_until=d->time+TC_SETTLE; q.crouch_home(); }
     }
+    if(d->time-sim0 > wall*RATE+0.5){ wall0=std::chrono::steady_clock::now(); sim0=d->time; }  // 드리프트 리셋
     mjrRect vp={0,0,0,0}; glfwGetFramebufferSize(win,&vp.width,&vp.height);
     cam.lookat[0]=d->qpos[0]; cam.lookat[1]=d->qpos[1];   // 로봇 추적
     mjv_updateScene(m,d,&opt,NULL,&cam,mjCAT_ALL,&scn);
