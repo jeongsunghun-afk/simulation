@@ -31,15 +31,7 @@ static mjvCamera cam; static mjvOption opt; static mjvScene scn; static mjrConte
 static bool btnL=false, btnR=false, btnM=false; static double lastx=0, lasty=0;
 static TrotCtrl* gC=nullptr;
 
-static void kb(GLFWwindow* w,int key,int sc,int act,int mods){
-  if(act!=GLFW_PRESS && act!=GLFW_REPEAT) return;
-  if(!gC) return;
-  if(key==GLFW_KEY_UP)    gC->V = std::min(2.0, gC->V+0.1);
-  if(key==GLFW_KEY_DOWN)  gC->V = std::max(-0.5, gC->V-0.1);
-  if(key==GLFW_KEY_LEFT)  gC->WZ = std::min(1.0, gC->WZ+0.1);
-  if(key==GLFW_KEY_RIGHT) gC->WZ = std::max(-1.0, gC->WZ-0.1);
-  if(key==GLFW_KEY_SPACE){ gC->V=0; gC->VY=0; gC->WZ=0; }
-}
+// (키보드 제어 삭제 — GUI(teleop_gui_17dof)로 제어. 마우스 카메라만 유지)
 static void mouse_btn(GLFWwindow* w,int b,int act,int mods){
   btnL=glfwGetMouseButton(w,GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
   btnR=glfwGetMouseButton(w,GLFW_MOUSE_BUTTON_RIGHT)==GLFW_PRESS;
@@ -71,7 +63,7 @@ int main(int argc,char**argv){
   mjv_makeScene(m,&scn,2000); mjr_makeContext(m,&con,mjFONTSCALE_150);
   cam.distance=2.2; cam.elevation=-20; cam.azimuth=135; cam.lookat[2]=0.35;
   opt.flags[mjVIS_CONTACTFORCE]=1;
-  glfwSetKeyCallback(win,kb); glfwSetMouseButtonCallback(win,mouse_btn);
+  glfwSetMouseButtonCallback(win,mouse_btn);   // 마우스 카메라만(키보드 제어 삭제, GUI로 조작)
   glfwSetCursorPosCallback(win,mouse_move); glfwSetScrollCallback(win,scroll);
 
   double RATE = getenv("RATE")?atof(getenv("RATE")):1.0;   // 재생 배속(env, 1=실시간·0.5=슬로모)
@@ -112,9 +104,9 @@ int main(int argc,char**argv){
     mjv_updateScene(m,d,&opt,NULL,&cam,mjCAT_ALL,&scn);
     mjr_render(vp,&scn,&con);
     char hud[256];
-    std::snprintf(hud,256,"cmd V=%.2f  WZ=%.2f m/s\nactual z=%.3f  tilt=%.1f deg\nx=%+.2f  falls=%d\n[UP/DOWN]속도 [L/R]선회 [SPACE]정지",
+    std::snprintf(hud,256,"cmd V=%.2f  WZ=%.2f m/s\nactual z=%.3f  tilt=%.1f deg\nx=%+.2f  falls=%d\nmouse: rotate/zoom  |  control via GUI",
                   ctrl.V,ctrl.WZ,d->qpos[2],ctrl.tiltdeg(),d->qpos[0],falls);
-    mjr_overlay(mjFONT_NORMAL,mjGRID_TOPLEFT,vp,"17-DOF C++ 최종세팅",hud,&con);
+    mjr_overlay(mjFONT_NORMAL,mjGRID_TOPLEFT,vp,"17-DOF C++ trot (GUI controlled)",hud,&con);
     glfwSwapBuffers(win); glfwPollEvents();
   }
   mjv_freeScene(&scn); mjr_freeContext(&con); glfwTerminate();
