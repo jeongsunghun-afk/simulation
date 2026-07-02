@@ -12,6 +12,7 @@ int main(int argc,char**argv){
   QuadControl q; q.load(path); apply_env_gains(q); q.crouch_home(); q.setup_mpc();
   TrotCtrl ctrl(q);
   if(getenv("TROT_V")) ctrl.V=atof(getenv("TROT_V"));
+  if(getenv("TROT_WZ")) ctrl.WZ=atof(getenv("TROT_WZ"));   // ★선회 각속도 테스트
   if(getenv("ALIP") && !strcmp(getenv("ALIP"),"0")) ctrl.ALIP=false;
   if(getenv("POS_HOLD") && !strcmp(getenv("POS_HOLD"),"0")) ctrl.POS_HOLD=false;
   mjModel*m=q.m; mjData*d=q.d; double dt=m->opt.timestep;
@@ -31,8 +32,10 @@ int main(int argc,char**argv){
           if(fi>=2) pf=std::min(pf,c.dist); else pr=std::min(pr,c.dist); } }
       penF+=pf; penR+=pr;
       double R[9]; mju_quat2Mat(R,&d->qpos[3]); pitchSum+=std::asin(std::max(-1.0,std::min(1.0,-R[6])))*180/M_PI; pn++; }
-    if(step%500==0) std::printf("[hl] s=%d t=%.2f z=%.3f x=%+.3f y=%+.3f tilt=%.1f Veff=%.2f falls=%d\n",
-                                step,d->time,d->qpos[2],d->qpos[0],d->qpos[1],td,ctrl.Veff_dbg,falls);
+    if(step%250==0){ double*qq=&d->qpos[3];
+      double yaw=std::atan2(2*(qq[0]*qq[3]+qq[1]*qq[2]),1-2*(qq[2]*qq[2]+qq[3]*qq[3]))*180/M_PI;
+      std::printf("[hl] s=%d t=%.2f z=%.3f x=%+.3f y=%+.3f yaw=%+.0f° tilt=%.1f falls=%d\n",
+                  step,d->time,d->qpos[2],d->qpos[0],d->qpos[1],yaw,td,falls); }
   }
   double wall=std::chrono::duration<double>(std::chrono::high_resolution_clock::now()-t0).count();
   std::printf("\n=== 종료: STEPS=%d(%.1fs) x=%+.3f z=%.3f max_tilt=%.1f° falls=%d | ★침투평균 앞=%.1fmm 뒤=%.1fmm pitch=%.1f° | %.0f steps/s ===\n",
