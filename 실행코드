@@ -95,11 +95,6 @@ cd /home/jsh/문서/jsh/simulation/quad && HEADLESS=1 TROT_V=1.0 STEPS=6000 PXI 
 #       (되돌리려면 env W_ORI=5 KD_AM=8 W_AM=5). KCAP는 0.16 유지(↑=역효과).
 #   ★sphere발 필수(ours_17dof_sphere): mesh발(ours_17dof)은 rocking으로 보행 불안정(구 모델과 동일).
 
-# (4) C++ closed-loop (배포용 실시간, simulation/quad/cpp) — 튜닝값 env로 전달
-# cd .../quad/cpp && cmake -S . -B build && cmake --build build   # 최초 빌드
-# 14dof: ./build/trot_sim ../quad_real_sphere.mjcf 6000
-# 17dof: BASE_Z0=0.5234 REAR_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 ./build/trot_sim ../quad_real_17dof_sphere.mjcf 6000
-#   → 17dof C++ max_tilt 1.8°·falls=0·4400 steps/s(실시간 4배). 단위검증: ./build/quad_cpp
 #   ─── ★동물형 발목 whip(paw-flick, 2026-07-01) ─────────────────────────
 #   발목 whip env: ANKLE_KP/ANKLE_KD(발목 컴플라이언트 PD, 기본60/5=강핀) · ANKLE_FLICK(능동flick 진폭,기본0) · FLICK_POW(윈도우) · GEAR_FOOT(발목기어)
 #   ★결론=고속 trot 수동 whip이 정답: 능동구동 없이 다리관성이 저절로 채찍질(path A). 안정성 비용 0(tilt0.6° @cmd2.0, arc88°).
@@ -160,6 +155,30 @@ cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 VIEW=1 ~/.pixi/bin/pixi run
 
 
 ╔══════════════════════════════════════════════════════════════════╗
+║  C++ 포팅 (배포용 실시간, simulation/quad/cpp) — A/A' closed-loop   ║
+╚══════════════════════════════════════════════════════════════════╝
+# quad_mpc_wbic.py(14-DOF)·quad_mpc_wbic_17dof(16-DOF) 컨트롤러를 C++로 포팅. eiquadprog QP, 1kHz 실시간.
+#   구조: src/quad_control.hpp(crouch_home·wbic_stance·wbic_track·MPC호출, 모델의존)
+#         src/mpc.hpp(Di Carlo SRBD convex MPC)  src/main.cpp(단위검증)  src/trot_sim.cpp(closed-loop)
+#   의존성: conda env proxddp의 mujoco C·eigen·eiquadprog (CMakeLists ENV_PREFIX). ★conda libstdc++ 명시링크(ABI).
+
+# (1) 빌드 (최초 1회 / 소스 수정 후)
+cd /home/jsh/문서/jsh/simulation/quad/cpp && cmake -S . -B build && cmake --build build
+
+# (2) 단위검증 (Python 기준값 정합 — dump_*.py로 /tmp/*.txt 생성 후)
+cd /home/jsh/문서/jsh/simulation/quad/cpp && ./build/quad_cpp
+#   검증1 crouch_home 4.7e-11 · 검증2 wbic_stance 4.7e-10 · 검증3 wbic_track 0.07Nm · 검증4 MPC 9e-3N (전부 솔버허용오차내)
+#   기준 재생성: env HEADLESS=1 STEPS=600 <proxddp py> dump_ref.py / dump_track.py / dump_mpc.py
+
+# (3) closed-loop trot (인자: mjcf, STEPS)
+# 14dof: ./build/trot_sim ../quad_real_sphere.mjcf 6000
+#   → 3s x=0.358≈Python 0.359(0.1%일치)·falls=0·~4900 steps/s(실시간 5배)
+# 17dof(튜닝 게인 env): BASE_Z0=0.5234 REAR_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 ./build/trot_sim ../quad_real_17dof_sphere.mjcf 6000
+#   → max_tilt 1.8°·falls=0·~4400 steps/s. env: TROT_V(0.3)·ALIP(1)·POS_HOLD(1)·FRONT_ANKLE·PIN_ANKLE(실험)
+#   ⚠️ 17dof는 t=0 초기접촉 임펄스로 스트레스받은 QP를 eiquadprog≠quadprog가 다르게 풀어 궤적 분기(z 3cm↓, 거동등가·falls=0). 14dof는 0.1% 정합.
+# ★미포팅: 허리능동(nu=17)·detect_contact(측정힘융합)·walk게이트·점프/getup
+
+╔══════════════════════════════════════════════════════════════════╗
 ║  레퍼런스 / 기타                                                    ║
 ╚══════════════════════════════════════════════════════════════════╝
 # 깨끗한칸 실험(FullDynamics OCP + TSID, marginal 증명): backup/old_code/02leg9_fulldyn_tsid_mujoco.py  (아카이브·examples 심링크 제거)
@@ -171,6 +190,8 @@ cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 VIEW=1 ~/.pixi/bin/pixi run
 #   A  quad_mpc_wbic.py                 — 본선 Convex MPC + WBIC          [구 quad_sim.py]
 #   A' quad_mpc_wbic_17dof.py           — ★260701 신모델(16-DOF 전발목, 허리 fixed). teleop_gui_17dof.py
 #      build_real_quad_17dof.py·gen_sphere_17dof.py·quad_real_17dof(_sphere).mjcf (Peak 84/126/168)
+#   C++ quad/cpp/                        — ★A/A' 배포용 실시간 포팅. quad_control.hpp·mpc.hpp·main.cpp(검증)·trot_sim.cpp(closed-loop)
+#       trot_sim(14dof 0.1%정합·17dof튜닝 tilt1.8°)·quad_cpp(단위검증). eiquadprog, 1kHz. 위 "C++ 포팅" 섹션 참조
 #   B  simple_mpc/quad_centroidal.py    — Centroidal OCP 연구용           [구 02leg9_kinodynamics_mujoco.py]
 #   C  simple_mpc/quad_fulldynamics.py  — FullDynamics OCP 연구용(구조3)  [구 02leg9_fulldynamics_mujoco.py]
 #   GUI teleop_gui.py
