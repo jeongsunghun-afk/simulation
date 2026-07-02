@@ -21,7 +21,7 @@ int main(int argc,char**argv){
   if(getenv("DBG")) std::printf("[dbg] nu=%d leg_dof=[%d %d %d %d] standing_z=%.5f com_ref=[%.5f %.5f %.5f]\n",
       q.nu,q.leg_dof[0],q.leg_dof[1],q.leg_dof[2],q.leg_dof[3],d->qpos[2],q.com_ref[0],q.com_ref[1],q.com_ref[2]);
 
-  int falls=0; double max_tilt=0, penF=0, penR=0, pitchSum=0; int pn=0;
+  int falls=0; double max_tilt=0, penF=0, penR=0, pitchSum=0, tauEff=0, calfTau=0; int pn=0;
   auto t0=std::chrono::high_resolution_clock::now();
   for(int step=0; step<STEPS; step++){
     ctrl.control(); mj_step(m,d);
@@ -33,7 +33,9 @@ int main(int argc,char**argv){
         for(int fi=0;fi<4;fi++) if(c.geom1==q.fgid[fi]||c.geom2==q.fgid[fi]){
           if(fi>=2) pf=std::min(pf,c.dist); else pr=std::min(pr,c.dist); } }
       penF+=pf; penR+=pr;
-      double R[9]; mju_quat2Mat(R,&d->qpos[3]); pitchSum+=std::asin(std::max(-1.0,std::min(1.0,-R[6])))*180/M_PI; pn++; }
+      double R[9]; mju_quat2Mat(R,&d->qpos[3]); pitchSum+=std::asin(std::max(-1.0,std::min(1.0,-R[6])))*180/M_PI; pn++;
+      for(int j=0;j<q.nu;j++) tauEff+=std::abs(d->ctrl[j]);   // 총 토크 effort(에너지 대리)
+      for(int i=0;i<4;i++){ int cj=q.legqv[i][2]-6; if(cj>=0&&cj<q.nu) calfTau+=std::abs(d->ctrl[cj]); } }  // calf(whip 관절) 토크
     if(step%250==0){ double*qq=&d->qpos[3];
       double yaw=std::atan2(2*(qq[0]*qq[3]+qq[1]*qq[2]),1-2*(qq[2]*qq[2]+qq[3]*qq[3]))*180/M_PI;
       std::printf("[hl] s=%d t=%.2f z=%.3f x=%+.3f y=%+.3f yaw=%+.0f° tilt=%.1f falls=%d\n",
@@ -42,5 +44,6 @@ int main(int argc,char**argv){
   double wall=std::chrono::duration<double>(std::chrono::high_resolution_clock::now()-t0).count();
   std::printf("\n=== 종료: STEPS=%d(%.1fs) x=%+.3f z=%.3f max_tilt=%.1f° falls=%d | ★침투평균 앞=%.1fmm 뒤=%.1fmm pitch=%.1f° | %.0f steps/s ===\n",
               STEPS,STEPS*dt,d->qpos[0],d->qpos[2],max_tilt,falls,pn?penF/pn*1000:0,pn?penR/pn*1000:0,pn?pitchSum/pn:0,STEPS/wall);
+  std::printf("    토크effort 평균Σ|τ|=%.1fNm  calf평균Σ|τ|=%.2fNm (whip 관절)\n", pn?tauEff/pn:0, pn?calfTau/pn:0);
   mj_deleteData(d); mj_deleteModel(m); return 0;
 }

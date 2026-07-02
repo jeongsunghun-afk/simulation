@@ -48,8 +48,8 @@ struct TrotCtrl {
   std::string gait_type="trot";
   double gp_T=0.5, gp_SWF=0.5, gp_off[4]={0,0.5,0.5,0}, gp_Tsw=0.25, gp_Tst=0.25;
   // ── ★속도 트리거 자동 whip(고속 trot=동물형 채찍질) ──
-  bool auto_whip=false; double whip_v0=0.8, whip_v1=1.6;   // v0~v1 구간서 whip 증가(swing_w 2.0→낮게)
-  double whip_lo_f=0.15, whip_lo_r=0.8;                    // 고속 swing_w: 앞=강whip(paw-tuck)·뒤=완만(안정)
+  bool auto_whip=true; double whip_v0=0.8, whip_v1=1.6;    // ★기본 ON: v0~v1서 whip 선형증가(swing_w 2.0→낮게)
+  double whip_hi=2.0, whip_lo_f=0.1, whip_lo_r=0.6;        // ★최적: 저속 2.0(매끈)→고속 앞0.1(강whip)·뒤0.6(안정)
   // 상태
   bool armed=false; double t0=0, settle_until=TC_SETTLE;
   double Vs=0,Vys=0,Ws=0, yaw_ref=0; bool yaw_hold_set=false; double yaw_hold=0;
@@ -114,9 +114,9 @@ struct TrotCtrl {
     Vs+=tc_clip(vt-Vs,-TC_ACC*dt,TC_ACC*dt); Vys+=tc_clip(vyt-Vys,-TC_ACC*dt,TC_ACC*dt); Ws+=tc_clip(wt-Ws,-2.0*dt,2.0*dt);
     double Veff=Vs,Vyeff=Vys,Weff=Ws; Veff_dbg=Veff;
     double spd=std::hypot(Veff,Vyeff);
-    if(auto_whip){   // ★속도↑ → whip↑(swing_w 낮춤). 앞다리 강하게(paw-tuck)·뒷다리 완만(안정)
+    if(auto_whip){   // ★속도↑ → whip↑(swing_w 선형↓). 앞다리 강하게(paw-tuck)·뒷다리 완만(안정)
       double s=tc_clip((spd-whip_v0)/(whip_v1-whip_v0),0.0,1.0);
-      q.swing_w_f=2.0+s*(whip_lo_f-2.0); q.swing_w_r=2.0+s*(whip_lo_r-2.0); }
+      q.swing_w_f=whip_hi+s*(whip_lo_f-whip_hi); q.swing_w_r=whip_hi+s*(whip_lo_r-whip_hi); }
     double yaw_m=quat_yaw();
     if(std::abs(Weff)>0.02){ yaw_ref=tc_clip(yaw_ref+Weff*dt,yaw_m-0.3,yaw_m+0.3); yaw_hold_set=false; }
     else { if(!yaw_hold_set){ yaw_hold=yaw_m; yaw_hold_set=true; } yaw_ref=yaw_hold; }

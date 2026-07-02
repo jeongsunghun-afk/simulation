@@ -31,7 +31,7 @@ class SportClient:
                     'rate': 1.0, 'viz': True, 'terrain': True,   # ★rate=뷰어배속 viz=모니터표시 terrain=지형적응
                     'foot_lock': True, 'pos_hold': True,         # ★터치다운 foothold lock · 정지 위치홀드 (격리 비교용)
                     'foot_lock_s': 0.35, 'raibert_k': 0.8,
-                    'swing_w_f': 2.0, 'swing_w_r': 2.0}  # ★앞/뒤 whip 억제(스윙여유도, 기본2.0·최대4.0)
+                    'swing_w_f': 2.0, 'swing_w_r': 2.0, 'auto_whip': True}  # ★앞/뒤 whip · 속도연동 자동whip
         self._pub()
 
     def SimRate(self, r):                           # 뷰어 배속(0.25~4, 0=최대) — live
@@ -63,6 +63,9 @@ class SportClient:
 
     def SetSwingWR(self, w):                         # ★뒷다리 whip 억제 — live
         self.cmd['swing_w_r'] = float(w); self._pub()
+
+    def SetAutoWhip(self, on):                       # ★속도연동 자동 whip(on=고속서 자동 채찍질, off=수동 슬라이더)
+        self.cmd['auto_whip'] = bool(on); self._pub()
 
     def BodyHeight(self, h):                        # 서기 높이[m] (★보행중 무시 — 자세모드서만)
         self.cmd['body_h'] = float(h); self._pub()
@@ -338,7 +341,9 @@ with dpg.window(tag='main'):
     dpg.add_slider_float(label='전방 reach 게인  (0.8=기본, 시원한 reach / ↑=제동↑ 느림+안정 / 1.2=과제동)', tag='raibert_k',
                          min_value=0.3, max_value=1.2, default_value=0.8,
                          callback=lambda s, a: sc.SetRaibertK(a))
-    dpg.add_slider_float(label='앞다리 whip 억제  (0.1=whip심함 / 2.0=기본 / ~8=거의whip제거·포화)  ↓낮추면 앞발 채찍질(paw-tuck)', tag='swing_w_f',
+    dpg.add_checkbox(label='속도연동 자동 whip (on=고속서 자동 채찍질 paw-tuck / off=아래 슬라이더 수동)', tag='auto_whip', default_value=True,
+                     callback=lambda s, a: (sc.SetAutoWhip(a), _status()))
+    dpg.add_slider_float(label='앞다리 whip 억제  (수동, auto off시)  0.1=whip심함 / 2.0=기본 / ~8=제거', tag='swing_w_f',
                          min_value=0.1, max_value=10.0, default_value=2.0,
                          callback=lambda s, a: sc.SetSwingWF(a))
     dpg.add_slider_float(label='뒷다리 whip 억제  (0.1=whip심함 / 2.0=기본 / ~8=거의whip제거·포화)', tag='swing_w_r',
