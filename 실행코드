@@ -186,7 +186,7 @@ cd /home/jsh/문서/jsh/simulation/quad && DISPLAY=:0 PXI teleop_gui_17dof.py
 #   ★RESET 버튼=넘어짐 복구(reset_seq→C++/Py 둘다 mj_resetData+crouch_home). C++ 낙상 시 자동재시작 안 함(RESET로만)
 
 # 특성/한계
-#   ⚠️ 17dof C++은 t=0 초기접촉 임펄스로 QP를 eiquadprog≠quadprog가 다르게 풀어 궤적 분기(z 3cm↓, 거동등가·falls=0). 14dof는 0.1%정합.
+#   ✅ 접촉강성 수정(geom_solref 0.005, 커밋 d674992): 발침투 35→3mm·z사그 해소(17dof 0.524·14dof 0.522=Python일치). 잔여 솔버차(wbic_track 0.07Nm)만 미세.
 #   ★미포팅(의도): 오버레이(GRF/CoM/궤적=로봇 화면無, 개발용은 Python뷰어)·허리능동(nu=17)·detect_contact·점프
 #   ★배경 GLFW뷰어=setsid로 세션분리해야 지속(nohup/run_bg는 SIGURG/exit144). Python뷰어(launch_passive)는 이 환경서 프리징 잦음→터미널직접
 
