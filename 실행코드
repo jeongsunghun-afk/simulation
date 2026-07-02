@@ -158,27 +158,37 @@ cd /home/jsh/simple-mpc && CONE=0 STIFF=0.002 VX=0.2 VIEW=1 ~/.pixi/bin/pixi run
 ║  C++ 포팅 (배포용 실시간, simulation/quad/cpp) — A/A' closed-loop   ║
 ╚══════════════════════════════════════════════════════════════════╝
 # quad_mpc_wbic.py(14-DOF)·quad_mpc_wbic_17dof(16-DOF) 컨트롤러를 C++로 포팅. eiquadprog QP, 1kHz 실시간.
-#   구조: src/quad_control.hpp(crouch_home·wbic_stance·wbic_track·MPC호출, 모델의존)
-#         src/mpc.hpp(Di Carlo SRBD convex MPC)  src/main.cpp(단위검증)  src/trot_sim.cpp(closed-loop)
-#   의존성: conda env proxddp의 mujoco C·eigen·eiquadprog (CMakeLists ENV_PREFIX). ★conda libstdc++ 명시링크(ABI).
+#   구조: quad_control.hpp(crouch_home·wbic_stance·wbic_track·MPC·update_stand_qhome, 모델의존)
+#         mpc.hpp(Di Carlo SRBD MPC) · trot_controller.hpp(모드관리·gait·1틱제어 TrotCtrl)
+#         main.cpp(단위검증) · trot_sim.cpp(헤드리스) · trot_view.cpp(GLFW 뷰어+GUI연동)
+#   의존성: conda env proxddp의 mujoco C·eigen·eiquadprog·glfw. ★conda libstdc++ 명시링크(ABI).
 
-# (1) 빌드 (최초 1회 / 소스 수정 후)
+# (1) 빌드
 cd /home/jsh/문서/jsh/simulation/quad/cpp && cmake -S . -B build && cmake --build build
 
-# (2) 단위검증 (Python 기준값 정합 — dump_*.py로 /tmp/*.txt 생성 후)
+# (2) 단위검증 (Python 기준값 정합; dump_*.py로 /tmp/*.txt 생성 후)
 cd /home/jsh/문서/jsh/simulation/quad/cpp && ./build/quad_cpp
-#   검증1 crouch_home 4.7e-11 · 검증2 wbic_stance 4.7e-10 · 검증3 wbic_track 0.07Nm · 검증4 MPC 9e-3N (전부 솔버허용오차내)
-#   기준 재생성: env HEADLESS=1 STEPS=600 <proxddp py> dump_ref.py / dump_track.py / dump_mpc.py
+#   검증1 crouch_home 4.7e-11 · 2 wbic_stance 4.7e-10 · 3 wbic_track 0.07Nm · 4 MPC 9e-3N (솔버허용오차내)
 
-# (3) closed-loop trot (인자: mjcf, STEPS)
-# 14dof: ./build/trot_sim ../quad_real_sphere.mjcf 6000
-#   → 3s x=0.358≈Python 0.359(0.1%일치)·falls=0·~4900 steps/s(실시간 5배)
-# 17dof(튜닝 게인 env): BASE_Z0=0.5234 REAR_ANKLE=-0.3 FRONT_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 SWING_W=1.0 ./build/trot_sim ../quad_real_17dof_sphere.mjcf 6000
-#   → falls=0·max_tilt~2°·~4400 steps/s. env: TROT_V(0.3)·ALIP(1)·POS_HOLD(1)·PIN_ANKLE(실험)
-#   ★SWING_W=1.0: 스윙다리 여유도 규제↑ → C++ 뒷다리 whip 제거(eiquadprog nullspace 매끈화, max_tilt 5.2→2.0°). Python은 무영향(신기본값 1.0).
-# 17dof 뷰어(GLFW, 실시간): 위 env로 ./build/trot_view ../quad_real_17dof_sphere.mjcf  (↑↓속도 ←→선회 space정지 마우스카메라)
-#   ⚠️ 17dof는 t=0 초기접촉 임펄스로 스트레스받은 QP를 eiquadprog≠quadprog가 다르게 풀어 궤적 분기(z 3cm↓, 거동등가·falls=0). 14dof는 0.1% 정합.
-# ★미포팅: 허리능동(nu=17)·detect_contact(측정힘융합)·walk게이트·점프/getup
+# (3) 헤드리스 closed-loop (인자: mjcf, STEPS)
+# 14dof: ./build/trot_sim ../quad_real_sphere.mjcf 6000     → 3s x=0.358≈Py0.359(0.1%)·falls=0·~5배실시간
+# 17dof: env $E17 ./build/trot_sim ../quad_real_17dof_sphere.mjcf 6000   → falls=0·max_tilt~1.4°
+#   $E17 = BASE_Z0=0.5234 REAR_ANKLE=-0.3 FRONT_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 SWING_W=2.0
+
+# (4) GLFW 실시간 뷰어 (키보드 ↑↓속도 ←→선회 space정지 · 마우스카메라)  ★배경실행=setsid 필수(SIGURG회피)
+export DISPLAY=:0
+setsid bash -c 'cd /home/jsh/문서/jsh/simulation/quad/cpp; env BASE_Z0=0.5234 REAR_ANKLE=-0.3 FRONT_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 SWING_W=2.0 RATE=1.0 CMDFILE=/tmp/quad_cmd.json ./build/trot_view ../quad_real_17dof_sphere.mjcf' </dev/null &
+
+# (5) GUI 연동(위 CMDFILE) — 터미널에서 직접(권장, 안정): 서기/눕기/walk토글/RESET · step_h·reach·앞뒤whip 슬라이더 live
+cd /home/jsh/문서/jsh/simulation/quad && DISPLAY=:0 PXI teleop_gui_17dof.py
+#   env 게인: SWING_W(통합) 또는 SWING_W_F(앞다리whip)/SWING_W_R(뒷다리whip). 각 0.1(whip심함)~10(제거·포화 ~8). RATE(배속)
+#   ★앞발 paw-tuck = 앞whip↓(0.1~0.5)·뒷whip↑(2~8). whip완전제거=양쪽 ~8. 50+는 발배치충돌 악화
+#   ★RESET 버튼=넘어짐 복구(reset_seq→C++/Py 둘다 mj_resetData+crouch_home). C++ 낙상 시 자동재시작 안 함(RESET로만)
+
+# 특성/한계
+#   ⚠️ 17dof C++은 t=0 초기접촉 임펄스로 QP를 eiquadprog≠quadprog가 다르게 풀어 궤적 분기(z 3cm↓, 거동등가·falls=0). 14dof는 0.1%정합.
+#   ★미포팅(의도): 오버레이(GRF/CoM/궤적=로봇 화면無, 개발용은 Python뷰어)·허리능동(nu=17)·detect_contact·점프
+#   ★배경 GLFW뷰어=setsid로 세션분리해야 지속(nohup/run_bg는 SIGURG/exit144). Python뷰어(launch_passive)는 이 환경서 프리징 잦음→터미널직접
 
 ╔══════════════════════════════════════════════════════════════════╗
 ║  레퍼런스 / 기타                                                    ║
@@ -192,8 +202,8 @@ cd /home/jsh/문서/jsh/simulation/quad/cpp && ./build/quad_cpp
 #   A  quad_mpc_wbic.py                 — 본선 Convex MPC + WBIC          [구 quad_sim.py]
 #   A' quad_mpc_wbic_17dof.py           — ★260701 신모델(16-DOF 전발목, 허리 fixed). teleop_gui_17dof.py
 #      build_real_quad_17dof.py·gen_sphere_17dof.py·quad_real_17dof(_sphere).mjcf (Peak 84/126/168)
-#   C++ quad/cpp/                        — ★A/A' 배포용 실시간 포팅. quad_control.hpp·mpc.hpp·main.cpp(검증)·trot_sim.cpp(closed-loop)
-#       trot_sim(14dof 0.1%정합·17dof튜닝 tilt1.8°)·quad_cpp(단위검증). eiquadprog, 1kHz. 위 "C++ 포팅" 섹션 참조
+#   C++ quad/cpp/                        — ★A/A' 배포용 실시간 포팅. quad_control.hpp·mpc.hpp·trot_controller.hpp
+#       trot_sim(헤드리스)·trot_view(GLFW뷰어+GUI연동:서기/눕기/walk/RESET/앞뒤whip)·quad_cpp(검증). eiquadprog 1kHz. 위 "C++ 포팅" 섹션
 #   B  simple_mpc/quad_centroidal.py    — Centroidal OCP 연구용           [구 02leg9_kinodynamics_mujoco.py]
 #   C  simple_mpc/quad_fulldynamics.py  — FullDynamics OCP 연구용(구조3)  [구 02leg9_fulldynamics_mujoco.py]
 #   GUI teleop_gui.py
