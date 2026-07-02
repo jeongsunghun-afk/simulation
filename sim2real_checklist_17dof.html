@@ -2,122 +2,148 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<title>sim2real 체크리스트 — 17-DOF (quad_mpc_wbic_17dof)</title>
+<title>sim2real 체크리스트 (상세) — 17-DOF · quad_mpc_wbic_17dof</title>
 <style>
   :root{
-    --bg:#1b2432; --panel:#222d3d; --head:#2c3a4e; --line:#3a4a60;
-    --tx:#e8edf4; --dim:#9fb0c4; --star:#ffcf5c; --ok:#4ec98a; --wait:#ffb454; --hot:#ff7a7a;
+    --bg:#1b2432; --panel:#222d3d; --head:#2c3a4e; --line:#3a4a60; --zebra:#26313f;
+    --tx:#e8edf4; --dim:#9fb0c4; --star:#ffcf5c; --ok:#4ec98a; --wait:#ffb454; --hot:#ff7a7a; --info:#7fb4ff;
     --mono:#8fd6ff;
   }
   *{box-sizing:border-box}
-  body{margin:0;padding:28px 30px;background:var(--bg);color:var(--tx);
+  body{margin:0;padding:28px 30px 40px;background:var(--bg);color:var(--tx);
        font-family:"Noto Sans CJK KR","Noto Sans KR",system-ui,sans-serif;font-size:13.5px;line-height:1.5;}
   h1{font-size:20px;margin:0 0 4px;font-weight:800}
-  .sub{color:var(--dim);font-size:12.5px;margin:0 0 22px}
-  h2{font-size:16px;font-weight:800;margin:26px 0 9px;padding-bottom:2px}
+  .sub{color:var(--dim);font-size:12.5px;margin:0 0 6px}
+  .legend{color:var(--dim);font-size:11.5px;margin:0 0 20px}
+  .legend b{color:var(--tx)}
+  h2{font-size:16px;font-weight:800;margin:26px 0 4px;padding-bottom:2px}
   .A h2{color:#ff9d6b} .B h2{color:#7fc9ff} .C h2{color:#c79bff}
   .D h2{color:#7fe0c0} .E h2{color:#ffd36b} .F h2{color:#ff9db8}
+  .lead{color:var(--dim);font-size:12px;margin:0 0 9px}
   table{border-collapse:collapse;width:100%;background:var(--panel);border-radius:8px;overflow:hidden;
-        box-shadow:0 1px 0 #0004; font-size:12.8px;}
-  th,td{padding:8px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+        box-shadow:0 1px 0 #0004; font-size:12.6px;}
+  th,td{padding:7px 12px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
   th{background:var(--head);color:#cfe0f2;font-weight:700;white-space:nowrap}
+  tbody tr:nth-child(even){background:var(--zebra)}
   tr:last-child td{border-bottom:none}
   td.k{font-weight:600;white-space:nowrap}
-  b{color:#fff} .star{color:var(--star)} code,.m{font-family:ui-monospace,Menlo,monospace;color:var(--mono)}
-  .ok{color:var(--ok);font-weight:700} .wait{color:var(--wait);font-weight:700} .hot{color:var(--hot);font-weight:700}
-  .note{color:var(--dim);font-size:12px;margin:8px 2px 0}
+  b{color:#fff} .star{color:var(--star)} code,.m{font-family:ui-monospace,Menlo,monospace;color:var(--mono);font-size:11.8px}
+  .ok{color:var(--ok);font-weight:700} .wait{color:var(--wait);font-weight:700} .hot{color:var(--hot);font-weight:700} .info{color:var(--info);font-weight:700}
+  .note{color:var(--dim);font-size:11.6px;margin:7px 2px 0;padding-left:2px;border-left:2px solid var(--line);padding:2px 0 2px 9px}
   .badge{display:inline-block;background:#33507a;color:#cfe6ff;border-radius:5px;padding:1px 7px;font-size:11px;margin-left:6px}
 </style>
 </head>
 <body>
 
-<h1>sim2real 체크리스트 — 17-DOF <span class="badge">quad_mpc_wbic_17dof · 37.9kg</span></h1>
-<p class="sub">전(全)4다리 4-DOF(앞발목도 관절) · 허리 FB_waist yaw <b>fixed</b> · sphere발 필수 · 2026-07-02
-&nbsp;|&nbsp; 14-DOF판 미러 + 17dof 차이(<span class="star">★</span>=변경/주의)</p>
+<h1>sim2real 체크리스트 <span class="badge">상세판</span> <span class="badge">17-DOF · quad_mpc_wbic_17dof · 37.9kg</span></h1>
+<p class="sub">전(全)4다리 4-DOF(앞발목도 관절) · 허리 FB_waist yaw <b>fixed</b> · sphere발 필수 · config <code>ours_17dof_sphere</code> · 2026-07-02</p>
+<p class="legend">상태: <span class="ok">✅ 적용됨</span> · <span class="wait">⏳ 실측/작업 대기</span> · <span class="info">ℹ️ 참고</span> &nbsp;|&nbsp; <span class="star">★</span>=14-DOF 대비 변경/주의 · <code>파란 글꼴</code>=env/코드 위치</p>
 
-<!-- A -->
+<!-- ══════════ A ══════════ -->
 <section class="A">
 <h2>A. 액추에이터 물리 — <span class="star">★</span>실측 스펙으로 교체 (최우선·블로킹)</h2>
+<p class="lead">모터 3종: <b>Hip</b>(hip·thigh 관절, 7:1) · <b>Knee</b>(calf, 10.5:1) · <b>Ankle</b>(foot, 14:1). 다리당 4관절 → 17dof는 4다리 모두 4-DOF.</p>
 <table>
 <tr><th>항목</th><th>현재 sim 값</th><th>조치</th><th>env / 위치</th><th>상태</th></tr>
-<tr><td class="k">Peak 토크</td><td>84 / 84 / 126 / 168 Nm</td><td>데이터시트 적용됨</td><td>MJCF actfrcrange</td><td class="ok">✅</td></tr>
-<tr><td class="k">무부하 각속도</td><td>29.6 / 19.7 / 14.8 rad/s</td><td>토크-속도곡선</td><td><code>MOTOR_CURVE·VEL_LIM</code></td><td class="ok">✅</td></tr>
-<tr><td class="k"><span class="star">★</span>앞발목 (신규)</td><td><b>4다리 전부 4-DOF</b> = 발목 4개</td><td>앞발목도 실모터/기어 필요</td><td>FL/FR_foot 168Nm</td><td class="wait">⏳ 실측대기</td></tr>
-<tr><td class="k">로터관성=반사관성</td><td>ROTOR_I=1e-4 (대략!)</td><td><span class="star">★</span>데이터시트 실값</td><td><code>ROTOR_I</code>→armature</td><td class="wait">⏳ 실측대기</td></tr>
-<tr><td class="k">기어 Coulomb 마찰</td><td>JFRIC=0.5 (대략!)</td><td><span class="star">★</span>실측/벤치</td><td><code>JFRIC</code></td><td class="wait">⏳ 실측대기</td></tr>
-<tr><td class="k">기어 점성 감쇠</td><td>JDAMP=0.1 (대략!)</td><td><span class="star">★</span>실측/벤치</td><td><code>JDAMP</code></td><td class="wait">⏳ 실측대기</td></tr>
-<tr><td class="k">감속비</td><td>7 / 8 / 14 <span class="star">★</span>(calf 10.5→8)</td><td>확정+재선정</td><td><code>GEAR_*</code> (calf 0.7619)</td><td class="ok">✅</td></tr>
-<tr><td class="k">허리 FB_waist</td><td>hip급 (Peak 84), <b>fixed 잠금</b></td><td>능동화(조향 스파인)=추후</td><td><code>WAIST_*</code> (미구동)</td><td class="wait">⏳ 보류</td></tr>
+<tr><td class="k">Peak 토크 (hip·thigh)</td><td>84 Nm <span class="dim">(=3× rated 28)</span></td><td>데이터시트 Peak 적용</td><td>MJCF actfrcrange</td><td class="ok">✅</td></tr>
+<tr><td class="k">Peak 토크 (calf)</td><td>126 Nm <span class="dim">(=3× rated 42)</span></td><td>〃</td><td>MJCF actfrcrange</td><td class="ok">✅</td></tr>
+<tr><td class="k">Peak 토크 (foot)</td><td>168 Nm <span class="dim">(=3× rated 56)</span></td><td>〃</td><td>MJCF actfrcrange</td><td class="ok">✅</td></tr>
+<tr><td class="k">무부하 각속도</td><td>29.6 / 19.7 / 14.8 rad/s <span class="dim">(hip/knee/ankle)</span></td><td>토크-속도곡선 + 속도한계</td><td><code>MOTOR_CURVE·VEL_LIM</code></td><td class="ok">✅</td></tr>
+<tr><td class="k"><span class="star">★</span>앞발목 능동화 (신규)</td><td><b>4다리 전부 4-DOF</b> = 발목 4개(168Nm)</td><td>앞발목 2개 추가 실모터/기어 확보</td><td>FL/FR_foot_joint</td><td class="wait">⏳ 실측대기</td></tr>
+<tr><td class="k">감속비 N</td><td>hip·thigh 7 · calf 10.5 · foot 14</td><td>armature=I·N² 계산 기준</td><td><code>_gearmap</code></td><td class="ok">✅</td></tr>
+<tr><td class="k"><span class="star">★</span>로터관성 I_rotor</td><td>1e-4 kg·m² <span class="hot">(대략!)</span></td><td>데이터시트 실값으로 교체</td><td><code>ROTOR_I</code>→dof_armature</td><td class="wait">⏳ 실측대기</td></tr>
+<tr><td class="k"><span class="star">★</span>기어 Coulomb 마찰</td><td>0.5 N·m <span class="hot">(대략!)</span></td><td>벤치 실측</td><td><code>JFRIC</code>→dof_frictionloss</td><td class="wait">⏳ 실측대기</td></tr>
+<tr><td class="k"><span class="star">★</span>기어 점성 감쇠</td><td>0.1 N·m·s/rad <span class="hot">(대략!)</span></td><td>벤치 실측</td><td><code>JDAMP</code>→dof_damping</td><td class="wait">⏳ 실측대기</td></tr>
+<tr><td class="k">MOTOR_CURVE 곡선형상</td><td>선형근사 τ·(1−|ω|/ω₀)</td><td>데이터시트 곡선형상 교체</td><td><code>MOTOR_CURVE</code></td><td class="wait">⏳</td></tr>
+<tr><td class="k">감속비 재선정 (calf)</td><td>10.5→8 (속도 19.7→25.9·토크 126→96)</td><td>속도병목 완화 (확정)</td><td><code>GEAR_CALF=0.7619</code></td><td class="ok">✅</td></tr>
+<tr><td class="k">기어박스 물리 스위치</td><td>기본 <b>OFF</b> (MJCF armature/damp/fric=0)</td><td>★배포 시 반드시 ON</td><td><code>GEARBOX=1</code></td><td class="wait">⏳</td></tr>
+<tr><td class="k">허리 FB_waist</td><td>Hip급 (rated28/Peak84), <b>fixed 잠금</b></td><td>능동화(조향 스파인)=추후</td><td><code>WAIST_*</code> (미구동)</td><td class="wait">⏳ 보류</td></tr>
 </table>
+<p class="note">URDF effort는 <b>rated(연속)</b> 토크(28/28/42/56)라 <code>build_real_quad_17dof.py</code>가 <b>Peak</b>(84/84/126/168)로 덮어씀. Peak 미적용 시 "phantom 토크"(모터가 못 내는 토크 명령)로 보행 <b>tilt 18°→1°</b> — sim2real 충실도의 핵심. GEARBOX 물리가 발목 flail(sim 아티팩트)을 실수준으로 억제(1.1m/s 발목 21.5→7.0 rad/s).</p>
 </section>
 
-<!-- B -->
+<!-- ══════════ B ══════════ -->
 <section class="B">
 <h2>B. 컨트롤러 게인/가중치 — <span class="star">★</span>2026-07-02 자세/외란 재튜닝 (17dof 전용값)</h2>
+<p class="lead">단일 QP z=[q̈; λ] WBIC(1kHz) + Convex SRBD MPC(50Hz). ★=이번 튜닝 변경값(자세품질+외란강건).</p>
 <table>
-<tr><th>영역</th><th>파라미터 (현재값)</th><th>비고</th></tr>
-<tr><td class="k"><span class="star">★</span>자세/각운동량 (튜닝)</td><td><b>W_ORI=20 · KD_AM=24 · W_AM=12</b></td><td>구 5/8/5 → tilt_max −37%·push −16%·z_std −22% (전속도 falls=0). 되돌리기 <code>W_ORI=5 KD_AM=8 W_AM=5</code></td></tr>
-<tr><td class="k">WBIC 스윙</td><td><b>SW_KP=2400 · SW_KD=110 · W_SW=90</b> <span class="star">★</span></td><td>발끝추종 (14dof 동일). 약하면 lurching·calf 가짜스파이크</td></tr>
-<tr><td class="k">WBIC 높이</td><td>W_Z=150 · a_z 200/25</td><td>nose-dive 방지 핵심 (W_Z↑=z↔tilt 트레이드오프라 150 유지)</td></tr>
-<tr><td class="k">WBIC posture/발목핀</td><td>a_post 60/5 · ANKLE_W=20</td><td><span class="star">★</span><b>4발목 전부</b> 핀(leg_dof==4 자동) · REAR/FRONT_ANKLE=−0.5(앞뒤 대칭)</td></tr>
-<tr><td class="k">WBIC GRF</td><td>w_lam=10</td><td>반력 추종 · 각운동량은 W_AM/KD_AM(위)</td></tr>
-<tr><td class="k">MPC</td><td>N_MPC=14 · LAMZ_MAX_K=2.0 · MU=0.6</td><td>호라이즌 0.28s · 수직력 상한 · MU_MARGIN=0.707</td></tr>
-<tr><td class="k">발배치</td><td><b>RAIBERT_K=0.8 · RAI_CLIP=0.25</b> · KCAP=0.16 <span class="star">★</span></td><td>반응형 발배치. <span class="hot">★KCAP↑=역효과</span>(0.32서 push 전복직전)→0.16 유지</td></tr>
+<tr><th>영역</th><th>파라미터 (현재값)</th><th>비고 / 역할</th></tr>
+<tr><td class="k"><span class="star">★</span>자세 (튜닝)</td><td><b>W_ORI=20</b> · a_ori=150(−oerr)−20·ω</td><td>구 5 → <b>tilt_max −37%</b>. 몸통 upright task(wbic_track)</td></tr>
+<tr><td class="k"><span class="star">★</span>각운동량 보상 (튜닝)</td><td><b>W_AM=12</b> · Σrᵢ×λᵢ ≈ −KD·h_ω</td><td>구 5. SRBD MPC가 무시하는 다리 swing 각운동량을 GRF 모멘트로 감쇠</td></tr>
+<tr><td class="k"><span class="star">★</span>각운동량 감쇠 (튜닝)</td><td><b>KD_AM=24</b> · h_des=−KD·h_ω</td><td>구 8. 고속 yaw/pitch 드리프트·외란 tilt 억제 → push_tilt −16%</td></tr>
+<tr><td class="k">WBIC 스윙</td><td>SW_KP=2400 · SW_KD=110 · W_SW=90</td><td>발끝추종(J·q̈≈accel soft). 약하면 lurching·calf 가짜스파이크. SW_KD≈2√KP 임계감쇠</td></tr>
+<tr><td class="k">WBIC 높이</td><td>W_Z=150 · a_z=200(z*−z)−25·ż</td><td>nose-dive 방지 핵심. ↑=z_std↔tilt 트레이드오프라 150 유지</td></tr>
+<tr><td class="k">WBIC CoM (stance)</td><td>120/120/200 · 댐핑 20/20/25</td><td>wbic_stance 전용 CoM xyz task (보행 중 xy 병진은 MPC λ에 위임)</td></tr>
+<tr><td class="k">WBIC posture</td><td>a_post=60(q_home−q)−5·q̇ · POSTURE_W=1</td><td>자세 정규화(여유도 해소). swing 다리는 0.1 약규제</td></tr>
+<tr><td class="k">발목핀</td><td>ANKLE_W=20 · REAR/FRONT_ANKLE=−0.5</td><td><span class="star">★4발목 전부</span> 핀(leg_dof==4 자동). 여유 발목 flail 차단·좌우대칭</td></tr>
+<tr><td class="k">λ 추종</td><td>w_lam=10</td><td>확장 접촉점별 GRF가 MPC lam_des 추종(soft)</td></tr>
+<tr><td class="k">MPC 상태가중 (TROT_Q)</td><td>roll/pitch/yaw 200/200/100 · pz 200 · vx/vy 10/10</td><td>py=0(측방 자유)·ω·g=0. arming 후 적용</td></tr>
+<tr><td class="k">MPC config</td><td>N_MPC=14(0.28s) · DT_MPC=0.02(50Hz)</td><td>LAMZ_MIN=1 · LAMZ_MAX=2·mg(발당 수직력 상한) · MU=0.6·MU_MARGIN=0.707</td></tr>
+<tr><td class="k">발배치 (Raibert)</td><td>RAIBERT_K=0.8 · RAI_CLIP=0.25 · KCAP=0.16</td><td>rai=K·T_st·v_des+KCAP·(v_fb−v_des). <span class="hot">★KCAP↑=역효과</span>(0.32서 push 전복직전)</td></tr>
+<tr><td class="k">발배치 (ALIP)</td><td>ALIP=1 · ALIP_G=1.0</td><td>v_fb에 centroidal 각운동량 [L_y,−L_x]/(m·H) 반영(leg-heavy 고속 안정)</td></tr>
+<tr><td class="k">QP 안전제약</td><td>POS_LIM(T_la 0.05) · VEL_LIM · TAU_LIM · JERK_LIM</td><td>가속도·속도·토크·저크 경계(controller-aware, sim2real 물리한계 존중)</td></tr>
+<tr><td class="k">발목 whip(paw-flick)</td><td>GEARBOX=1 발목 8:1 · ANKLE_W5/KP15</td><td>고속 trot 수동 whip(반사관성이 게이트). 향후=앞발 편향 tuck</td></tr>
 </table>
-<p class="note"><span class="star">★</span>발목 whip(paw-flick): 고속 trot 수동 whip = <code>GEARBOX=1</code> 발목 8:1 + compliant(ANKLE_W5/KP15). 반사관성 8:1이 whip 게이트. 향후=앞발 편향 tuck.</p>
+<p class="note">되돌리기(구 기본): <code>W_ORI=5 KD_AM=8 W_AM=5</code>. 벤치 <code>bench_17dof.py</code>(정상보행 tilt·z_std + 300N 측방 push): <b>tilt_max V1.5 5.2→3.3°·push_tilt 7.7→6.5·z_std −22%, 전속도 falls=0</b>. 실기 접촉·지연·노이즈 다르면 SW_KP·W_ORI·W_AM·RAIBERT_K 재튜닝.</p>
 </section>
 
-<!-- C -->
+<!-- ══════════ C ══════════ -->
 <section class="C">
-<h2>C. 미모델 물리 — <span class="star">★</span>추가 필요 (sim2real 갭, 14dof와 공통)</h2>
+<h2>C. 미모델 물리 — <span class="star">★</span>추가 필요 (가장 큰 sim2real 갭, 14dof와 공통)</h2>
 <table>
 <tr><th>항목</th><th>현재 sim</th><th>실기</th><th>조치</th></tr>
-<tr><td class="k">상태추정 노이즈</td><td>완벽상태 (d.qpos 직접)</td><td>IMU/엔코더 노이즈</td><td>추정기 필터·노이즈 주입</td></tr>
-<tr><td class="k">센서/제어 지연</td><td>0 (latency 없음)</td><td>수 ms 지연</td><td>latency 모델 추가 (재튜닝 최대원인)</td></tr>
+<tr><td class="k"><span class="star">★</span>상태추정 노이즈</td><td>완벽상태 (d.qpos 직접)</td><td>IMU/엔코더 노이즈</td><td>추정기(칼만/상보) 필터 · 노이즈 주입</td></tr>
+<tr><td class="k"><span class="star">★</span>센서/제어 지연</td><td>0 (latency 없음)</td><td>수 ms 지연</td><td>latency 모델 추가 <span class="dim">(게인 재튜닝 최대원인)</span></td></tr>
+<tr><td class="k">접촉 감지</td><td>순수 스케줄(DETECT=0) 또는 fz+z 융합</td><td>발끝 힘/근접 센서</td><td>detect_contact 히스테리시스 튜닝</td></tr>
 <tr><td class="k">발 컴플라이언스</td><td>강체 sphere</td><td>고무패드</td><td>접촉 강성/감쇠 모델</td></tr>
-<tr><td class="k">제어 주파수</td><td>WBIC 1kHz · MPC 50Hz</td><td><span class="star">★</span>C++로 1kHz 실증(4배)</td><td>배포 실현성 <span class="ok">확인됨</span></td></tr>
+<tr><td class="k">제어 주파수</td><td>WBIC 1kHz · MPC 50Hz</td><td><span class="star">★</span>C++로 1kHz 실증(실시간 4배)</td><td>배포 실현성 <span class="ok">확인됨</span> (quad/cpp)</td></tr>
 </table>
 </section>
 
-<!-- D -->
+<!-- ══════════ D ══════════ -->
 <section class="D">
 <h2>D. 접촉/마찰 — 실측 보정</h2>
 <table>
 <tr><th>항목</th><th>현재</th><th>조치</th></tr>
-<tr><td class="k">지면 마찰</td><td>MU=0.6, geom 1.3</td><td>실제 노면 측정</td></tr>
-<tr><td class="k">접촉 solref/solimp</td><td>기본 (관절한계 강화 [0.004,1.0])</td><td>실제 컴플라이언스</td></tr>
-<tr><td class="k">마찰콘 margin</td><td>MU_MARGIN=0.707</td><td>보수성 조정</td></tr>
-<tr><td class="k"><span class="star">★</span>sphere발</td><td><b>필수</b> (ours_17dof_sphere)</td><td>mesh발=rocking 불안정 → 실기 점접촉 근사</td></tr>
+<tr><td class="k">지면 마찰계수</td><td>MU=0.6 (config mu)</td><td>실 노면 측정</td></tr>
+<tr><td class="k">geom friction (sphere)</td><td>1.3 / 0.02 / 0.001 <span class="dim">(슬라이드/스핀/롤)</span></td><td>실 접촉 마찰 측정</td></tr>
+<tr><td class="k">접촉 차원 condim</td><td>3 (마찰추 3D)</td><td>유지</td></tr>
+<tr><td class="k">접촉 solref/solimp</td><td>기본(강체) · 관절한계 강화 [0.004,1.0]/[0.95,0.99,0.001,0.5,2.0]</td><td>실 컴플라이언스 반영</td></tr>
+<tr><td class="k">마찰콘 margin</td><td>MU_MARGIN=0.707 (elliptic 내접)</td><td>보수성 조정</td></tr>
+<tr><td class="k"><span class="star">★</span>sphere발 필수</td><td>ours_17dof_sphere (foot_contact_link 원점 구, r=18mm)</td><td>mesh발=rocking 불안정 → 실기 점접촉 근사</td></tr>
 </table>
 </section>
 
-<!-- E -->
+<!-- ══════════ E ══════════ -->
 <section class="E">
-<h2>E. 운용 파라미터 (gait/속도)</h2>
+<h2>E. 운용 파라미터 (gait / 속도 / 안전)</h2>
 <table>
 <tr><th>항목</th><th>현재값</th><th>비고</th></tr>
-<tr><td class="k">gait</td><td><b>trot(기본)/walk</b> · SWF=0.5 · <b>STEP_H=0.10</b> <span class="star">★</span></td><td>walk=순차 정적안정(저속), GUI 토글</td></tr>
-<tr><td class="k">시작 램프</td><td>TROT_ACC=0.6 · WARMUP=0.6</td><td>출발 lurch 완화</td></tr>
-<tr><td class="k">속도</td><td><b>cmd2.0 ~1.4 m/s</b> falls=0</td><td><span class="star">★W_AM(각운동량)이 공진·외란 억제 핵심</span> (구14dof 1.75 대등)</td></tr>
-<tr><td class="k">기립 높이</td><td>base_z0=0.5234</td><td>14dof(0.52)보다 덜 웅크림</td></tr>
-<tr><td class="k">foot_lock / pos_hold <span class="star">★</span></td><td>trot=1.0 · POS_HOLD=on</td><td>터치다운 고정 · 정지 드리프트 보정</td></tr>
-<tr><td class="k">recovery <span class="star">★</span></td><td>GROUND_Z=0.18 · GETUP_KP=90/KD=3 · REST_KD=3</td><td>Off→Ground→getup→Ready</td></tr>
+<tr><td class="k">gait 프리셋 (trot)</td><td>OFFSET 0/.5/.5/0 · T=0.5 · SWF=0.5 · STEPH=0.10 · LOCK=1.0</td><td>대각쌍(HL+FR / HR+FL) 동적·2지지</td></tr>
+<tr><td class="k">gait 프리셋 (walk)</td><td>OFFSET .25/.75/.5/0 · T=1.0 · SWF=0.25 · STEPH=0.05 · LOCK=0.35</td><td>순차 정적안정 · 75% stance(3~4지지)</td></tr>
+<tr><td class="k">시작 램프</td><td>TROT_ACC=0.6 · WARMUP=0.6 · SETTLE=0.5</td><td>제자리 리듬확립 후 이동(출발 lurch 완화)</td></tr>
+<tr><td class="k">step height</td><td>평지 0.10 (jerk↓)</td><td>계단/험지=슬라이더↑(클리어런스)</td></tr>
+<tr><td class="k">속도</td><td><b>cmd 2.0 → ~1.4 m/s</b> falls=0</td><td><span class="star">★W_AM(각운동량)이 공진·외란 억제 핵심</span> (구14dof 1.75 대등)</td></tr>
+<tr><td class="k">기립 높이</td><td>base_z0=0.5234 (REAR_ANKLE −0.5)</td><td>14dof(0.52)보다 덜 웅크림</td></tr>
+<tr><td class="k">터치다운 안정화</td><td>foot_lock trot=1.0(reactive)/walk=0.35 · POS_HOLD=on(K0.6)</td><td>착지 foothold 고정 · 정지 x,y 드리프트 보정</td></tr>
+<tr><td class="k">recovery 시퀀스</td><td>Off(REST_KD3) → Ground(GROUND_Z0.18) → getup(GETUP_KP90/KD3·RATE0.18) → Ready(GETUP_DONE0.40)</td><td>넘어짐 복구 · 안전정지(모터off 등가)</td></tr>
+<tr><td class="k">GUI / 모니터</td><td>CMDFILE · STATE_PUB(v_cmd/v_act) · teleop_gui_17dof</td><td>뷰어 오버레이 cmd/actual 속도</td></tr>
 </table>
 </section>
 
-<!-- F -->
+<!-- ══════════ F ══════════ -->
 <section class="F">
 <h2>F. C++ 배포 경로 (2026-07-02 신규) — simulation/quad/cpp</h2>
 <table>
 <tr><th>항목</th><th>값</th><th>비고</th></tr>
-<tr><td class="k">구조</td><td>quad_control.hpp · mpc.hpp · trot_sim.cpp</td><td>eiquadprog QP · 1kHz 실시간 · ~4400 steps/s(실시간 4배)</td></tr>
-<tr><td class="k">실행</td><td><code>BASE_Z0=0.5234 REAR_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 ./build/trot_sim ../quad_real_17dof_sphere.mjcf</code></td><td>max_tilt 1.8° · falls=0</td></tr>
-<tr><td class="k"><span class="hot">⚠️</span> 정합</td><td>14dof 0.1% 정합 / 17dof 궤적 분기</td><td>t=0 초기접촉 임펄스로 스트레스받은 QP를 eiquadprog≠quadprog가 다르게 해소(z 3cm↓, <b>거동등가·falls=0</b>). crouch/stance/모델은 완전일치</td></tr>
-<tr><td class="k">미포팅</td><td>허리능동 · detect_contact · walk게이트</td><td>추후</td></tr>
+<tr><td class="k">구조</td><td>quad_control.hpp · mpc.hpp · trot_sim.cpp · main.cpp(검증)</td><td>eiquadprog QP · 1kHz · ~4400 steps/s(실시간 4배)</td></tr>
+<tr><td class="k">17dof 실행</td><td><code>BASE_Z0=0.5234 REAR_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 ./build/trot_sim ../quad_real_17dof_sphere.mjcf</code></td><td>max_tilt 1.8° · falls=0</td></tr>
+<tr><td class="k"><span class="hot">⚠️</span> Python 정합</td><td>14dof 0.1% 정합 / 17dof 궤적 분기</td><td>t=0 초기접촉 임펄스로 스트레스받은 QP를 eiquadprog≠quadprog가 다르게 해소(z 3cm↓, <b>거동등가·falls=0</b>). crouch/stance/모델은 완전일치</td></tr>
+<tr><td class="k">미포팅</td><td>허리능동(nu=17) · detect_contact · walk게이트 · 점프/getup</td><td>추후</td></tr>
 </table>
 </section>
 
-<p class="note">우선순위: ① 실측(로터관성·기어마찰·감쇠, <b>앞발목 4개 포함</b>) ② 미모델(상태추정·지연) ③ WBIC 게인 재튜닝(신값 기준) ④ 마찰·접촉 ⑤ 허리 능동화 → 17-DOF 조향 스파인.</p>
+<p class="note"><b>우선순위</b>: ① 실측(로터관성·기어마찰·감쇠, <b>앞발목 4개 포함</b>) → ② 미모델(상태추정·지연) → ③ WBIC 게인 재튜닝(신값 W_ORI20/KD_AM24/W_AM12 기준) → ④ 마찰·접촉 → ⑤ 허리(FB_waist) 능동화 = 17-DOF 조향 스파인.</p>
 
 </body>
 </html>
