@@ -44,9 +44,12 @@ struct TrotCtrl {
   VectorXd q_ref; bool have_qref=false;                  // fold 관절목표 slew
   // 모드관리 상수(Python 17dof와 동일)
   double GROUND_Z=0.18, GETUP_TRIG=0.32, GETUP_DONE=0.40, GETUP_KP=90, GETUP_KD=3, GETUP_RATE=0.18, REST_KD=3.0, JOINT_SLEW=1.5, HRATE=0.3;
-  // ── 게이트 프리셋(trot/walk) ──
+  // ── 게이트 프리셋(trot/walk/gallop) ──
   std::string gait_type="trot";
   double gp_T=0.5, gp_SWF=0.5, gp_off[4]={0,0.5,0.5,0}, gp_Tsw=0.25, gp_Tst=0.25;
+  // ── ★속도 트리거 자동 whip(고속 trot=동물형 채찍질) ──
+  bool auto_whip=false; double whip_v0=0.8, whip_v1=1.6;   // v0~v1 구간서 whip 증가(swing_w 2.0→낮게)
+  double whip_lo_f=0.15, whip_lo_r=0.8;                    // 고속 swing_w: 앞=강whip(paw-tuck)·뒤=완만(안정)
   // 상태
   bool armed=false; double t0=0, settle_until=TC_SETTLE;
   double Vs=0,Vys=0,Ws=0, yaw_ref=0; bool yaw_hold_set=false; double yaw_hold=0;
@@ -59,9 +62,10 @@ struct TrotCtrl {
 
   TrotCtrl(QuadControl& q_):q(q_){ q_ref=VectorXd::Zero(q.nu); body_h=ht_cur=qhome_h=q.base_z0; }
 
-  void set_gait(const std::string& g){        // trot/walk 프리셋(GUI 토글)
+  void set_gait(const std::string& g){        // trot/walk/gallop 프리셋(GUI 토글·속도트리거)
     if(g==gait_type) return; gait_type=g;
     if(g=="walk"){ gp_T=1.0; gp_SWF=0.25; gp_off[0]=0.25; gp_off[1]=0.75; gp_off[2]=0.5; gp_off[3]=0.0; }
+    else if(g=="gallop"){ gp_T=0.35; gp_SWF=0.55; gp_off[0]=0.0; gp_off[1]=0.05; gp_off[2]=0.55; gp_off[3]=0.5; } // 회전형 갤럽(비행상 有)
     else         { gp_T=0.5; gp_SWF=0.5;  gp_off[0]=0.0;  gp_off[1]=0.5;  gp_off[2]=0.5; gp_off[3]=0.0; }
     gp_Tsw=gp_T*gp_SWF; gp_Tst=gp_T*(1.0-gp_SWF); armed=false;   // 재arm=위상 재앵커(불연속 방지)
   }
@@ -109,6 +113,10 @@ struct TrotCtrl {
     double vt=go?V:0.0, vyt=go?VY:0.0, wt=go?WZ:0.0;
     Vs+=tc_clip(vt-Vs,-TC_ACC*dt,TC_ACC*dt); Vys+=tc_clip(vyt-Vys,-TC_ACC*dt,TC_ACC*dt); Ws+=tc_clip(wt-Ws,-2.0*dt,2.0*dt);
     double Veff=Vs,Vyeff=Vys,Weff=Ws; Veff_dbg=Veff;
+    double spd=std::hypot(Veff,Vyeff);
+    if(auto_whip){   // ★속도↑ → whip↑(swing_w 낮춤). 앞다리 강하게(paw-tuck)·뒷다리 완만(안정)
+      double s=tc_clip((spd-whip_v0)/(whip_v1-whip_v0),0.0,1.0);
+      q.swing_w_f=2.0+s*(whip_lo_f-2.0); q.swing_w_r=2.0+s*(whip_lo_r-2.0); }
     double yaw_m=quat_yaw();
     if(std::abs(Weff)>0.02){ yaw_ref=tc_clip(yaw_ref+Weff*dt,yaw_m-0.3,yaw_m+0.3); yaw_hold_set=false; }
     else { if(!yaw_hold_set){ yaw_hold=yaw_m; yaw_hold_set=true; } yaw_ref=yaw_hold; }
