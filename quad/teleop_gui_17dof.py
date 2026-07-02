@@ -31,7 +31,7 @@ class SportClient:
                     'rate': 1.0, 'viz': True, 'terrain': True,   # ★rate=뷰어배속 viz=모니터표시 terrain=지형적응
                     'foot_lock': True, 'pos_hold': True,         # ★터치다운 foothold lock · 정지 위치홀드 (격리 비교용)
                     'foot_lock_s': 0.35, 'raibert_k': 0.8,
-                    'swing_w_f': 2.0, 'swing_w_r': 2.0, 'auto_whip': True}  # ★앞/뒤 whip · 속도연동 자동whip
+                    'swing_w_f': 0.1, 'swing_w_r': 0.6, 'auto_whip': True}  # ★앞/뒤 whip 목표(고속) · 속도연동 자동whip
         self._pub()
 
     def SimRate(self, r):                           # 뷰어 배속(0.25~4, 0=최대) — live
@@ -341,13 +341,13 @@ with dpg.window(tag='main'):
     dpg.add_slider_float(label='전방 reach 게인  (0.8=기본, 시원한 reach / ↑=제동↑ 느림+안정 / 1.2=과제동)', tag='raibert_k',
                          min_value=0.3, max_value=1.2, default_value=0.8,
                          callback=lambda s, a: sc.SetRaibertK(a))
-    dpg.add_checkbox(label='속도연동 자동 whip (on=고속서 자동 채찍질 paw-tuck / off=아래 슬라이더 수동)', tag='auto_whip', default_value=True,
+    dpg.add_checkbox(label='속도연동 자동 whip (on=고속서 슬라이더값까지 선형↑ paw-tuck / off=슬라이더값 상수)', tag='auto_whip', default_value=True,
                      callback=lambda s, a: (sc.SetAutoWhip(a), _status()))
-    dpg.add_slider_float(label='앞다리 whip 억제  (수동, auto off시)  0.1=whip심함 / 2.0=기본 / ~8=제거', tag='swing_w_f',
-                         min_value=0.1, max_value=10.0, default_value=2.0,
+    dpg.add_slider_float(label='앞다리 whip 목표  (0.1=강한 채찍질 / 2.0=매끈)   auto on:고속목표 / off:상수', tag='swing_w_f',
+                         min_value=0.1, max_value=4.0, default_value=0.1,
                          callback=lambda s, a: sc.SetSwingWF(a))
-    dpg.add_slider_float(label='뒷다리 whip 억제  (0.1=whip심함 / 2.0=기본 / ~8=거의whip제거·포화)', tag='swing_w_r',
-                         min_value=0.1, max_value=10.0, default_value=2.0,
+    dpg.add_slider_float(label='뒷다리 whip 목표  (0.6=완만 채찍질 / 2.0=매끈)', tag='swing_w_r',
+                         min_value=0.1, max_value=4.0, default_value=0.6,
                          callback=lambda s, a: sc.SetSwingWR(a))
     dpg.add_separator()
     dpg.add_text('속도/높이 (Walk=보행속도 게이지·live / Body=서기 높이·live / Step=발 들림)', color=(170, 175, 195))

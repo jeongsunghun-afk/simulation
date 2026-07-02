@@ -227,7 +227,9 @@ class QuadSim:
         self._front_idx = set(int(self.legqv[i][t]) - 6 for i in range(4)
                               if self.legs[i] in ('FL', 'FR') for t in range(self.leg_dof[i]))
         self._auto_whip = os.environ.get('AUTO_WHIP', '1') != '0'   # ★속도연동 자동 whip(고속 trot 채찍질)
-        self._whip = (0.8, 1.6, 2.0, 0.1, 0.6)   # v0,v1,hi,lo_f,lo_r: v0~v1서 swing_w hi→(앞lo_f·뒤lo_r) 선형
+        self._whip_v0, self._whip_v1, self._whip_hi = 0.8, 1.6, 2.0  # 속도구간·저속 swing_w
+        self._whip_lo_f = float(os.environ.get('SWING_W_F', '0.1'))  # 고속 whip 목표(앞, 슬라이더 제어)
+        self._whip_lo_r = float(os.environ.get('SWING_W_R', '0.6'))  # 고속 whip 목표(뒤)
         # ★허리(FB_waist yaw) 관절 — 큰 몸통 DOF라 강한 전용 홀드 필요(약한 posture론 앞몸통 못잡음)
         _wj = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_JOINT, 'FB_waist_joint')
         self._waist_idx = int(self.m.jnt_dofadr[_wj]) - 6 if _wj >= 0 else None   # nu-index(없으면 None=16DOF)
@@ -1294,9 +1296,9 @@ def mode_trot():
                     print('[trot] 게이트 전환 → %s (재정렬)' % _g, flush=True)
                 S['raibert_k'] = float(_c.get('raibert_k', S['raibert_k']))       # ★전방 reach 게인 슬라이더(live)
                 q._auto_whip = bool(_c.get('auto_whip', q._auto_whip))            # ★속도연동 자동 whip 토글
-                if 'swing_w' in _c: q._swing_w_r = q._swing_w_f = float(_c['swing_w'])  # 통합(하위호환)
-                q._swing_w_f = float(_c.get('swing_w_f', q._swing_w_f))            # ★앞다리 whip 슬라이더(live)
-                q._swing_w_r = float(_c.get('swing_w_r', q._swing_w_r))            # ★뒷다리 whip 슬라이더(live)
+                if 'swing_w' in _c: q._whip_lo_r = q._whip_lo_f = float(_c['swing_w'])  # 통합(하위호환)
+                q._whip_lo_f = float(_c.get('swing_w_f', q._whip_lo_f))            # ★앞다리 whip 목표 슬라이더(live)
+                q._whip_lo_r = float(_c.get('swing_w_r', q._whip_lo_r))            # ★뒷다리 whip 목표 슬라이더(live)
                 S['pos_hold_on'] = bool(_c.get('pos_hold', S['pos_hold_on']))     # ★정지 위치홀드 토글(격리용)
                 S['foot_lock_on'] = bool(_c.get('foot_lock', S['foot_lock_on']))  # ★터치다운 lock 토글(격리용)
                 _fl = _c.get('foot_lock_s')                          # ★lock 강도 슬라이더(엣지 오버라이드 → 게이트전환 리셋과 공존)
@@ -1441,9 +1443,11 @@ def mode_trot():
         S['Ws']  += float(np.clip(_wt  - S['Ws'],  -2.0 * dts, 2.0 * dts))
         V_eff, Vy_eff, W_eff = S['Vs'], S['Vys'], S['Ws']
         if q._auto_whip:                                                        # ★속도연동 자동 whip: 고속서 swing_w 선형↓(앞 강·뒤 완만)
-            _v0, _v1, _hi, _lf, _lr = q._whip
-            _s = float(np.clip((abs(V_eff) - _v0) / (_v1 - _v0), 0.0, 1.0))
-            q._swing_w_f = _hi + _s * (_lf - _hi); q._swing_w_r = _hi + _s * (_lr - _hi)
+            _s = float(np.clip((abs(V_eff) - q._whip_v0) / (q._whip_v1 - q._whip_v0), 0.0, 1.0))
+            q._swing_w_f = q._whip_hi + _s * (q._whip_lo_f - q._whip_hi)
+            q._swing_w_r = q._whip_hi + _s * (q._whip_lo_r - q._whip_hi)
+        else:                                                                   # 수동=슬라이더값(whip 목표) 상수
+            q._swing_w_f = q._whip_lo_f; q._swing_w_r = q._whip_lo_r
         if q._waist_idx is not None:                                            # ★허리 조향: 선회명령에 앞몸통 굽힘 연동(WAIST_STEER=0이면 중립홀드)
             q._waist_ref = float(np.clip(q._waist_steer * W_eff, -0.75, 0.75))
         # 선회: yaw각 참조 + 명령(body)→world 회전 (SRBD 상태는 world frame)
