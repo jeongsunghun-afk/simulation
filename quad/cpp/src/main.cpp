@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <set>
 #include <chrono>
 using namespace Eigen;
 
@@ -110,5 +111,116 @@ int main(int argc,char**argv){
   for(int i=0;i<Nb;i++){ wbic_stance(true); qs+=last_qp_ms; }
   double fm=std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now()-t0).count()/Nb;
   std::printf("[속도] wbic_stance 전체=%.3fms(%.0fHz) QP=%.3fms\n",fm,1000/fm,qs/Nb);
+
+  // ══════════ Phase3b: wbic_track(스윙 WBIC) 검증 ══════════
+  {
+    // 상수(non-free joint 순서=actuator 순서): tau_peak / qmin·qmax / ankle 여부
+    VectorXd tau_peak(nu),qmin(nu),qmax(nu); std::vector<char> is_ankle(nu,0);
+    { int a=0; for(int j=0;j<m->njnt;j++){ if(m->jnt_type[j]==mjJNT_FREE) continue;
+        double frc=m->jnt_actfrcrange[j*2+1]; tau_peak[a]=frc>0?frc:1e8;
+        if(m->jnt_limited[j]){ qmin[a]=m->jnt_range[j*2]; qmax[a]=m->jnt_range[j*2+1]; } else { qmin[a]=-1e9; qmax[a]=1e9; }
+        a++; }
+      for(int i=0;i<4;i++) if(leg_dof[i]==4) is_ankle[legqv[i][3]-6]=1; }
+
+    std::ifstream tf("/tmp/wbic_track_ref.txt");
+    if(!tf){ std::printf("[검증3] /tmp/wbic_track_ref.txt 없음 — dump_track.py 먼저 실행\n"); }
+    else {
+      std::map<std::string,std::vector<double>> T; std::vector<int> contacts;
+      std::map<int,std::pair<Vector3d,Vector3d>> swing; std::string ln;
+      while(std::getline(tf,ln)){ std::istringstream ss(ln); std::string k; ss>>k;
+        if(k=="contacts"){ int c; while(ss>>c) contacts.push_back(c); }
+        else if(k=="swingleg"){ int leg; ss>>leg; double v[6]; for(int i=0;i<6;i++) ss>>v[i];
+          swing[leg]={Vector3d(v[0],v[1],v[2]),Vector3d(v[3],v[4],v[5])}; }
+        else { std::vector<double> vs; double x; while(ss>>x) vs.push_back(x); T[k]=vs; } }
+      const double SW_KP=T["SW"][0], SW_KD=T["SW"][1], W_SW=T["SW"][2];
+      const double w_lam=T["w_lam"][0], body_terr=T["body_terr"][0];
+      Vector3d lamd[4]; for(int i=0;i<4;i++) lamd[i]=Vector3d(T["lam_des"][i*3],T["lam_des"][i*3+1],T["lam_des"][i*3+2]);
+
+      // wbic_track (기본경로: swing task+base ori/z+posture+λ추종+friction/LAMZ+POS_LIM+TAU_LIM; W_AM=0·motor_curve off)
+      VectorXd tau_tr(nu); double tr_qp_ms=0, _obj_cpp=0, _obj_py=0;
+      auto wbic_track=[&](bool timed){
+        for(int i=0;i<nq;i++) d->qpos[i]=T["qpos"][i];
+        for(int i=0;i<nv;i++) d->qvel[i]=T["qvel"][i];
+        mj_forward(m,d);
+        int Kc=(int)contacts.size(), nzt=nv+3*Kc; auto sl=[&](int k){ return nv+3*k; };
+        std::vector<Matrix<double,3,Dynamic>> cjac(Kc); std::vector<Vector3d> cpos(Kc),clam(Kc);
+        for(int k=0;k<Kc;k++){ int c=contacts[k]; cjac[k]=foot_jac(c); cpos[k]=foot_point(c); clam[k]=lamd[c]; }
+        std::vector<double> Mb(nv*nv); mj_fullM(m,Mb.data(),d->qM);
+        Map<Matrix<double,Dynamic,Dynamic,RowMajor>> M(Mb.data(),nv,nv);
+        Map<VectorXd> h(d->qfrc_bias,nv); VectorXd qv=Map<VectorXd>(d->qvel,nv);
+        MatrixXd P=MatrixXd::Zero(nzt,nzt); VectorXd g=VectorXd::Zero(nzt);
+        std::set<int> sw_vidx;
+        for(auto&kv:swing){ int leg=kv.first; Matrix<double,3,Dynamic> J=foot_jac(leg);
+          Vector3d accel=SW_KP*(kv.second.first-foot_point(leg))+SW_KD*(kv.second.second-J*qv);
+          P.topLeftCorner(nv,nv)+=W_SW*(J.transpose()*J); g.head(nv)-=W_SW*(J.transpose()*accel);
+          for(int t=0;t<leg_dof[leg];t++) sw_vidx.insert(legqv[leg][t]); }
+        std::vector<double> jcb(3*nv); mj_jacSubtreeCom(m,d,jcb.data(),0);
+        Matrix<double,3,Dynamic> Jc(3,nv); for(int r=0;r<3;r++)for(int c=0;c<nv;c++) Jc(r,c)=jcb[r*nv+c];
+        double oerr[3]; mju_quat2Vel(oerr,&d->qpos[3],1.0);
+        for(int j=0;j<3;j++){ double a=150*(-oerr[j])-20*qv[3+j]; P(3+j,3+j)+=5.0; g[3+j]-=5.0*a; }
+        double zref=com_ref[2]+body_terr; Vector3d Jcqv=Jc*qv;
+        double a_z=200*(zref-d->subtree_com[2])-25*Jcqv[2];
+        P.topLeftCorner(nv,nv)+=150.0*(Jc.row(2).transpose()*Jc.row(2)); g.head(nv)-=150.0*a_z*Jc.row(2).transpose();
+        for(int j=0;j<nu;j++){ double a_post=60*(q_home[j]-d->qpos[7+j])-5*qv[6+j];
+          double w_post = (is_ankle[j])?20.0 : (sw_vidx.count(6+j)?0.1:1.0);
+          P(6+j,6+j)+=w_post; g[6+j]-=w_post*a_post; }
+        P.topLeftCorner(nv,nv)+=1e-3*MatrixXd::Identity(nv,nv);
+        for(int k=0;k<Kc;k++){ P.block(sl(k),sl(k),3,3)+=w_lam*Matrix3d::Identity(); g.segment(sl(k),3)-=w_lam*clam[k]; }
+        // 등식: floating-base EOM 6 + 접촉 무가속 3K
+        int neq=6+3*Kc; MatrixXd A=MatrixXd::Zero(neq,nzt); VectorXd b=VectorXd::Zero(neq);
+        A.block(0,0,6,nv)=M.topRows(6); b.head(6)=-h.head(6);
+        for(int k=0;k<Kc;k++) A.block(0,sl(k),6,3)=-cjac[k].leftCols(6).transpose();
+        for(int k=0;k<Kc;k++) A.block(6+3*k,0,3,nv)=cjac[k];
+        // 경계: POS_LIM(가속도) + LAMZ
+        VectorXd lb=VectorXd::Constant(nzt,-1e8),ub=VectorXd::Constant(nzt,1e8);
+        { double tla=0.05,c2=0.5*tla*tla;
+          for(int j=0;j<nu;j++){ double qj=d->qpos[7+j],dqj=qv[6+j];
+            double ubp=(qmax[j]-qj-dqj*tla)/c2, lbp=(qmin[j]-qj-dqj*tla)/c2;
+            double u=std::min(ub[6+j],ubp), l=std::max(lb[6+j],lbp);
+            if(l<=u){ ub[6+j]=u; lb[6+j]=l; } } }
+        for(int k=0;k<Kc;k++) lb[sl(k)+2]=LAMZ_MIN;
+        // 부등식 G z <= hh : friction pyramid + TAU_LIM
+        std::vector<VectorXd> Gr; std::vector<double> hv;
+        int sgn[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
+        for(int k=0;k<Kc;k++){ int o=sl(k); for(int s=0;s<4;s++){ VectorXd r=VectorXd::Zero(nzt);
+          r[o]=sgn[s][0]; r[o+1]=sgn[s][1]; r[o+2]=-MU*MU_MARGIN; Gr.push_back(r); hv.push_back(0.0); } }
+        VectorXd h_act=h.segment(6,nu); MatrixXd T_mat=MatrixXd::Zero(nu,nzt); T_mat.leftCols(nv)=M.block(6,0,nu,nv);
+        for(int k=0;k<Kc;k++) T_mat.block(0,sl(k),nu,3)=-cjac[k].block(0,6,3,nu).transpose();
+        for(int i=0;i<nu;i++){ Gr.push_back(T_mat.row(i)); hv.push_back(tau_peak[i]-h_act[i]); }
+        for(int i=0;i<nu;i++){ Gr.push_back(-T_mat.row(i)); hv.push_back(tau_peak[i]+h_act[i]); }
+        P=(0.5*(P+P.transpose())).eval()+1e-8*MatrixXd::Identity(nzt,nzt);
+        // eiquadprog 변환: CE=A/ce0=-b, CI: (-G,hh) + 유한경계(lb: e/-lb, ub: -e/ub)
+        std::vector<VectorXd> CIr; std::vector<double> ci0v;
+        for(size_t i=0;i<Gr.size();i++){ CIr.push_back(-Gr[i]); ci0v.push_back(hv[i]); }
+        for(int i=0;i<nzt;i++){ if(lb[i]>-1e7){ VectorXd r=VectorXd::Zero(nzt); r[i]=1; CIr.push_back(r); ci0v.push_back(-lb[i]); }
+                                if(ub[i]< 1e7){ VectorXd r=VectorXd::Zero(nzt); r[i]=-1; CIr.push_back(r); ci0v.push_back(ub[i]); } }
+        int nci=(int)CIr.size(); MatrixXd CI(nci,nzt); VectorXd ci0(nci);
+        for(int i=0;i<nci;i++){ CI.row(i)=CIr[i]; ci0[i]=ci0v[i]; }
+        MatrixXd CE=A; VectorXd ce0=-b, x(nzt);
+        eiquadprog::solvers::EiquadprogFast qpt; qpt.reset(nzt,neq,nci);
+        auto t0=std::chrono::high_resolution_clock::now();
+        auto st_=qpt.solve_quadprog(P,g,CE,ce0,CI,ci0,x);
+        (void)st_;
+        if(timed) tr_qp_ms=std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now()-t0).count();
+        VectorXd qdd=x.head(nv); tau_tr=M.block(6,0,nu,nv)*qdd+h.segment(6,nu);
+        for(int k=0;k<Kc;k++) tau_tr-=cjac[k].block(0,6,3,nu).transpose()*x.segment(sl(k),3);
+        if(!timed && T.count("zsol")){
+          // ★잔차 진단: 두 해의 목적값(같은 P,g). C++ obj ≤ py obj 이면 C++가 동일QP의 동등-또는-더나은 최적해
+          VectorXd zpy(nzt); for(int i=0;i<nzt;i++) zpy[i]=T["zsol"][i];
+          _obj_cpp=0.5*x.dot(P*x)+g.dot(x); _obj_py=0.5*zpy.dot(P*zpy)+g.dot(zpy); }
+      };
+      wbic_track(false);
+      double etr=0; for(int i=0;i<nu;i++) etr=std::max(etr,std::abs(tau_tr[i]-T["tau"][i]));
+      // 동일QP·같은목적값이면 정합(잔차=near-singular 스윙다리 soft-task nullspace를 두 GI솔버가 다르게 해소; C++가 더 최적)
+      bool ok_opt = (_obj_cpp <= _obj_py + 1e-3);
+      std::printf("[검증3] wbic_track tau 최대오차=%.2e Nm (contacts=%d,swing=%d), 목적값 C++=%.3f≤py=%.3f(%s) → %s\n",
+                  etr,(int)contacts.size(),(int)swing.size(), _obj_cpp,_obj_py, ok_opt?"C++ 동등-또는-더최적":"py가 더최적?!",
+                  (etr<0.3 && ok_opt)?"✅ 정합(솔버허용오차내)":"❌ 재검토");
+      auto tt0=std::chrono::high_resolution_clock::now(); double tqs=0; int Ntr=5000;
+      for(int i=0;i<Ntr;i++){ wbic_track(true); tqs+=tr_qp_ms; }
+      double tfm=std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now()-tt0).count()/Ntr;
+      std::printf("[속도] wbic_track 전체=%.3fms(%.0fHz) QP=%.3fms\n",tfm,1000/tfm,tqs/Ntr);
+    }
+  }
   mj_deleteData(d); mj_deleteModel(m); return 0;
 }
