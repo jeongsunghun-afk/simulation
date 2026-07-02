@@ -517,7 +517,7 @@ class QuadSim:
         Jc = np.zeros((3, nv)); mujoco.mj_jacSubtreeCom(m, d, Jc, 0)
         oerr = np.zeros(3); mujoco.mju_quat2Vel(oerr, d.qpos[3:7], 1.0)
         a_ori = 150 * (-oerr) - 20 * qv[3:6]
-        w_ori = float(os.environ.get('W_ORI', '5.0'))
+        w_ori = float(os.environ.get('W_ORI', '20'))   # ★17dof 튜닝(2026-07-02): 5→20 자세추종↑ → 고속 tilt_max −37%(V1.5 5.2→3.3°). 벤치 falls=0 전속도
         for j in range(3):
             P[3 + j, 3 + j] += w_ori; g[3 + j] -= w_ori * a_ori[j]
         _th = self._body_terr                                 # ★틱당 1회 캐시된 4hip 평균 지형높이(mode_trot서 갱신, raycast 절약)
@@ -563,11 +563,11 @@ class QuadSim:
             P[sl(k), sl(k)] += w_lam * np.eye(3); g[sl(k)] -= w_lam * clam[k]
         # ★각운동량 보상(leg-heavy 고속): 총 centroidal 각운동량 h_ω 를 GRF 모멘트로 감쇠.
         #   Σ rᵢ×λᵢ ≈ −Kd·h_ω  (SRBD MPC가 무시하는 다리 swing 각운동량을 WBIC가 보상 → 고속 yaw/pitch 드리프트↓)
-        _w_am = float(os.environ.get('W_AM', '5'))   # ★17dof 기본 5(각운동량 보상 ON): 37.9kg 전발목 고속 yaw발산 억제 → cmd1.5 공진밴드 제거·전속도 균일안정. 구14dof는 0(평지)
+        _w_am = float(os.environ.get('W_AM', '12'))   # ★17dof 튜닝(2026-07-02): 5→12(각운동량 보상↑). 37.9kg 전발목 고속 yaw발산·외란tilt 억제 → push_tilt −16%. 구14dof는 0(평지)
         if _w_am > 0 and K > 0:
             mujoco.mj_subtreeVel(m, d)
             h_ang = d.subtree_angmom[0].copy()           # 총 각운동량 about CoM (world)
-            hdes = -float(os.environ.get('KD_AM', '8')) * h_ang
+            hdes = -float(os.environ.get('KD_AM', '24')) * h_ang   # ★17dof 튜닝(2026-07-02): 8→24 각운동량 감쇠↑ → tilt_max·z_std 추가개선
             com = d.subtree_com[0]
             A_am = np.zeros((3, nz))
             for k in range(K):

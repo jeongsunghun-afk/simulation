@@ -23,7 +23,8 @@ struct QuadControl {
   // 상수
   double MU=0.6, MU_MARGIN=0.707, LAMZ_MIN=1.0;         // wbic 마찰
   double base_z0=0.52, REAR_ANKLE=-0.7, FRONT_ANKLE=-0.7;  // 14dof:ours_sphere / 17dof: 0.5234,-0.5
-  double W_AM=0.0, KD_AM=8.0;                            // 각운동량 보상(14dof평지=0, 17dof=5)
+  double W_AM=0.0, KD_AM=8.0;                            // 각운동량 보상(14dof평지=0, 17dof튜닝=12/24)
+  double w_ori=5.0;                                      // wbic_track 자세 task 가중(14dof=5, 17dof튜닝=20)
   bool stance_pin_ankle=false;                           // 17dof: stance서도 여유발목 핀(전4다리4DOF redundancy 표류차단)
   VectorXd q_home; Vector3d com_ref;
   VectorXd tau_peak, qmin, qmax; std::vector<char> is_ankle;
@@ -182,7 +183,7 @@ struct QuadControl {
     std::vector<double> jcb(3*nv); mj_jacSubtreeCom(m,d,jcb.data(),0);
     Matrix<double,3,Dynamic> Jc(3,nv); for(int r=0;r<3;r++)for(int c=0;c<nv;c++) Jc(r,c)=jcb[r*nv+c];
     double oerr[3]; mju_quat2Vel(oerr,&d->qpos[3],1.0);
-    for(int j=0;j<3;j++){ double a=150*(-oerr[j])-20*qv[3+j]; P(3+j,3+j)+=5.0; g[3+j]-=5.0*a; }
+    for(int j=0;j<3;j++){ double a=150*(-oerr[j])-20*qv[3+j]; P(3+j,3+j)+=w_ori; g[3+j]-=w_ori*a; }
     double zref=com_ref[2]+_body_terr; Vector3d Jcqv=Jc*qv;
     double a_z=200*(zref-d->subtree_com[2])-25*Jcqv[2];
     P.topLeftCorner(nv,nv)+=150.0*(Jc.row(2).transpose()*Jc.row(2)); g.head(nv)-=150.0*a_z*Jc.row(2).transpose();

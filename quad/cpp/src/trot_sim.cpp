@@ -58,6 +58,8 @@ int main(int argc,char**argv){
   if(getenv("REAR_ANKLE")){ q.REAR_ANKLE=atof(getenv("REAR_ANKLE")); q.FRONT_ANKLE=q.REAR_ANKLE; }
   if(getenv("FRONT_ANKLE")) q.FRONT_ANKLE=atof(getenv("FRONT_ANKLE"));
   if(getenv("W_AM")) q.W_AM=atof(getenv("W_AM"));
+  if(getenv("KD_AM")) q.KD_AM=atof(getenv("KD_AM"));
+  if(getenv("W_ORI")) q.w_ori=atof(getenv("W_ORI"));
   if(getenv("PIN_ANKLE")) q.stance_pin_ankle=true;   // (실험용) stance 발목핀
   q.crouch_home(); q.setup_mpc();
   if(getenv("DBG")) std::printf("[dbg] nu=%d leg_dof=[%d %d %d %d] standing_z=%.5f com_ref=[%.5f %.5f %.5f]\n",
