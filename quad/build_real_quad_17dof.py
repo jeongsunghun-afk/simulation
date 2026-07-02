@@ -13,7 +13,8 @@ PKG  = '/home/jsh/문서/jsh/simulation/02_Leg_UFDF_260701'
 SRC_MESH = os.path.join(PKG, 'meshes')
 SRC_URDF = os.path.join(PKG, 'urdf', '02_Leg_UFDF_260701_3.urdf')
 MESH_OUT = os.path.join(HERE, 'meshes_sim_17dof')
-MJCF_OUT = os.path.join(HERE, 'quad_real_17dof.mjcf')
+_WFREE = bool(os.environ.get('WAIST_FREE'))   # ★허리 능동(17-DOF): 기본 off=fixed(16-DOF)
+MJCF_OUT = os.path.join(HERE, 'quad_real_17dof_waist.mjcf' if _WFREE else 'quad_real_17dof.mjcf')
 TARGET = 60000
 FORCE = '--force' in sys.argv
 print('URDF:', os.path.basename(SRC_URDF))
@@ -49,7 +50,10 @@ def _lock_waist(txt):
             blk = blk.replace('type="revolute"', 'type="fixed"')
         return blk
     return re.sub(r'<joint\b.*?</joint>', repl, txt, flags=re.S)
-u = _lock_waist(u)
+if not _WFREE:
+    u = _lock_waist(u)          # 기본=허리 fixed(16-DOF)
+else:
+    print('★WAIST_FREE: 허리 능동 유지 → 17-DOF (nu=17)')
 tag = (f'<mujoco><compiler meshdir="{MESH_OUT}" balanceinertia="true" '
        f'discardvisual="false" fusestatic="false"/></mujoco>')
 u = re.sub(r'(<robot[^>]*>)', r'\1\n  ' + tag, u, count=1)

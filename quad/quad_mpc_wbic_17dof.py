@@ -57,6 +57,11 @@ ROBOTS = {
                        legs=['HL', 'HR', 'FL', 'FR'], dof=4,
                        foot_geom='{L}_sphere', hip_body='{L}_hip_link',
                        foot_kind='sphere', base_z0=0.5234, mu=0.6),
+    # ★허리(FB_waist) 능동 17-DOF(nu=17). 허리=index8, 다리매핑 이름기반이라 무관. WAIST_KP로 요각제어
+    'ours_17dof_waist_sphere': dict(mjcf=os.path.join(_HERE, 'quad_real_17dof_waist_sphere.mjcf'),
+                       legs=['HL', 'HR', 'FL', 'FR'], dof=4,
+                       foot_geom='{L}_sphere', hip_body='{L}_hip_link',
+                       foot_kind='sphere', base_z0=0.5234, mu=0.6),
 }
 _ROBOT = 'ours'
 MJCF = ROBOTS['ours']['mjcf']    # (하위호환)
@@ -216,6 +221,14 @@ class QuadSim:
         # 뒷발목(4DoF 여자유도) nu-order 인덱스 + 핀 가중치: posture로 REAR_ANKLE에 고정→흔들림↓·좌우대칭
         self._ankle_idx = set(int(self.legqv[i][3]) - 6 for i in range(4) if self.leg_dof[i] == 4)
         self._ankle_w = float(os.environ.get('ANKLE_W', '20'))   # 0이면 핀 안함(기존 여자유도)
+        # ★허리(FB_waist yaw) 관절 — 큰 몸통 DOF라 강한 전용 홀드 필요(약한 posture론 앞몸통 못잡음)
+        _wj = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_JOINT, 'FB_waist_joint')
+        self._waist_idx = int(self.m.jnt_dofadr[_wj]) - 6 if _wj >= 0 else None   # nu-index(없으면 None=16DOF)
+        self._waist_ref = 0.0                                    # 허리 요각 목표[rad](조향시 갱신)
+        self._waist_w = float(os.environ.get('WAIST_W', '80'))   # 홀드 가중(강하게)
+        self._waist_kp = float(os.environ.get('WAIST_KP', '150')); self._waist_kd = float(os.environ.get('WAIST_KD', '20'))
+        self._waist_steer = float(os.environ.get('WAIST_STEER', '0'))   # ★허리 조향 게인(0=중립홀드/>0=선회시 앞몸통 굽힘=조향스파인)
+        self._wbt = bool(os.environ.get('WBIC_TIMING')); self._qpt = []   # ★WBIC QP solve 시간 계측(1kHz 실현 확인용)
         # ★기어비 재배분(설계검토): GEAR_xxx<1=저기어(속도↑·토크↓), >1=고기어(토크↑·속도↓). 같은 베이스모터 토크↔속도 맞교환.
         #   보행분석: thigh=토크병목·속도여유→GEAR_THIGH>1 이득 / calf·foot=속도병목·토크여유→GEAR<1 이득
         _gdef = {'hip': '1.0', 'thigh': '1.0', 'calf': '0.7619', 'foot': '1.0'}   # ★calf 기본 8:1(10.5→8): 뒷calf 속도병목 해소(19.7→25.9, 토크126→96). foot은 flail이라 유지
@@ -537,7 +550,10 @@ class QuadSim:
                 a_post[_aj] = _akp * _qe[_aj] - _akd * _dqj[_aj]
         _pw = float(os.environ.get('POSTURE_W', '1.0'))      # ★stance 다리 posture 가중(계단서 ↓하면 다리 신장 자유=몸 상승)
         for j in range(self.nu):
-            if j in self._ankle_idx and self._ankle_w > 0:   # 뒷발목: REAR_ANKLE에 강하게 핀(여자유도 고정→대칭)
+            if self._waist_idx is not None and j == self._waist_idx:   # ★허리: 강한 전용 홀드(요각목표=_waist_ref, 조향시 갱신)
+                w_post = self._waist_w
+                a_post[j] = self._waist_kp * (self._waist_ref - d.qpos[7 + j]) - self._waist_kd * qv[6 + j]
+            elif j in self._ankle_idx and self._ankle_w > 0:   # 발목: REAR_ANKLE에 강하게 핀(여자유도 고정→대칭)
                 w_post = self._ankle_w
             else:
                 w_post = 0.1 if (6 + j) in sw_vidx else _pw
@@ -625,7 +641,12 @@ class QuadSim:
                 Gl.extend(list(T_mat));  hl.extend(list(self._tau_prev + _dtau - h_act))
                 Gl.extend(list(-T_mat)); hl.extend(list(-(self._tau_prev - _dtau) + h_act))
         G = np.vstack(Gl) if Gl else None; hh = np.array(hl) if hl else None
+        if self._wbt: import time as _tm9; _tq9 = _tm9.perf_counter()
         z = solve_qp(P, g, G, hh, A, b, lb, ub, solver='quadprog')
+        if self._wbt:
+            self._qpt.append(_tm9.perf_counter() - _tq9)
+            if len(self._qpt) % 1000 == 0:
+                _a9 = np.array(self._qpt[-1000:]); print('[WBIC_QP] solve만 평균%.2fms 최대%.2fms (%.0fHz 가능)' % (_a9.mean()*1000, _a9.max()*1000, 1/_a9.mean()), flush=True)
         if z is None:
             self.last_lam = None; return None, False
         qdd = z[:nv]; lam = [z[sl(k)] for k in range(K)]
@@ -1399,6 +1420,8 @@ def mode_trot():
         S['Vys'] += float(np.clip(_vyt - S['Vys'], -ACC * dts, ACC * dts))
         S['Ws']  += float(np.clip(_wt  - S['Ws'],  -2.0 * dts, 2.0 * dts))
         V_eff, Vy_eff, W_eff = S['Vs'], S['Vys'], S['Ws']
+        if q._waist_idx is not None:                                            # ★허리 조향: 선회명령에 앞몸통 굽힘 연동(WAIST_STEER=0이면 중립홀드)
+            q._waist_ref = float(np.clip(q._waist_steer * W_eff, -0.75, 0.75))
         # 선회: yaw각 참조 + 명령(body)→world 회전 (SRBD 상태는 world frame)
         _qq = q.d.qpos[3:7]                                                     # quat [w,x,y,z]
         yaw_m = float(np.arctan2(2 * (_qq[0]*_qq[3] + _qq[1]*_qq[2]), 1 - 2 * (_qq[2]**2 + _qq[3]**2)))
@@ -1461,7 +1484,11 @@ def mode_trot():
         rai = np.clip(S['raibert_k'] * T_ST * v_des + KCAP * (v_fb - v_des), -RAI_CLIP, RAI_CLIP)   # ★전방 reach 게인(GUI 슬라이더 live) / 최대 발배치 클립
         q.foot_targets = [None, None, None, None]
         dt = q.m.opt.timestep; swing = {}
-        Rw = np.array([[cy, -sy], [sy, cy]])                 # body→world(현재 yaw)
+        Rw = np.array([[cy, -sy], [sy, cy]])                 # body→world(뒷몸통/base yaw)
+        # ★앞다리(FL/FR)는 앞몸통에 붙음 → 명목 발offset을 앞몸통 방향(base+허리 yaw)으로 회전. 허리 꺾이면 앞발배치도 따라감(기하 반영)
+        _wa = float(q.d.qpos[7 + q._waist_idx]) if q._waist_idx is not None else 0.0
+        _cyf, _syf = np.cos(yaw_m + _wa), np.sin(yaw_m + _wa)
+        Rw_front = np.array([[_cyf, -_syf], [_syf, _cyf]])
         _STH = S['step_h']                                  # ★GUI live step height
         _sh = _STH if S['homing'] else (                    # 호밍=풀 step height(발 어긋남 클리어), 보행=시작 ramp
             _STH * (0.2 + 0.8 * min(1.0, tg / WARMUP)) if WARMUP > 1e-6 else _STH)
@@ -1473,7 +1500,8 @@ def mode_trot():
                 hip_xy = q.d.xpos[q.hip_bid[i]][:2]
                 r_xy = hip_xy - q.d.qpos[:2]                # 몸중심→hip
                 tw = W_eff * T_ST * np.array([-r_xy[1], r_xy[0]])  # 선회 접선 발배치(yaw)
-                pe_xy = hip_xy + Rw @ S['hip_off'][i] + rai + tw  # nominal도 몸따라 회전 + Raibert + 선회
+                _Rleg = Rw_front if q.legs[i] in ('FL', 'FR') else Rw   # ★앞다리=앞몸통방향(허리반영)
+                pe_xy = hip_xy + _Rleg @ S['hip_off'][i] + rai + tw  # nominal도 몸따라 회전 + Raibert + 선회
                 _ex, _ey = float(pe_xy[0]), float(pe_xy[1])
                 if q._stair is not None:                    # ★foothold를 tread 중앙쪽으로 snap(riser 모서리 6cm 회피)
                     _H, _D, _N, _X0 = q._stair
