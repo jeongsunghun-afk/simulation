@@ -87,7 +87,9 @@ int main(int argc,char**argv){
         ctrl.step_h=json_get(c,"step_h",ctrl.step_h);          // step height 슬라이더
         ctrl.raibert_k=json_get(c,"raibert_k",ctrl.raibert_k); // 전방 reach 슬라이더
         double sw=json_get(c,"swing_w",-1); if(sw>=0) q.swing_w=sw;  // ★whip 슬라이더
-        ctrl.stand_mode = (json_str(c,"mode","move")!="move");  // 서기/앉기=제자리 stance
+        ctrl.mode = json_str(c,"mode","move");                  // move/stand_up(서기)/stand_down(눕기)/off
+        ctrl.set_gait(json_str(c,"gait","trot"));               // trot/walk 게이트 토글
+        ctrl.body_h = json_get(c,"body_h",ctrl.body_h);         // 서기 높이 슬라이더
         double rt=json_get(c,"rate",RATE); if(rt>0) RATE=rt; } }
     // ★벽시계 기준 실시간 페이싱: sim_time이 wall_time×RATE 따라가도록(모니터 refresh 무관)
     double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-wall0).count();

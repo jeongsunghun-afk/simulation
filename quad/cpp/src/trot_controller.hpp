@@ -23,12 +23,12 @@ static inline void tc_swing_z(double sh,double Th,double Vz,double&c2,double&c4,
                   2.0*Th, 4.0*std::pow(Th,3), 6.0*std::pow(Th,5);
   Vector3d b(-sh,0.0,-Vz); Vector3d c=A.colPivHouseholderQr().solve(b); c2=c[0];c4=c[1];c6=c[2];
 }
-static inline Vector3d tc_swing_foot(double sw_t,const Vector3d&p0,const Vector3d&pe,const Vector3d&bvel,double sh){
+static inline Vector3d tc_swing_foot(double sw_t,const Vector3d&p0,const Vector3d&pe,const Vector3d&bvel,double sh,double Tl,double Tst){
   if(sw_t>=1.0) return pe;
-  double tau=sw_t, s5=10*std::pow(tau,3)-15*std::pow(tau,4)+6*std::pow(tau,5), Tl=TC_SW;
+  double tau=sw_t, s5=10*std::pow(tau,3)-15*std::pow(tau,4)+6*std::pow(tau,5);
   double DXx=(pe[0]-p0[0])+bvel[0]*Tl; Vector3d pos;
   pos[0]=p0[0]-bvel[0]*tau*Tl+DXx*s5; pos[1]=(1.0-s5)*p0[1]+s5*pe[1];
-  double Th=Tl/2.0, u=tau*Tl-Th, Vz=TC_SDELTA*M_PI/TC_ST; double c2,c4,c6; tc_swing_z(sh,Th,Vz,c2,c4,c6);
+  double Th=Tl/2.0, u=tau*Tl-Th, Vz=TC_SDELTA*M_PI/Tst; double c2,c4,c6; tc_swing_z(sh,Th,Vz,c2,c4,c6);
   pos[2]=p0[2]+sh+c2*u*u+c4*std::pow(u,4)+c6*std::pow(u,6); return pos;
 }
 static inline double tc_clip(double v,double lo,double hi){ return v<lo?lo:(v>hi?hi:v); }
@@ -37,8 +37,16 @@ struct TrotCtrl {
   QuadControl& q;
   double V=0.30, VY=0.0, WZ=0.0;   // 명령속도(뷰어 키보드/GUI)
   double step_h=0.10, raibert_k=0.8;   // ★GUI 슬라이더(live): step height·전방 reach
-  bool stand_mode=false;               // ★GUI mode!=move → 제자리 stance(서기)
   bool ALIP=true, POS_HOLD=true;
+  // ── 모드관리(배포용): move/stand_up(서기)/stand_down(눕기)/off ──
+  std::string mode="move";
+  double body_h=0.5234, ht_cur=0.5234, qhome_h=0.5234;   // 서기높이 슬라이더·보간높이·q_home 계산높이
+  VectorXd q_ref; bool have_qref=false;                  // fold 관절목표 slew
+  // 모드관리 상수(Python 17dof와 동일)
+  double GROUND_Z=0.18, GETUP_TRIG=0.32, GETUP_DONE=0.40, GETUP_KP=90, GETUP_KD=3, GETUP_RATE=0.18, REST_KD=3.0, JOINT_SLEW=1.5, HRATE=0.3;
+  // ── 게이트 프리셋(trot/walk) ──
+  std::string gait_type="trot";
+  double gp_T=0.5, gp_SWF=0.5, gp_off[4]={0,0.5,0.5,0}, gp_Tsw=0.25, gp_Tst=0.25;
   // 상태
   bool armed=false; double t0=0, settle_until=TC_SETTLE;
   double Vs=0,Vys=0,Ws=0, yaw_ref=0; bool yaw_hold_set=false; double yaw_hold=0;
@@ -49,13 +57,44 @@ struct TrotCtrl {
   Vector3d lam_des[4]={Vector3d::Zero(),Vector3d::Zero(),Vector3d::Zero(),Vector3d::Zero()};
   double mpc_t=-1.0, Veff_dbg=0;
 
-  TrotCtrl(QuadControl& q_):q(q_){}
+  TrotCtrl(QuadControl& q_):q(q_){ q_ref=VectorXd::Zero(q.nu); body_h=ht_cur=qhome_h=q.base_z0; }
+
+  void set_gait(const std::string& g){        // trot/walk 프리셋(GUI 토글)
+    if(g==gait_type) return; gait_type=g;
+    if(g=="walk"){ gp_T=1.0; gp_SWF=0.25; gp_off[0]=0.25; gp_off[1]=0.75; gp_off[2]=0.5; gp_off[3]=0.0; }
+    else         { gp_T=0.5; gp_SWF=0.5;  gp_off[0]=0.0;  gp_off[1]=0.5;  gp_off[2]=0.5; gp_off[3]=0.0; }
+    gp_Tsw=gp_T*gp_SWF; gp_Tst=gp_T*(1.0-gp_SWF); armed=false;   // 재arm=위상 재앵커(불연속 방지)
+  }
+  void gait(int i,double tg,bool&stance,double&sprog){
+    double ph=std::fmod(tg/gp_T+gp_off[i],1.0); if(ph<0) ph+=1.0;
+    if(ph>=gp_SWF){ stance=true; sprog=0.0; } else { stance=false; sprog=ph/gp_SWF; }
+  }
 
   // 1틱 제어: d->ctrl 설정(mj_step은 호출자). q.d->time 기준.
   void control(){
     mjModel*m=q.m; mjData*d=q.d; int nv=q.nv; double dt=m->opt.timestep;
-    double t=d->time;
-    if(stand_mode){ q.wbic_stance(); armed=false; return; }   // ★서기(GUI mode!=move): 제자리 stance, move 복귀 시 재arm
+    double t=d->time; int nu=q.nu;
+    // ── 모드 dispatch(배포용): move 외 = 서기/눕기/getup/off ──
+    if(mode!="move"){
+      if(mode=="off"){ for(int j=0;j<nu;j++) d->ctrl[j]=tc_clip(-REST_KD*d->qvel[6+j],-q.tau_peak[j],q.tau_peak[j]); armed=false; have_qref=false; return; }
+      double bz=d->qpos[2];
+      if(bz<GETUP_TRIG && ht_cur>GETUP_DONE) ht_cur=std::max(0.12,bz);      // 쓰러짐/off로 낮음→동기화
+      double tgt=(mode=="stand_down")?GROUND_Z:body_h;                      // 눕기=낮게 / 서기=슬라이더
+      bool low=(ht_cur<GETUP_DONE)||(tgt<GETUP_DONE); double rate=low?GETUP_RATE:HRATE;
+      ht_cur+=tc_clip(tgt-ht_cur,-rate*dt,rate*dt);
+      if(std::abs(ht_cur-qhome_h)>6e-3){ q.update_stand_qhome(ht_cur); qhome_h=ht_cur; }
+      double jerr=0; for(int j=0;j<nu;j++) jerr+=std::abs(q.q_home[j]-d->qpos[7+j]); jerr/=nu;
+      if(mode=="stand_down" && std::abs(ht_cur-GROUND_Z)<=0.02 && jerr<0.3){ // 눕기완료→damp(모터off 등가)
+        for(int j=0;j<nu;j++) d->ctrl[j]=tc_clip(-REST_KD*d->qvel[6+j],-q.tau_peak[j],q.tau_peak[j]); armed=false; have_qref=false; return; }
+      if(ht_cur<GETUP_DONE){                                                // 낮은자세=수평 PD fold(눕기/getup 공통)
+        if(!have_qref){ for(int j=0;j<nu;j++) q_ref[j]=d->qpos[7+j]; have_qref=true; }
+        for(int j=0;j<nu;j++) q_ref[j]+=tc_clip(q.q_home[j]-q_ref[j],-JOINT_SLEW*dt,JOINT_SLEW*dt);
+        for(int j=0;j<nu;j++){ double tau=d->qfrc_bias[6+j]+GETUP_KP*(q_ref[j]-d->qpos[7+j])-GETUP_KD*d->qvel[6+j];
+          d->ctrl[j]=tc_clip(tau,-q.tau_peak[j],q.tau_peak[j]); }
+        armed=false; return; }
+      have_qref=false; q.wbic_stance(); armed=false; return;                // 서기(높이충분)=wbic_stance
+    }
+    have_qref=false;   // move → fold 리셋
     auto quat_yaw=[&](){ double*qq=&d->qpos[3]; return std::atan2(2*(qq[0]*qq[3]+qq[1]*qq[2]),1-2*(qq[2]*qq[2]+qq[3]*qq[3])); };
     if(t < settle_until){ q.wbic_stance(); return; }
     if(!armed){ armed=true; t0=t; yaw_ref=0;
@@ -76,7 +115,7 @@ struct TrotCtrl {
     } else pos_hold_set=false;
     x_ref[2]=yaw_ref; x_ref[8]=Weff; x_ref[9]=vx_w; x_ref[10]=vy_w; q._body_terr=0.0;
     std::vector<int> st; std::map<int,std::pair<Vector3d,Vector3d>> swing;
-    for(int i=0;i<4;i++){ bool sch; double sp; tc_gait(i,tg,sch,sp);
+    for(int i=0;i<4;i++){ bool sch; double sp; gait(i,tg,sch,sp);
       if(sch){ st.push_back(i); have_prev[i]=false; } else { if(sp<0.03) liftoff[i]=q.foot_point(i); } }
     std::vector<double> jcb(3*nv); mj_jacSubtreeCom(m,d,jcb.data(),0);
     Matrix<double,3,Dynamic> Jc(3,nv); for(int r=0;r<3;r++)for(int c=0;c<nv;c++) Jc(r,c)=jcb[r*nv+c];
@@ -84,13 +123,13 @@ struct TrotCtrl {
     Vector2d v_des(vx_w,vy_w), v_fb=vcom.head(2);
     if(ALIP){ mj_subtreeVel(m,d); Vector3d L(d->subtree_angmom[0],d->subtree_angmom[1],d->subtree_angmom[2]);
       double H=std::max(0.1,d->subtree_com[2]); v_fb+=Vector2d(L[1],-L[0])/(q.mpc.TOTAL_MASS*H); }
-    Vector2d rai; for(int k=0;k<2;k++) rai[k]=tc_clip(raibert_k*TC_ST*v_des[k]+TC_KCAP*(v_fb[k]-v_des[k]),-TC_RAICLIP,TC_RAICLIP);
+    Vector2d rai; for(int k=0;k<2;k++) rai[k]=tc_clip(raibert_k*gp_Tst*v_des[k]+TC_KCAP*(v_fb[k]-v_des[k]),-TC_RAICLIP,TC_RAICLIP);
     Matrix2d Rw; Rw<<cy,-sy,sy,cy; double sh=step_h*(0.2+0.8*std::min(1.0,tg/TC_WARMUP));
-    for(int i=0;i<4;i++){ bool sch; double s_; tc_gait(i,tg,sch,s_); if(sch) continue;
+    for(int i=0;i<4;i++){ bool sch; double s_; gait(i,tg,sch,s_); if(sch) continue;
       Vector2d hip_xy(d->xpos[q.hip_bid[i]*3],d->xpos[q.hip_bid[i]*3+1]);
       Vector2d pe_xy=hip_xy+Rw*hip_off[i]+rai; Vector3d p_end(pe_xy[0],pe_xy[1],gz[i]);
       double dzl=p_end[2]-liftoff[i][2]; Vector3d bvel(vcom[0],vcom[1],0.0);
-      Vector3d p_tgt=tc_swing_foot(s_,liftoff[i],p_end,bvel,sh);
+      Vector3d p_tgt=tc_swing_foot(s_,liftoff[i],p_end,bvel,sh,gp_Tsw,gp_Tst);
       p_tgt[2]+=dzl*(10*std::pow(s_,3)-15*std::pow(s_,4)+6*std::pow(s_,5));
       Vector3d v_tgt=Vector3d::Zero();
       if(have_prev[i]) for(int c=0;c<3;c++) v_tgt[c]=tc_clip((p_tgt[c]-ptgt_prev[i][c])/dt,-1.0,1.0);
@@ -98,7 +137,7 @@ struct TrotCtrl {
     double dmpc=t-mpc_t;
     if(!st.empty() && (mpc_t<0||dmpc<0||dmpc>=q.mpc.DT)){
       std::vector<std::array<int,4>> cs(q.mpc.N);
-      for(int k=0;k<q.mpc.N;k++) for(int i=0;i<4;i++){ bool sch; double sp; tc_gait(i,tg+k*q.mpc.DT,sch,sp); cs[k][i]=sch?1:0; }
+      for(int k=0;k<q.mpc.N;k++) for(int i=0;i<4;i++){ bool sch; double sp; gait(i,tg+k*q.mpc.DT,sch,sp); cs[k][i]=sch?1:0; }
       Matrix<double,4,3> L=q.mpc_grf(x_ref,cs); for(int i=0;i<4;i++) lam_des[i]=L.row(i).transpose(); mpc_t=t; }
     Vector3d lam_use[4]; for(int i=0;i<4;i++) lam_use[i]= st.empty()?Vector3d::Zero():lam_des[i];
     if(!q.wbic_track(st,swing,lam_use)) q.wbic_stance();

@@ -89,6 +89,14 @@ struct QuadControl {
       foot_gz0[i]=foot_point(i)[2]; }
     for(int i=0;i<nv;i++) d->qvel[i]=0; mj_forward(m,d);
   }
+  // 가변높이 standing q_home/com_ref 재계산(IK) — 라이브 d 복원(텔레포트X). 서기높이변경·눕기용.
+  void update_stand_qhome(double base_z){
+    std::vector<double> sq(nq),sv(nv); double st=d->time;
+    for(int i=0;i<nq;i++) sq[i]=d->qpos[i]; for(int i=0;i<nv;i++) sv[i]=d->qvel[i];
+    crouch_home(base_z);
+    for(int i=0;i<nq;i++) d->qpos[i]=sq[i]; for(int i=0;i<nv;i++) d->qvel[i]=sv[i]; d->time=st;
+    mj_forward(m,d);
+  }
   Matrix3d compute_Icom(){
     Vector3d com(d->subtree_com[0],d->subtree_com[1],d->subtree_com[2]); Matrix3d I=Matrix3d::Zero();
     for(int b=1;b<m->nbody;b++){ double ms=m->body_mass[b]; if(ms<=0) continue;
