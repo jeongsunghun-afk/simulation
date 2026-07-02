@@ -329,8 +329,8 @@ class QuadSim:
         d.qpos[2] = base_z
         # ★뒷다리(4DoF) 발목을 REAR_ANKLE로 두고 hip/thigh/calf로 같은 발 위치 IK
         #   → 같은 발 궤적, 더 웅크린 자세(발목 꺾고 thigh 펴짐). 4-DoF 여유(redundancy) 해소.
-        _ra = float(os.environ.get('REAR_ANKLE', '-0.5'))   # ★뒷발목 각도(17dof 기본 -0.5, 덜 웅크림; 구 14dof는 -0.7). sphere발이라 안정성無영향·자세만
-        _fa = float(os.environ.get('FRONT_ANKLE', str(_ra)))  # ★앞발목 기본=뒷발목과 동일(-0.7). sphere발이라 발목각은 접촉無영향(발 자세만). 부호 바꾸려면 env FRONT_ANKLE
+        _ra = float(os.environ.get('REAR_ANKLE', '-0.3'))   # ★뒷발목(2026-07-02 튜닝): -0.5→-0.3 뒷다리 신전(thigh -0.35→-0.18, 앞다리에 근접)+비대칭 완화로 tilt_max V1.0 2.0→1.0. sphere발이라 접촉無영향
+        _fa = float(os.environ.get('FRONT_ANKLE', '-0.5'))  # ★앞발목 기본 -0.5(뒷발과 별도). 앞다리 축부호 반대라 -0.5=앞발 자세. 비대칭(앞-0.5/뒤-0.3)이 대칭보다 tilt 낮음
         for i in range(4):
             if self.leg_dof[i] == 4:
                 _ang = _fa if self.legs[i] in ('FL', 'FR') else _ra
