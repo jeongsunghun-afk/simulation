@@ -338,11 +338,11 @@ with dpg.window(tag='main'):
     dpg.add_slider_float(label='전방 reach 게인  (0.8=기본, 시원한 reach / ↑=제동↑ 느림+안정 / 1.2=과제동)', tag='raibert_k',
                          min_value=0.3, max_value=1.2, default_value=0.8,
                          callback=lambda s, a: sc.SetRaibertK(a))
-    dpg.add_slider_float(label='앞다리 whip 억제  (0.1=whip 심함 / 2.0=기본 / 4.0=최강)  ↓낮추면 앞발 채찍질(paw-tuck)', tag='swing_w_f',
-                         min_value=0.1, max_value=4.0, default_value=2.0,
+    dpg.add_slider_float(label='앞다리 whip 억제  (0.1=whip심함 / 2.0=기본 / ~8=거의whip제거·포화)  ↓낮추면 앞발 채찍질(paw-tuck)', tag='swing_w_f',
+                         min_value=0.1, max_value=10.0, default_value=2.0,
                          callback=lambda s, a: sc.SetSwingWF(a))
-    dpg.add_slider_float(label='뒷다리 whip 억제  (0.1=whip 심함 / 2.0=기본 / 4.0=최강)', tag='swing_w_r',
-                         min_value=0.1, max_value=4.0, default_value=2.0,
+    dpg.add_slider_float(label='뒷다리 whip 억제  (0.1=whip심함 / 2.0=기본 / ~8=거의whip제거·포화)', tag='swing_w_r',
+                         min_value=0.1, max_value=10.0, default_value=2.0,
                          callback=lambda s, a: sc.SetSwingWR(a))
     dpg.add_separator()
     dpg.add_text('속도/높이 (Walk=보행속도 게이지·live / Body=서기 높이·live / Step=발 들림)', color=(170, 175, 195))
