@@ -35,7 +35,9 @@ static inline double tc_clip(double v,double lo,double hi){ return v<lo?lo:(v>hi
 
 struct TrotCtrl {
   QuadControl& q;
-  double V=0.30, VY=0.0, WZ=0.0;   // 명령속도(뷰어서 키보드로 변경 가능)
+  double V=0.30, VY=0.0, WZ=0.0;   // 명령속도(뷰어 키보드/GUI)
+  double step_h=0.10, raibert_k=0.8;   // ★GUI 슬라이더(live): step height·전방 reach
+  bool stand_mode=false;               // ★GUI mode!=move → 제자리 stance(서기)
   bool ALIP=true, POS_HOLD=true;
   // 상태
   bool armed=false; double t0=0, settle_until=TC_SETTLE;
@@ -53,6 +55,7 @@ struct TrotCtrl {
   void control(){
     mjModel*m=q.m; mjData*d=q.d; int nv=q.nv; double dt=m->opt.timestep;
     double t=d->time;
+    if(stand_mode){ q.wbic_stance(); armed=false; return; }   // ★서기(GUI mode!=move): 제자리 stance, move 복귀 시 재arm
     auto quat_yaw=[&](){ double*qq=&d->qpos[3]; return std::atan2(2*(qq[0]*qq[3]+qq[1]*qq[2]),1-2*(qq[2]*qq[2]+qq[3]*qq[3])); };
     if(t < settle_until){ q.wbic_stance(); return; }
     if(!armed){ armed=true; t0=t; yaw_ref=0;
@@ -81,8 +84,8 @@ struct TrotCtrl {
     Vector2d v_des(vx_w,vy_w), v_fb=vcom.head(2);
     if(ALIP){ mj_subtreeVel(m,d); Vector3d L(d->subtree_angmom[0],d->subtree_angmom[1],d->subtree_angmom[2]);
       double H=std::max(0.1,d->subtree_com[2]); v_fb+=Vector2d(L[1],-L[0])/(q.mpc.TOTAL_MASS*H); }
-    Vector2d rai; for(int k=0;k<2;k++) rai[k]=tc_clip(TC_RAIBERT*TC_ST*v_des[k]+TC_KCAP*(v_fb[k]-v_des[k]),-TC_RAICLIP,TC_RAICLIP);
-    Matrix2d Rw; Rw<<cy,-sy,sy,cy; double sh=0.10*(0.2+0.8*std::min(1.0,tg/TC_WARMUP));
+    Vector2d rai; for(int k=0;k<2;k++) rai[k]=tc_clip(raibert_k*TC_ST*v_des[k]+TC_KCAP*(v_fb[k]-v_des[k]),-TC_RAICLIP,TC_RAICLIP);
+    Matrix2d Rw; Rw<<cy,-sy,sy,cy; double sh=step_h*(0.2+0.8*std::min(1.0,tg/TC_WARMUP));
     for(int i=0;i<4;i++){ bool sch; double s_; tc_gait(i,tg,sch,s_); if(sch) continue;
       Vector2d hip_xy(d->xpos[q.hip_bid[i]*3],d->xpos[q.hip_bid[i]*3+1]);
       Vector2d pe_xy=hip_xy+Rw*hip_off[i]+rai; Vector3d p_end(pe_xy[0],pe_xy[1],gz[i]);

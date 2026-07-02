@@ -18,6 +18,14 @@ static double json_get(const std::string& s,const char* key,double def){
   if(p==std::string::npos) return def; p=s.find(':',p);
   if(p==std::string::npos) return def; return atof(s.c_str()+p+1);
 }
+// "key": "문자열" 추출
+static std::string json_str(const std::string& s,const char* key,const std::string& def){
+  std::string k=std::string("\"")+key+"\""; auto p=s.find(k);
+  if(p==std::string::npos) return def; p=s.find(':',p);
+  if(p==std::string::npos) return def; auto q1=s.find('"',p+1);
+  if(q1==std::string::npos) return def; auto q2=s.find('"',q1+1);
+  if(q2==std::string::npos) return def; return s.substr(q1+1,q2-q1-1);
+}
 
 static mjvCamera cam; static mjvOption opt; static mjvScene scn; static mjrContext con;
 static bool btnL=false, btnR=false, btnM=false; static double lastx=0, lasty=0;
@@ -75,7 +83,12 @@ int main(int argc,char**argv){
     if(CMDFILE && (frame++ %3==0)){
       std::ifstream f(CMDFILE);
       if(f){ std::stringstream ss; ss<<f.rdbuf(); std::string c=ss.str();
-        ctrl.V=json_get(c,"v",ctrl.V); ctrl.VY=json_get(c,"vy",ctrl.VY); ctrl.WZ=json_get(c,"w",ctrl.WZ); } }
+        ctrl.V=json_get(c,"v",ctrl.V); ctrl.VY=json_get(c,"vy",ctrl.VY); ctrl.WZ=json_get(c,"w",ctrl.WZ);
+        ctrl.step_h=json_get(c,"step_h",ctrl.step_h);          // step height 슬라이더
+        ctrl.raibert_k=json_get(c,"raibert_k",ctrl.raibert_k); // 전방 reach 슬라이더
+        double sw=json_get(c,"swing_w",-1); if(sw>=0) q.swing_w=sw;  // ★whip 슬라이더
+        ctrl.stand_mode = (json_str(c,"mode","move")!="move");  // 서기/앉기=제자리 stance
+        double rt=json_get(c,"rate",RATE); if(rt>0) RATE=rt; } }
     // ★벽시계 기준 실시간 페이싱: sim_time이 wall_time×RATE 따라가도록(모니터 refresh 무관)
     double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-wall0).count();
     double target=sim0+wall*RATE; int guard=0;

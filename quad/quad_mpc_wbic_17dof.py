@@ -221,6 +221,7 @@ class QuadSim:
         # 뒷발목(4DoF 여자유도) nu-order 인덱스 + 핀 가중치: posture로 REAR_ANKLE에 고정→흔들림↓·좌우대칭
         self._ankle_idx = set(int(self.legqv[i][3]) - 6 for i in range(4) if self.leg_dof[i] == 4)
         self._ankle_w = float(os.environ.get('ANKLE_W', '20'))   # 0이면 핀 안함(기존 여자유도)
+        self._swing_w = float(os.environ.get('SWING_W', '1.0'))  # ★스윙 여유도 규제(whip 억제, GUI 슬라이더 live)
         # ★허리(FB_waist yaw) 관절 — 큰 몸통 DOF라 강한 전용 홀드 필요(약한 posture론 앞몸통 못잡음)
         _wj = mujoco.mj_name2id(self.m, mujoco.mjtObj.mjOBJ_JOINT, 'FB_waist_joint')
         self._waist_idx = int(self.m.jnt_dofadr[_wj]) - 6 if _wj >= 0 else None   # nu-index(없으면 None=16DOF)
@@ -549,7 +550,7 @@ class QuadSim:
             for _aj in self._ankle_idx:
                 a_post[_aj] = _akp * _qe[_aj] - _akd * _dqj[_aj]
         _pw = float(os.environ.get('POSTURE_W', '1.0'))      # ★stance 다리 posture 가중(계단서 ↓하면 다리 신장 자유=몸 상승)
-        _sww = float(os.environ.get('SWING_W', '1.0'))       # ★스윙 여유도 posture 가중(2026-07-02: 0.1→1.0). calf/thigh whip 억제·nullspace 매끈화 → C++ max_tilt 5.2→2.0°(Python수준), Python 무영향(1.0/1.2°)
+        _sww = self._swing_w       # ★스윙 여유도 posture 가중(기본1.0, GUI whip 슬라이더 live). calf/thigh whip 억제·nullspace 매끈화 → C++ max_tilt 5.2→2.0°, Python 무영향
         for j in range(self.nu):
             if self._waist_idx is not None and j == self._waist_idx:   # ★허리: 강한 전용 홀드(요각목표=_waist_ref, 조향시 갱신)
                 w_post = self._waist_w
@@ -1286,6 +1287,7 @@ def mode_trot():
                     if S['armed']: S['armed'] = False                # 재arm=위상클럭 재앵커(현 stance서 새 게이트 리듬 재확립, 불연속 방지)
                     print('[trot] 게이트 전환 → %s (재정렬)' % _g, flush=True)
                 S['raibert_k'] = float(_c.get('raibert_k', S['raibert_k']))       # ★전방 reach 게인 슬라이더(live)
+                q._swing_w = float(_c.get('swing_w', q._swing_w))                 # ★whip 억제 슬라이더(스윙 여유도, live)
                 S['pos_hold_on'] = bool(_c.get('pos_hold', S['pos_hold_on']))     # ★정지 위치홀드 토글(격리용)
                 S['foot_lock_on'] = bool(_c.get('foot_lock', S['foot_lock_on']))  # ★터치다운 lock 토글(격리용)
                 _fl = _c.get('foot_lock_s')                          # ★lock 강도 슬라이더(엣지 오버라이드 → 게이트전환 리셋과 공존)
