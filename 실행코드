@@ -89,7 +89,7 @@ cd /home/jsh/문서/jsh/simulation/quad && HEADLESS=1 TROT_V=1.0 STEPS=6000 PXI 
 # (3) GUI + 뷰어 (16관절)
 # 터미널1: PXI teleop_gui_17dof.py
 # 터미널2: cd .../quad && RATE=2 CMDFILE=/tmp/quad_cmd.json STATE_PUB=/tmp/quad_state.json PXI quad_mpc_wbic_17dof.py --robot ours_17dof_sphere --mode trot
-#   env:  ★REAR_ANKLE(기본 -0.5, 앞뒤 대칭)·FRONT_ANKLE(따로 주면 앞발목 분리)  ANKLE_W(4발목 핀, 20)  나머지 A와 동일
+#   env:  ★REAR_ANKLE(기본 -0.3, 뒷다리 신전)·FRONT_ANKLE(기본 -0.5)  — 비대칭이 대칭보다 tilt↓(V1.0 2.0→1.0). ANKLE_W(4발목 핀, 20)  나머지 A와 동일
 #   ★게인 최적화(2026-07-02, 신기본값): W_ORI 5→20·KD_AM 8→24·W_AM 5→12 → 자세품질+외란강건.
 #       벤치(bench_17dof, 300N push): tilt_max V1.5 5.2→3.3°(-37%)·push_tilt 7.7→6.5(-16%)·z_std -22%, 전속도 falls=0.
 #       (되돌리려면 env W_ORI=5 KD_AM=8 W_AM=5). KCAP는 0.16 유지(↑=역효과).
@@ -173,8 +173,9 @@ cd /home/jsh/문서/jsh/simulation/quad/cpp && ./build/quad_cpp
 # (3) closed-loop trot (인자: mjcf, STEPS)
 # 14dof: ./build/trot_sim ../quad_real_sphere.mjcf 6000
 #   → 3s x=0.358≈Python 0.359(0.1%일치)·falls=0·~4900 steps/s(실시간 5배)
-# 17dof(튜닝 게인 env): BASE_Z0=0.5234 REAR_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 ./build/trot_sim ../quad_real_17dof_sphere.mjcf 6000
-#   → max_tilt 1.8°·falls=0·~4400 steps/s. env: TROT_V(0.3)·ALIP(1)·POS_HOLD(1)·FRONT_ANKLE·PIN_ANKLE(실험)
+# 17dof(튜닝 게인 env): BASE_Z0=0.5234 REAR_ANKLE=-0.3 FRONT_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 ./build/trot_sim ../quad_real_17dof_sphere.mjcf 6000
+#   → falls=0·~4400 steps/s. env: TROT_V(0.3)·ALIP(1)·POS_HOLD(1)·PIN_ANKLE(실험). ⚠️C++은 솔버발산으로 tilt 프로파일이 Python과 다름(안정은 동일)
+# 17dof 뷰어(GLFW, 실시간): 위 env로 ./build/trot_view ../quad_real_17dof_sphere.mjcf  (↑↓속도 ←→선회 space정지 마우스카메라)
 #   ⚠️ 17dof는 t=0 초기접촉 임펄스로 스트레스받은 QP를 eiquadprog≠quadprog가 다르게 풀어 궤적 분기(z 3cm↓, 거동등가·falls=0). 14dof는 0.1% 정합.
 # ★미포팅: 허리능동(nu=17)·detect_contact(측정힘융합)·walk게이트·점프/getup
 
