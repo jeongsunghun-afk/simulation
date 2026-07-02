@@ -549,6 +549,7 @@ class QuadSim:
             for _aj in self._ankle_idx:
                 a_post[_aj] = _akp * _qe[_aj] - _akd * _dqj[_aj]
         _pw = float(os.environ.get('POSTURE_W', '1.0'))      # ★stance 다리 posture 가중(계단서 ↓하면 다리 신장 자유=몸 상승)
+        _sww = float(os.environ.get('SWING_W', '1.0'))       # ★스윙 여유도 posture 가중(2026-07-02: 0.1→1.0). calf/thigh whip 억제·nullspace 매끈화 → C++ max_tilt 5.2→2.0°(Python수준), Python 무영향(1.0/1.2°)
         for j in range(self.nu):
             if self._waist_idx is not None and j == self._waist_idx:   # ★허리: 강한 전용 홀드(요각목표=_waist_ref, 조향시 갱신)
                 w_post = self._waist_w
@@ -556,7 +557,7 @@ class QuadSim:
             elif j in self._ankle_idx and self._ankle_w > 0:   # 발목: REAR_ANKLE에 강하게 핀(여자유도 고정→대칭)
                 w_post = self._ankle_w
             else:
-                w_post = 0.1 if (6 + j) in sw_vidx else _pw
+                w_post = _sww if (6 + j) in sw_vidx else _pw
             P[6 + j, 6 + j] += w_post; g[6 + j] -= w_post * a_post[j]
         P[:nv, :nv] += 1e-3 * np.eye(nv)
         for k in range(K):           # λ tracking (확장 접촉점별, 선-발은 분할된 clam)

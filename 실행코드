@@ -173,8 +173,9 @@ cd /home/jsh/문서/jsh/simulation/quad/cpp && ./build/quad_cpp
 # (3) closed-loop trot (인자: mjcf, STEPS)
 # 14dof: ./build/trot_sim ../quad_real_sphere.mjcf 6000
 #   → 3s x=0.358≈Python 0.359(0.1%일치)·falls=0·~4900 steps/s(실시간 5배)
-# 17dof(튜닝 게인 env): BASE_Z0=0.5234 REAR_ANKLE=-0.3 FRONT_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 ./build/trot_sim ../quad_real_17dof_sphere.mjcf 6000
-#   → falls=0·~4400 steps/s. env: TROT_V(0.3)·ALIP(1)·POS_HOLD(1)·PIN_ANKLE(실험). ⚠️C++은 솔버발산으로 tilt 프로파일이 Python과 다름(안정은 동일)
+# 17dof(튜닝 게인 env): BASE_Z0=0.5234 REAR_ANKLE=-0.3 FRONT_ANKLE=-0.5 W_ORI=20 KD_AM=24 W_AM=12 SWING_W=1.0 ./build/trot_sim ../quad_real_17dof_sphere.mjcf 6000
+#   → falls=0·max_tilt~2°·~4400 steps/s. env: TROT_V(0.3)·ALIP(1)·POS_HOLD(1)·PIN_ANKLE(실험)
+#   ★SWING_W=1.0: 스윙다리 여유도 규제↑ → C++ 뒷다리 whip 제거(eiquadprog nullspace 매끈화, max_tilt 5.2→2.0°). Python은 무영향(신기본값 1.0).
 # 17dof 뷰어(GLFW, 실시간): 위 env로 ./build/trot_view ../quad_real_17dof_sphere.mjcf  (↑↓속도 ←→선회 space정지 마우스카메라)
 #   ⚠️ 17dof는 t=0 초기접촉 임펄스로 스트레스받은 QP를 eiquadprog≠quadprog가 다르게 풀어 궤적 분기(z 3cm↓, 거동등가·falls=0). 14dof는 0.1% 정합.
 # ★미포팅: 허리능동(nu=17)·detect_contact(측정힘융합)·walk게이트·점프/getup
