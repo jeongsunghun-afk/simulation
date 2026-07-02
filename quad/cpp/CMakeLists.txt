@@ -19,12 +19,15 @@ find_library(EIQP_LIB     eiquadprog                    PATHS ${ENV_PREFIX}/lib 
 message(STATUS "MuJoCo: ${MUJOCO_LIB}")
 message(STATUS "eiquadprog: ${EIQP_LIB}")
 
-add_executable(quad_cpp src/main.cpp)
-target_include_directories(quad_cpp PRIVATE ${MUJOCO_INCLUDE} ${EIGEN_INCLUDE} ${EIQP_INCLUDE})
-# ★conda MuJoCo가 최신 libstdc++(GLIBCXX_3.4.32)로 빌드됨 → conda libstdc++ 명시 링크(시스템 g++ 11.4 것과 ABI 불일치 해결)
-target_link_libraries(quad_cpp PRIVATE ${ENV_PREFIX}/lib/libstdc++.so ${MUJOCO_LIB} ${EIQP_LIB})
-# 런타임에 env lib(mujoco·libstdc++) 찾도록 rpath 우선
-set_target_properties(quad_cpp PROPERTIES
-  BUILD_RPATH "${ENV_PREFIX}/lib"
-  INSTALL_RPATH "${ENV_PREFIX}/lib")
-target_link_options(quad_cpp PRIVATE "-Wl,-rpath-link,${ENV_PREFIX}/lib")
+foreach(TGT quad_cpp trot_sim)
+  if(TGT STREQUAL quad_cpp)
+    add_executable(quad_cpp src/main.cpp)
+  else()
+    add_executable(trot_sim src/trot_sim.cpp)
+  endif()
+  target_include_directories(${TGT} PRIVATE ${MUJOCO_INCLUDE} ${EIGEN_INCLUDE} ${EIQP_INCLUDE})
+  # ★conda MuJoCo가 최신 libstdc++(GLIBCXX_3.4.32)로 빌드됨 → conda libstdc++ 명시 링크(시스템 g++ 11.4 ABI 불일치 해결)
+  target_link_libraries(${TGT} PRIVATE ${ENV_PREFIX}/lib/libstdc++.so ${MUJOCO_LIB} ${EIQP_LIB})
+  set_target_properties(${TGT} PROPERTIES BUILD_RPATH "${ENV_PREFIX}/lib" INSTALL_RPATH "${ENV_PREFIX}/lib")
+  target_link_options(${TGT} PRIVATE "-Wl,-rpath-link,${ENV_PREFIX}/lib")
+endforeach()
