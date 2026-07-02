@@ -2,6 +2,7 @@
 #include <mujoco/mujoco.h>
 #include <eiquadprog/eiquadprog-fast.hpp>
 #include <Eigen/Dense>
+#include "mpc.hpp"
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -220,6 +221,33 @@ int main(int argc,char**argv){
       for(int i=0;i<Ntr;i++){ wbic_track(true); tqs+=tr_qp_ms; }
       double tfm=std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now()-tt0).count()/Ntr;
       std::printf("[속도] wbic_track 전체=%.3fms(%.0fHz) QP=%.3fms\n",tfm,1000/tfm,tqs/Ntr);
+    }
+  }
+  // ══════════ Phase3c: MPC(mpc_qp_plan, SRBD) 검증 ══════════
+  {
+    std::ifstream mf("/tmp/mpc_ref.txt");
+    if(!mf){ std::printf("[검증4] /tmp/mpc_ref.txt 없음 — dump_mpc.py 먼저 실행\n"); }
+    else {
+      std::map<std::string,std::vector<double>> M2; std::vector<std::array<int,4>> cs; std::string ln;
+      while(std::getline(mf,ln)){ std::istringstream ss(ln); std::string k; ss>>k;
+        if(k=="cs"){ int idx; ss>>idx; std::array<int,4> a; for(int i=0;i<4;i++) ss>>a[i]; cs.push_back(a); }
+        else { std::vector<double> v; double x; while(ss>>x) v.push_back(x); M2[k]=v; } }
+      MpcCfg c; c.N=(int)M2["N_MPC"][0]; c.DT=M2["DT_MPC"][0]; c.TOTAL_MASS=M2["TOTAL_MASS"][0];
+      c.G_ACC=M2["G_ACC"][0]; c.MU=M2["MU_FRICTION"][0]; c.LAMZ_MIN=M2["LAMZ"][0]; c.LAMZ_MAX=M2["LAMZ"][1];
+      c.I_BODY=Map<Matrix<double,3,3,RowMajor>>(M2["BODY_INERTIA"].data());
+      c.Qdiag=Map<VectorXd>(M2["MPC_Q"].data(),13); c.Rdiag=Vector3d(M2["MPC_R"][0],M2["MPC_R"][1],M2["MPC_R"][2]);
+      VectorXd x0=Map<VectorXd>(M2["x0"].data(),13), x_ref=Map<VectorXd>(M2["x_ref"].data(),13);
+      std::array<Vector3d,4> fp0; for(int i=0;i<4;i++) fp0[i]=Vector3d(M2["fp0"][i*3],M2["fp0"][i*3+1],M2["fp0"][i*3+2]);
+      std::vector<std::array<Vector3d,4>> fp(c.N,fp0);
+      Matrix<double,4,3> lam=mpc_qp_plan(c,x0,cs,fp,x_ref);
+      double em=0; for(int i=0;i<4;i++)for(int j=0;j<3;j++) em=std::max(em,std::abs(lam(i,j)-M2["lam_des"][i*3+j]));
+      std::printf("[검증4] MPC lam_des 최대오차=%.2e N (N=%d,vars=%d) → %s\n",
+                  em,c.N,c.N*12, em<1e-2?"✅ 정합":"❌ 불일치");
+      // 속도
+      auto t0=std::chrono::high_resolution_clock::now(); int Nm=200;
+      for(int i=0;i<Nm;i++) mpc_qp_plan(c,x0,cs,fp,x_ref);
+      double ms=std::chrono::duration<double,std::milli>(std::chrono::high_resolution_clock::now()-t0).count()/Nm;
+      std::printf("[속도] MPC 전체=%.2fms(%.0fHz) — 50Hz 요구 대비 %.0f배 여유\n",ms,1000/ms,(1000/ms)/50);
     }
   }
   mj_deleteData(d); mj_deleteModel(m); return 0;
