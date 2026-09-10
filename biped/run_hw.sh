@@ -19,8 +19,8 @@ set -u
 CMD="${QUAD_CMD:-/tmp/biped_cmd.json}"
 STATE="${QUAD_STATE:-/tmp/biped_state.json}"
 
-usage(){ echo "사용: $0 {up|down|gui|off|hold|stand|home|float|jog|push|walk|log [file]|watch [N]|status|enc}"; exit 1; }
-[ $# -ge 1 ] || usage
+usage(){ echo "사용: $0 [무인자=런처: GUI+3D뷰어+값모니터] | {up|down|gui|off|hold|stand|home|float|jog|push|walk|log [file]|watch [N]|status|enc}"
+         echo "  런처 옵션: NOVIEW=1(3D뷰어 끔) · MON=1|graph(그래프)·text(표·SSH)·0(끔) · MON_ARGS=..."; exit 1; }
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 set_mode(){
@@ -34,7 +34,43 @@ set_mode(){
   echo "→ mode=$m  중력지지=${pct}%  split=${split}(→HL)  [연속발행 중]"
 }
 
-case "$1" in
+case "${1:-launch}" in
+  launch)
+    # ★무인자 = 원래 실기 런처 복원 (2026-09-10). GUI(입력) + 3D 뷰어(biped_monitor) + 값 모니터.
+    #   d47e017 에서 이걸 모드전환 헬퍼로 덮어썼던 걸 되살린다(서브커맨드는 그대로 유지).
+    #   ⚠제어기(run_deploy_hw.sh)는 **별도**로 띄운다 — 이 런처는 표시/입력만(모터 writer 아님).
+    #   옵션: NOVIEW=1 뷰어끔 · MON=1|graph 그래프(기본)·text 표(SSH)·0 끔 · MON_ARGS 옵션.
+    set +u; source "$HERE/lib_display.sh"; setup_display; _drc=$?; set -u   # lib_display 는 set -e 용이라 set -u 잠시 해제
+    [ "$_drc" = 0 ] || { echo "✗ 디스플레이 설정 실패 — lib_display.sh 확인 (ls /run/user/$(id -u)/.mutter-Xwaylandauth.*)"; exit 1; }
+    PY_GUI=""                                    # dearpygui python (venv 우선)
+    for p in "${PY:-}" "$HOME/.venv/bin/python" "$HOME/.venvs/gui/bin/python" python3; do
+      [ -n "$p" ] || continue
+      { command -v "$p" >/dev/null 2>&1 || [ -x "$p" ]; } || continue
+      "$p" -c "import dearpygui" 2>/dev/null && { PY_GUI="$p"; break; }
+    done
+    [ -z "$PY_GUI" ] && { echo "✗ dearpygui python 없음 (설치: python3 -m venv --system-site-packages ~/.venv && ~/.venv/bin/pip install dearpygui)"; exit 1; }
+    MJ="${BIPED_MJCF:-$HERE/biped_from_quad.mjcf}"; CFG="${BIPED_CFG:-$HERE/emb/config/biped_emb.yaml}"
+    pgrep -f "build/biped_deploy|biped_emb.py" >/dev/null || echo "⚠ 제어기 안 보임 — GUI 조작해도 로봇 안 움직임. 별도 터미널에서 run_deploy_hw.sh 먼저."
+    for _p in teleop_gui_biped biped_monitor monitor_state.py monitor_plot.py; do pkill -f "$_p" 2>/dev/null; done   # 중복 정리
+    sleep 0.5
+    [ -f "$CMD" ] || echo '{"mode":"off","seq":0,"v":0,"vy":0,"w":0,"body_h":0.42}' > "$CMD"   # 무장 방지
+    VIEW=1; [ "${NOVIEW:-0}" = "1" ] && VIEW=0
+    [ -x "$HERE/cpp/build/biped_monitor" ] || { echo "⚠ cpp/build/biped_monitor 없음 → 3D 뷰어 생략"; VIEW=0; }
+    if [ "$VIEW" = "1" ]; then
+      setsid bash -c "cd '$HERE/cpp'; STATE='$STATE' CONFIG='$CFG' DISPLAY='$DISPLAY' XAUTHORITY='$XAUTHORITY' LD_LIBRARY_PATH='${LD_LIBRARY_PATH:-$HOME/mujoco/lib}' ./build/biped_monitor '$MJ' >/tmp/biped_monitor.log 2>&1" </dev/null &
+      sleep 2; pgrep -f biped_monitor >/dev/null && echo "✅ 3D 뷰어 RUNNING(표시 전용)" || { echo "❌ 3D 뷰어 DEAD"; tail -4 /tmp/biped_monitor.log; }
+    fi
+    setsid bash -c "cd '$HERE'; QUAD_CMD='$CMD' QUAD_STATE='$STATE' DISPLAY='$DISPLAY' XAUTHORITY='$XAUTHORITY' '$PY_GUI' teleop_gui_biped.py >/tmp/teleop_gui_biped.log 2>&1" </dev/null &
+    sleep 2; pgrep -f teleop_gui_biped >/dev/null && echo "✅ GUI RUNNING" || { echo "❌ GUI DEAD"; tail -4 /tmp/teleop_gui_biped.log; }
+    case "${MON:-1}" in
+      1|graph) setsid bash -c "cd '$HERE'; QUAD_STATE='$STATE' DISPLAY='$DISPLAY' XAUTHORITY='$XAUTHORITY' '$PY_GUI' monitor_plot.py ${MON_ARGS:-} >/tmp/biped_monitor_plot.log 2>&1" </dev/null &
+               sleep 2; pgrep -f monitor_plot.py >/dev/null && echo "✅ 값모니터(그래프) RUNNING" || { echo "❌ 값모니터 DEAD"; tail -4 /tmp/biped_monitor_plot.log; }
+               echo "종료: $0 down" ;;
+      text)    echo " 값모니터(표) — Ctrl-C 로 모니터만 종료(뷰어·GUI 는 계속)"; sleep 1
+               cd "$HERE" && QUAD_STATE="$STATE" exec python3 monitor_state.py ${MON_ARGS:-} ;;
+      *)       echo "종료: $0 down" ;;
+    esac
+    ;;
   watch)
     python3 - "$STATE" "${2:-30}" <<'PY' 2>/dev/null
 import json,sys,time
@@ -159,10 +195,10 @@ PY
   down)
     pkill -f "run_hw.sh __pub" 2>/dev/null
     printf '{"mode":"off","jog_deg":[0,0,0,0,0,0,0,0],"v":0,"vy":0,"w":0,"body_h":0.42}\n' > "$CMD" 2>/dev/null; sleep 0.3
-    pkill -f "$HERE/teleop_gui_biped.py" 2>/dev/null
+    for _p in teleop_gui_biped biped_monitor monitor_plot.py monitor_state.py; do pkill -f "$_p" 2>/dev/null; done
     pkill -f build/biped_deploy 2>/dev/null
     ( cd "$HERE/emb" && diag/emb_ctl.sh stop )
-    echo "→ 전체 종료(GUI·deploy·EMB)" ;;
+    echo "→ 전체 종료(GUI·3D뷰어·값모니터·deploy·EMB)" ;;
   gui)
     # teleop GUI(dearpygui) — 모드버튼·중력지지 슬라이더·LED. cmd 만 쓴다(모터 writer 아님).
     #   ⚠ dearpygui + **DISPLAY** 필요. SSH(무화면)에선 못 뜬다 → 그땐 CLI 를 쓸 것.
