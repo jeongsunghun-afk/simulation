@@ -130,6 +130,11 @@
     </table></div>
     <p class="dim"><code>ocs2_perceptive</code>(ROS-free ESDF)가 워크스페이스에 이미 존재 → grid_map/CGAL 우회. CGAL은 ConvexRegionSelector 2함수에만 쓰였고, 그마저 <code>LocalConvexRegion</code>(축정렬 박스·순수 Eigen)으로 대체.</p>
   </div>
+    <div class="note" style="margin-top:12px">
+      <b>★TAMOLS와의 관계 (2026-09 정리)</b> — D1 MPC = <b>TAMOLS가 하는 것 + 힘·예측을 통합</b>. TAMOLS는 힘(f)을 소거하고 <b>GIAC</b>로 실현가능성만 보증하지만, D1은 <b>접촉력 f를 직접 최적화</b>(마찰콘)하고 <b>centroidal 동역학</b>이라 <b>예측 base가 내장</b>. 그래서 pure-online TAMOLS(RSL)를 죽인 "예측 base 부재"가 D1엔 구조적으로 없음.
+      <br><b>발판</b>: TAMOLS와 동일하게 SDF walkable 최적화(FootPlacement), 단 힘·base와 <b>하나의 NMPC로 co-opt</b>(injection의 짜깁기 아님).
+      <br><b>WBC 성격</b>: weighted TSID 단일 QP(A 기본과 같은 계열). x=[q<sup style="font-size:.72em;vertical-align:.35em">¨</sup>,f,τ]로 τ까지 결정변수(A는 τ 사후계산). swing=soft(게인 350, A 2400보다 낮음=저속+soft+각운동량task 없어 base 반작용 못 받쳐서).
+    </div>
 </section>
 
 <section id="coord">

@@ -177,6 +177,11 @@
       <li><b>발판</b>: foot_y 대칭 box · gap 회피(앞발 갭너머·뒷발 갭앞)</li>
     </ul>
     <p class="dim"><b>솔버</b>: solve_fast(SQP-RTI·GN·QuadProg++·elastic). GIAC 행=블록-sparse FD, 나머지 해석. <b>출력</b>: 계획 base pose 궤적 + 발판 → A의 ③′④′로 주입.</p>
+    <div class="note" style="margin-top:12px">
+      <b>★GIAC 유도 &amp; 성립조건 (2026-09 정리)</b> — GIAC = <b>동역학+마찰콘에서 힘 f를 소거</b>한 것. 볼록성 덕에 개별 발 마찰콘의 합력 조건이 CoM 가속으로 접힘: <b>17a</b> <code>(μ·aG_z)²≥aG_x²+aG_y²</code> = 마찰콘의 CoM 버전, <b>17b</b> <code>m·det(pij,pB−pi,aG)−pij·L<sup style="font-size:.72em;vertical-align:.35em">˙</sup>≥0</code> = 각운동량의 지지영역 버전. 힘을 안 풀어 QP가 가벼움(&lt;20ms).
+      <br><b>대가 = 예측 base 부재</b>: base 스플라인은 운동학 계획이라 "지금 넘어짐"을 못 봄 → <b>pure-online RSL 추종은 정지조차 못함</b>. 성립하려면 <b>준정적(a≈0) + walk(3점지지=GIAC 유효)</b>. trot(2점)은 느려도 선분지지라 대각축 퇴화로 실패.
+      <br><b>τ는 TAMOLS가 안 냄</b>: 힘도 τ도 없음. 추종기(WBC)가 계획을 참조로 [q<sup style="font-size:.72em;vertical-align:.35em">¨</sup>,f] 재계산 → <code>τ=Mq<sup style="font-size:.72em;vertical-align:.35em">¨</sup>+h−Jᵀf</code>. 강건도 순서: RSL(순수추종) &lt; injection(A 예측층 빌림·flat견고·gap실패·마진얇음) &lt; <b>D1(통합 NMPC·예측 내장)</b>이 종착점.
+    </div>
   </div>
 </section>
 

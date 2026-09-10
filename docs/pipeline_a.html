@@ -182,6 +182,12 @@
       <li><b>관절 위치 한계</b>: 가속 상·하한 (look-ahead 0.05 s)</li>
     </ul>
     <div class="eq"><span class="lbl">출력 τ = </span>M<sub>6:</sub> q<sup>¨</sup> + h<sub>6:</sub> − Σ J<sub>c,6:</sub><sup>T</sup> λ<sub>c</sub>&nbsp;&nbsp;<span class="lbl">→ clip(τ_peak) → d->ctrl[17]</span></div>
+    <div class="note" style="margin-top:12px">
+      <b>★구조 성격 (2026-09 정리)</b> — 기본 <code>wbic_track</code>은 <b>weighted TSID 단일 QP</b>: 위 8개 비용을 <b>한 목적함수로 동시 최소화</b>(계층 없음, 우선순위=가중치 크기). swing도 soft 비용(게인 2400은 그 안의 PD 게인). τ는 결정변수 아님 → 해에서 사후 복원.
+      <br><b>HQP=1 옵션</b> = ETH Bellicoso 2단 lexicographic(L1 swing만 풀어 v1 확보 → L2를 <code>A_sw·z=v1</code> 등식 하에 풂 = swing이 base를 절대 침범 못함). 고속 발끌림 실험용, 기본 OFF. 순수 MIT식 널스페이스 사영은 미구현(마찰콘·토크한계=부등식이라 QP 필요→weighted가 단순).
+      <br><b>마찰 표기</b> = "마찰콘"은 접촉점당 1개, 위 "4Kc"는 그 콘을 <b>4면 정사각뿔</b>(|λx|,|λy|≤μλz)로 선형화한 부등식 수. fz≥1은 별도 박스.
+      <br><b>고속 2400이 되는 이유</b> = 각운동량 task(W_AM)가 swing 다리 급가속의 base 반작용을 접촉력 모멘트(Σr×λ)로 상쇄 + HQP 승격 옵션. 게인 자체가 안전한 게 아니라 반작용 상쇄 인프라를 함께 가진 것.
+    </div>
   </div>
 </section>
 
