@@ -1,0 +1,239 @@
+<title>02_Leg 실기 브링업 순서 — 모터에서 모델까지</title>
+<style>
+:root{
+  --bg:#14181d; --panel:#1b2128; --panel2:#20272f; --head:#232b34;
+  --ink:#e9edf2; --muted:#98a3af; --line:#2c3540;
+  --acc:#f2913a; --acc-soft:#3a2a17;
+  --ok:#5bd08a; --ok-soft:#16351f; --warn:#ff7069; --warn-soft:#3a1c1b;
+  --mono:'JetBrains Mono','D2Coding','Noto Sans Mono','DejaVu Sans Mono',ui-monospace,monospace;
+  --sans:'Pretendard','Noto Sans KR','Apple SD Gothic Neo',system-ui,sans-serif;
+}
+@media (prefers-color-scheme:light){:root{
+  --bg:#f5f2ec; --panel:#ffffff; --panel2:#faf7f1; --head:#efe9df;
+  --ink:#1c222a; --muted:#5e6874; --line:#e4ddd1;
+  --acc:#c76610; --acc-soft:#faecdc;
+  --ok:#1a8f4c; --ok-soft:#e3f5e9; --warn:#c0392b; --warn-soft:#fbe7e4;
+}}
+:root[data-theme="light"]{
+  --bg:#f5f2ec; --panel:#ffffff; --panel2:#faf7f1; --head:#efe9df;
+  --ink:#1c222a; --muted:#5e6874; --line:#e4ddd1;
+  --acc:#c76610; --acc-soft:#faecdc;
+  --ok:#1a8f4c; --ok-soft:#e3f5e9; --warn:#c0392b; --warn-soft:#fbe7e4;
+}
+:root[data-theme="dark"]{
+  --bg:#14181d; --panel:#1b2128; --panel2:#20272f; --head:#232b34;
+  --ink:#e9edf2; --muted:#98a3af; --line:#2c3540;
+  --acc:#f2913a; --acc-soft:#3a2a17;
+  --ok:#5bd08a; --ok-soft:#16351f; --warn:#ff7069; --warn-soft:#3a1c1b;
+}
+*{box-sizing:border-box}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);line-height:1.55;
+  margin:0;padding:34px 20px 90px;-webkit-font-smoothing:antialiased}
+main{max-width:900px;margin:0 auto}
+.mono{font-family:var(--mono)}
+.eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.18em;color:var(--acc);
+  font-weight:700;text-transform:uppercase;margin-bottom:10px}
+h1{font-size:clamp(1.5rem,3.6vw,2.05rem);font-weight:800;letter-spacing:-.02em;
+  line-height:1.16;margin:0 0 12px;text-wrap:balance}
+.thesis{color:var(--muted);font-size:.98rem;max-width:62ch;line-height:1.6}
+.thesis b{color:var(--ink)}
+.rule{height:2px;background:linear-gradient(90deg,var(--acc),transparent);margin:22px 0 6px;border-radius:2px}
+
+/* flow spine */
+.spine{display:flex;gap:0;align-items:stretch;overflow-x:auto;padding:4px 2px 12px;margin:22px 0 6px}
+.stage{flex:0 0 auto;background:var(--panel);border:1px solid var(--line);border-radius:11px;
+  padding:11px 14px;min-width:120px;position:relative}
+.stage + .stage{margin-left:26px}
+.stage + .stage::before{content:"▸";position:absolute;left:-20px;top:50%;transform:translateY(-50%);
+  color:var(--acc);font-size:.95rem}
+.stage .k{font-family:var(--mono);font-size:.66rem;letter-spacing:.1em;color:var(--acc);font-weight:700}
+.stage .v{font-size:.86rem;font-weight:700;margin-top:3px}
+.stage .s{font-size:.72rem;color:var(--muted);margin-top:2px}
+.spine-note{font-size:.8rem;color:var(--muted);margin:2px 0 0}
+.spine-note b{color:var(--acc)}
+
+/* callouts */
+.calls{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin:22px 0}
+.call{border:1px solid var(--line);border-left:3px solid var(--acc);border-radius:10px;
+  background:var(--panel);padding:13px 15px}
+.call.ok{border-left-color:var(--ok)}
+.call.warn{border-left-color:var(--warn)}
+.call h4{margin:0 0 5px;font-size:.9rem;color:var(--acc);display:flex;align-items:center;gap:7px}
+.call.ok h4{color:var(--ok)} .call.warn h4{color:var(--warn)}
+.call p{margin:0;font-size:.82rem;color:var(--muted);line-height:1.5}
+.call p b{color:var(--ink)}
+.call code{font-family:var(--mono);font-size:.86em;background:var(--head);padding:1px 5px;border-radius:4px;color:var(--ink)}
+
+/* phases */
+.phase{margin:26px 0 0}
+.phase-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;
+  padding-bottom:9px;border-bottom:1px solid var(--line);margin-bottom:4px}
+.phase-tag{font-family:var(--mono);font-size:.72rem;font-weight:700;letter-spacing:.08em;
+  color:var(--bg);background:var(--acc);padding:3px 9px;border-radius:6px}
+.phase-head h2{font-size:1.12rem;margin:0;font-weight:800;letter-spacing:-.01em}
+.phase-lvl{font-family:var(--mono);font-size:.72rem;color:var(--muted);margin-left:auto}
+
+.steps{list-style:none;margin:0;padding:0}
+.step{display:grid;grid-template-columns:34px 1fr;gap:12px;padding:12px 4px;
+  border-bottom:1px solid var(--line)}
+.step:last-child{border-bottom:none}
+.step .id{font-family:var(--mono);font-weight:800;font-size:1rem;color:var(--acc);
+  text-align:center;padding-top:1px}
+.step .act{font-weight:700;font-size:.96rem}
+.step .act .tag{font-family:var(--mono);font-size:.66rem;font-weight:700;letter-spacing:.05em;
+  color:var(--warn);background:var(--warn-soft);padding:1px 7px;border-radius:5px;margin-left:8px;
+  vertical-align:middle}
+.step .meta{font-size:.85rem;color:var(--muted);margin-top:3px;line-height:1.5}
+.step .meta b{color:var(--ink);font-weight:600}
+.step .pass{font-size:.8rem;color:var(--ok);margin-top:4px;font-weight:600}
+.step .warnl{font-size:.8rem;color:var(--warn);margin-top:4px}
+.step code,.meta code{font-family:var(--mono);font-size:.86em;background:var(--head);
+  padding:1px 5px;border-radius:4px;color:var(--ink)}
+.sub{list-style:none;margin:7px 0 0;padding:9px 12px;background:var(--panel2);
+  border:1px solid var(--line);border-radius:9px}
+.sub li{font-size:.83rem;padding:3px 0;color:var(--muted)}
+.sub li b{color:var(--ink)}
+.sub .first{color:var(--warn);font-weight:700}
+.sub-sum{font-family:var(--mono);font-size:.76rem;color:var(--acc);margin-top:6px;
+  padding-top:7px;border-top:1px dashed var(--line)}
+
+/* comparison */
+.cmp{margin:26px 0 0;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.cmp-row{display:grid;grid-template-columns:96px 1fr;gap:0;border-bottom:1px solid var(--line)}
+.cmp-row:last-child{border-bottom:none}
+.cmp-lab{background:var(--head);padding:12px 14px;font-family:var(--mono);font-size:.74rem;
+  font-weight:700;letter-spacing:.05em;display:flex;align-items:center}
+.cmp-old .cmp-lab{color:var(--muted)}
+.cmp-new .cmp-lab{color:var(--acc)}
+.cmp-val{padding:12px 14px;font-family:var(--mono);font-size:.82rem;line-height:1.7;overflow-x:auto}
+.cmp-val .hl{color:var(--acc);font-weight:700;background:var(--acc-soft);padding:1px 5px;border-radius:4px}
+.cmp-val .mut{color:var(--muted)}
+
+.foot{margin-top:34px;padding-top:14px;border-top:1px solid var(--line);
+  font-size:.78rem;color:var(--muted);line-height:1.6}
+.foot b{color:var(--ink)}
+</style>
+<main>
+  <div class="eyebrow">Sim2Real Bring-up · 하드웨어 검증 순서</div>
+  <h1>02_Leg 실기 브링업 — 모터에서 모델까지</h1>
+  <p class="thesis"><b>아래층부터 격리 검증하고 쌓는다.</b> 오차는 위로 누적되므로 — 모터 부호 하나가 틀리면
+  다리·모델·보행 검증이 전부 해석 불가가 된다. 각 층을 못 박은 뒤에야 다음 층으로 올라간다.</p>
+
+  <div class="rule"></div>
+  <div class="spine">
+    <div class="stage"><div class="k">P0</div><div class="v">안전·센서</div><div class="s">리밋·부호·지연</div></div>
+    <div class="stage"><div class="k">P1</div><div class="v">액추에이터</div><div class="s">위치·토크·ID</div></div>
+    <div class="stage"><div class="k">P2</div><div class="v">단일 다리</div><div class="s">J·G·M,C → F</div></div>
+    <div class="stage"><div class="k">P3</div><div class="v">전체 로봇</div><div class="s">추정·서기·보행</div></div>
+  </div>
+  <p class="spine-note">흐름은 단방향 — <b>각 단계가 다음 단계의 전제</b>. 되돌아가 디버그하지 않도록 층마다 합격 기준으로 못 박는다.</p>
+
+  <div class="calls">
+    <div class="call warn"><h4>⚠ 백래쉬를 가장 먼저</h4><p>영점교차 히스테리시스가 <b>위치·토크·모델</b>을 모두 오염시킨다. 액추에이터 ID의 첫 항목으로 검출.</p></div>
+    <div class="call"><h4>◆ 모델 먼저, F는 나중</h4><p>F는 <code>τ = Mq̈ + h − JᵀF</code>로 <b>모델을 통해 실현</b>된다. 모델(J·G·M,C)이 틀리면 F를 디버그할 수 없다 — 순서를 뒤집어야.</p></div>
+    <div class="call ok"><h4>✔ F센서는 불요</h4><p>F는 WBC QP의 <b>결정변수(계산값)</b>이지 측정값이 아니다. 포스플레이트는 <b>검증에만 임시</b> 사용, 제어엔 없음.</p></div>
+  </div>
+
+  <!-- PHASE 0 -->
+  <section class="phase">
+    <div class="phase-head"><span class="phase-tag">PHASE 0</span><h2>전원 인가 전</h2><span class="phase-lvl">준비 · 빠지면 위험</span></div>
+    <ul class="steps">
+      <li class="step"><span class="id">◦</span><div>
+        <div class="act">안전 인터록</div>
+        <div class="meta">토크·속도·위치 <b>리밋</b> + <b>e-stop</b> 배선 — 어떤 통전 시험보다 먼저.</div></div></li>
+      <li class="step"><span class="id">◦</span><div>
+        <div class="act">센서 sanity</div>
+        <div class="meta">엔코더 <b>방향·영점·단위(rad)</b> · 전류→토크상수 <code>k_t</code> · IMU 부호. 부호 오류는 상위 전부를 무너뜨린다.</div></div></li>
+      <li class="step"><span class="id">◦</span><div>
+        <div class="act">통신 지연 측정</div>
+        <div class="meta">지령→반영 <b>round-trip</b> 실측. <span class="mono">우리 PACE 식별 = 8.39 ms</span>.</div></div></li>
+    </ul>
+  </section>
+
+  <!-- PHASE 1 -->
+  <section class="phase">
+    <div class="phase-head"><span class="phase-tag">PHASE 1</span><h2>단일 액추에이터 벤치</h2><span class="phase-lvl">모터 격리</span></div>
+    <ul class="steps">
+      <li class="step"><span class="id">①</span><div>
+        <div class="act">위치제어 (PD)</div>
+        <div class="meta">스텝응답·대역폭·정상오차·부호.</div>
+        <div class="pass">합격 = 지령 위치를 추종, 정상오차 소, 발진 없음 (저수준 루프·엔코더 검증)</div></div></li>
+      <li class="step"><span class="id">②</span><div>
+        <div class="act">토크제어</div>
+        <div class="meta">지령 <code>τ</code> vs 실측(전류)·선형성·데드존.</div>
+        <div class="pass">합격 = τ–실측 선형 일치, <code>k_t</code> 확정 (전류루프 검증)</div></div></li>
+      <li class="step"><span class="id">③</span><div>
+        <div class="act">액추에이터 파라미터 ID <span class="tag">①② 루프로 가진</span></div>
+        <div class="meta">아래 순서로 식별 — 백래쉬 먼저.</div>
+        <ul class="sub">
+          <li class="first">▸ 백래쉬 (★가장 먼저): 반전/영점교차 히스테리시스</li>
+          <li>▸ <b>τ_c</b>(쿨롱)·<b>b</b>(점성): 등속 스윕 → τ–v 절편·기울기</li>
+          <li>▸ <b>Rotor_I</b>(반사관성): 무부하 가속 → τ–a</li>
+          <li>▸ 지연·대역: 스텝/처프</li>
+          <li>▸ 기어비: 지령각 vs 실제각 비</li>
+        </ul>
+        <div class="sub-sum">= 우리 PACE CMA-ES 적합 · Rotor_I 7.327e-4 · per-axis b · τ_c · 지연 8.39 ms</div></div></li>
+    </ul>
+  </section>
+
+  <!-- PHASE 2 -->
+  <section class="phase">
+    <div class="phase-head"><span class="phase-tag">PHASE 2</span><h2>단일 다리 조립</h2><span class="phase-lvl">★ 모델 → F 순서</span></div>
+    <ul class="steps">
+      <li class="step"><span class="id">④</span><div>
+        <div class="act">J · 기구학</div>
+        <div class="meta">관절각 → 발위치(외부측정/모캡) <b>FK 일치</b>·부호·스케일·관절리밋 + <b>calf-foot 커플</b>(평행사변형, <code>couple_clamp</code>).</div>
+        <div class="pass">합격 = FK 오차 소, 커플 제약 실측 확인</div></div></li>
+      <li class="step"><span class="id">⑤</span><div>
+        <div class="act">G · 중력</div>
+        <div class="meta">각 자세에서 <code>τ = G(q)</code>만 인가 → <b>떠 있나(float)</b>.</div>
+        <div class="pass">합격 = 최소 드리프트로 홀드 (링크 질량·CoM 검증 — 힘 안 재고)</div></div></li>
+      <li class="step"><span class="id">⑥</span><div>
+        <div class="act">M, C · 역동역학</div>
+        <div class="meta"><code>τ_ff = Mq̈ + Cq̇ + G</code> 궤적추종(피드백 낮게). C는 빠르게 흔들 때 드러남.</div>
+        <div class="pass">합격 = 낮은 피드백으로도 추종 (강체모델 검증)</div></div></li>
+      <li class="step"><span class="id">⑦</span><div>
+        <div class="act">F · 접촉력 (종합시험)</div>
+        <div class="meta">발을 <b>저울/포스플레이트</b>에 → 지령 <code>λ</code> vs 실측 힘 일치? + 마찰(예측 μ에서 슬립?).</div>
+        <div class="pass">합격 = 지령 F 실현 + 예측 μ 부합 → 모델 통합 검증 완료</div>
+        <div class="warnl">◆ 포스플레이트는 검증용 임시만 — 제어엔 F센서 불요(QP가 계산)</div></div></li>
+    </ul>
+  </section>
+
+  <!-- PHASE 3 -->
+  <section class="phase">
+    <div class="phase-head"><span class="phase-tag">PHASE 3</span><h2>전체 로봇</h2><span class="phase-lvl">통합·폐루프</span></div>
+    <ul class="steps">
+      <li class="step"><span class="id">⑧</span><div>
+        <div class="act">상태추정</div>
+        <div class="meta">접촉 KF·base 속도 vs 모캡. proprio(엔코더·IMU·전류)만으로 추정 — F센서 없이.</div></div></li>
+      <li class="step"><span class="id">⑨</span><div>
+        <div class="act">서기 / 균형</div>
+        <div class="meta">WBC stance 홀드. 자세 유지·발바닥 접지.</div></div></li>
+      <li class="step"><span class="id">⑩</span><div>
+        <div class="act">보행 / 외란</div>
+        <div class="meta">게이트(walk·trot·run)·푸시 복구. 운용속도는 여유 두고(관절부하).</div></div></li>
+    </ul>
+  </section>
+
+  <!-- comparison -->
+  <div class="cmp">
+    <div class="cmp-row cmp-old">
+      <div class="cmp-lab">제안 순서</div>
+      <div class="cmp-val"><span class="mut">위치 → 토크 → (Rotor_I·τ_c·b·백래쉬) → 다리조립 → </span><span class="mut">F → 모델(M,C,G,J)</span></div>
+    </div>
+    <div class="cmp-row cmp-new">
+      <div class="cmp-lab">정정판</div>
+      <div class="cmp-val"><span class="hl">P0 안전·센서·지연</span> → 위치 → 토크 → ID(<span class="hl">백래쉬 먼저</span>·τ_c·b·Rotor_I·지연·기어)
+→ 다리조립 → <span class="hl">J·G·M,C(모델) → F(종합)</span> → 추정 → 서기 → 보행</div>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>정정 요약</b> — ① 앞에 <b>Phase 0</b>(안전 리밋·센서 부호/영점·통신지연 8.39ms) 추가.
+    ② <b>F ↔ 모델 순서 뒤집기</b>: F는 <code>τ=Mq̈+h−JᵀF</code>로 모델을 통해 실현되니, 모델 조각(J·G·M,C)을 먼저 못 박고 F를 종합시험으로.
+    ③ <b>백래쉬</b>는 액추에이터 ID 중 가장 먼저(하위 전부 오염원). ④ ID 전체 = 우리 <b>PACE</b> CMA-ES 절차.
+    ⑤ 다리 레벨에 <b>calf-foot 커플</b> 확인. F 검증엔 포스플레이트를 임시로 쓰되 <b>제어엔 F센서 불요</b>(F는 WBC QP 결정변수).
+    <br><span style="opacity:.7">참조: sim2real 체크리스트(A 액추에이터·B 게인·C 미모델·D 접촉·E 운용속도) · PACE 액추에이터 식별 · 02_Leg 모터 스펙(calf-foot 기구 커플).</span>
+  </div>
+</main>

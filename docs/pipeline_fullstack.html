@@ -396,13 +396,13 @@
     <text x="54" y="27" font-size="7.5" text-anchor="middle" fill="#5A6577">로봇 상태 · 속도 명령</text>
     <line x1="98" y1="19" x2="128" y2="19" stroke="#E8551E" stroke-width="1.1" stroke-dasharray="4 3" marker-end="url(#ao)"/>
     <rect x="128" y="4" width="150" height="30" rx="4" fill="#FDEAE0" stroke="#E8551E" stroke-width="1.3" stroke-dasharray="4 3"/>
-    <text x="203" y="17" font-size="9" text-anchor="middle" font-weight="bold" fill="#E8551E">발판·타이밍 생성기 = DTC 채널 (정밀 국면 ON)</text>
+    <text x="203" y="17" font-size="9" text-anchor="middle" font-weight="bold" fill="#E8551E">명시적 발판생성 = DTC 채널 (험지·정밀 ON)</text>
     <text x="203" y="28" font-size="8" text-anchor="middle" fill="#5A6577">out: p_tgt·cs·base참조 (관절·힘은 병목 원칙상 차단)</text>
     <!-- 정책 -->
     <rect x="286" y="44" width="128" height="118" rx="5" fill="#fff" stroke="#1B2431" stroke-width="1.8"/>
     <text x="350" y="62" font-size="10.5" text-anchor="middle" font-weight="bold">정책 π (100 Hz)</text>
     <text x="350" y="78" font-size="8" text-anchor="middle" fill="#5A6577">in: proprio(69)+heightmap</text>
-    <text x="350" y="89" font-size="8" text-anchor="middle" fill="#5A6577">+<tspan font-family="'DejaVu Sans',sans-serif">v<sup style="font-size:.72em;vertical-align:.35em">ˆ</sup></tspan>+[p_tgt·cs]</text>
+    <text x="350" y="89" font-size="8" text-anchor="middle" fill="#5A6577">+<tspan font-family="'DejaVu Sans',sans-serif">v<sup style="font-size:.72em;vertical-align:.35em">ˆ</sup></tspan>+[p_tgt·base_X]</text>
     <text x="350" y="106" font-size="8.5" text-anchor="middle">out: R²⁹</text>
     <text x="350" y="119" font-size="8" text-anchor="middle" fill="#5A6577">a_latent∈R¹⁶</text>
     <text x="350" y="130" font-size="8" text-anchor="middle" fill="#5A6577">a_aux∈R¹⁶</text>
@@ -546,13 +546,13 @@
     <text x="441" y="108" font-size="6.8" text-anchor="middle" font-weight="bold" fill="#1B2431">out: elevation map = heightmap (2.5D·odom)</text>
     <text x="441" y="118.8" font-size="5.2" text-anchor="middle" font-weight="bold" fill="#E8551E">★추후: raw-depth CNN이 흡수</text>
 
-    <!-- 발판·타이밍 생성기 (중간, ④ 채널·모델기반 개발방향) -->
-    <rect x="360" y="165.6" width="162" height="88.8" rx="4" fill="#FDEAE0" stroke="#E8551E" stroke-width="1.5" stroke-dasharray="4 3"/>
-    <text x="441" y="187.2" font-size="9" text-anchor="middle" font-weight="bold" fill="#E8551E">궤적최적화 TO <tspan font-size="6.4" font-weight="normal" fill="#5A6577">발판·타이밍</tspan></text>
-    <text x="441" y="204" font-size="6.1" text-anchor="middle" fill="#5A6577">in: heightmap · cmd_vel · 상태 · 게이트스케줄</text>
-    <text x="441" y="220.8" font-size="6.3" text-anchor="middle" fill="#E8551E" font-weight="bold">현재=TOWR(오프라인) · 실시간=TAMOLS(구축예정)</text>
-    <text x="441" y="237.6" font-size="6.6" text-anchor="middle" font-weight="bold" fill="#1B2431">out: p_tgt · cs · base참조 (관절·힘 차단)</text>
-    <text x="441" y="248.4" font-size="5.2" text-anchor="middle" font-weight="bold" fill="#E8551E">★추후: 정책으로 흡수</text>
+    <!-- 궤적최적화(TO) 명시적 발판생성(험지·정밀 전용) (④ 채널·모델기반) — 타이밍(cs)은 결정변수 아님(고정 게이트) -->
+    <rect x="360" y="165.6" width="162" height="90" rx="4" fill="#FDEAE0" stroke="#E8551E" stroke-width="1.5" stroke-dasharray="4 3"/>
+    <text x="441" y="187.2" font-size="9" text-anchor="middle" font-weight="bold" fill="#E8551E">궤적최적화(TO) <tspan font-size="6.4" font-weight="normal" fill="#5A6577">명시적 발판생성 · 험지·정밀 전용</tspan></text>
+    <text x="441" y="201" font-size="6.1" text-anchor="middle" fill="#5A6577">in: heightmap · cmd_vel(→호라이즌 적분) · 상태</text>
+    <text x="441" y="213.5" font-size="5.7" text-anchor="middle" font-weight="bold" fill="#E8551E">in: 고정 게이트 cs <tspan font-weight="normal" fill="#5A6577">(스케줄러 공급 · 최적화 변수 아님)</tspan></text>
+    <text x="441" y="228" font-size="6.3" text-anchor="middle" fill="#E8551E" font-weight="bold">TAMOLS</text>
+    <text x="441" y="243" font-size="6.6" text-anchor="middle" font-weight="bold" fill="#1B2431">out→RL: p_tgt·base_X · cs=TO내부(GIAC)</text>
 
     <!-- STGN 플래너 (맨 아래) -->
     <rect x="360" y="288" width="162" height="103.2" rx="4" fill="#fff" stroke="#1B2431" stroke-width="1.4"/>
@@ -565,8 +565,8 @@
     <!-- 내부 수직 수렴 : TerrainMap→발판생성기(heightmap ↓) · STGN→발판생성기(경로 ↑) -->
     <line x1="441" y1="122.4" x2="441" y2="165.6" stroke="#1B2431" stroke-width="1.4" marker-end="url(#g)"/>
     <text x="468" y="147.6" font-size="6.3" text-anchor="middle" font-weight="bold" fill="#1B2431">heightmap</text>
-    <line x1="441" y1="288" x2="441" y2="254.4" stroke="#1B2431" stroke-width="1.4" marker-end="url(#g)"/>
-    <text x="466" y="274.8" font-size="6.3" text-anchor="middle" font-weight="bold" fill="#1B2431">cmd_vel</text>
+    <line x1="441" y1="288" x2="441" y2="255.6" stroke="#1B2431" stroke-width="1.4" marker-end="url(#g)"/>
+    <text x="466" y="274.8" font-size="6.3" text-anchor="middle" font-weight="bold" fill="#1B2431">cmd_vel*</text>
 
     <!-- 제어층 π + MLP 추정기 -->
     <rect x="560" y="62.4" width="150" height="252" rx="5" fill="#fff" stroke="#1B2431" stroke-width="1.9" stroke-dasharray="6 3"/>
@@ -575,7 +575,7 @@
     <text x="635" y="136.8" font-size="7.1" text-anchor="middle" fill="#5A6577">① proprio (이력·69차 잠정)</text>
     <text x="635" y="154.8" font-size="7.1" text-anchor="middle" fill="#5A6577">② heightmap → 내부 인코더(CNN)</text>
     <text x="635" y="172.8" font-size="7.1" text-anchor="middle" fill="#5A6577">③ <tspan font-family="'DejaVu Sans',sans-serif">v&#770;</tspan> (Estimator)</text>
-    <text x="635" y="190.8" font-size="7.1" text-anchor="middle" fill="#5A6577">④ p_tgt · cs (발판·타이밍)</text>
+    <text x="635" y="190.8" font-size="7.1" text-anchor="middle" fill="#5A6577">④ p_tgt·base_X (cs 미전달=창발)</text>
     <text x="635" y="208.8" font-size="7.1" text-anchor="middle" fill="#5A6577">⑤ cmd_vel (Nav2)</text>
     <text x="635" y="236.4" font-size="7" text-anchor="middle">APT: 게이트(2 Hz)→디코더→Σ</text>
     <text x="635" y="264" font-size="8.6" text-anchor="middle" font-weight="bold" fill="#1B2431">out: τ_input ∈ R¹⁷</text>
@@ -616,9 +616,9 @@
     <!-- TerrainMap → π : ② heightmap (좌측 진입 y120) -->
     <path d="M522 85.2 L534 85.2 L534 144 L560 144" fill="none" stroke="#1B2431" stroke-width="1.4" marker-end="url(#g)"/>
     <text x="531" y="76.8" font-size="6.6" text-anchor="middle" font-weight="bold" fill="#1B2431">② heightmap(raw crop)</text>
-    <!-- 발판생성기 → π : ④ p_tgt·cs (중간 → 직진 y178, dashed) -->
+    <!-- 발판생성기 → π : ④ p_tgt·base_X (중간 → 직진 y178, dashed) -->
     <path d="M522 213.6 L560 213.6" fill="none" stroke="#E8551E" stroke-width="1.4" stroke-dasharray="4 3" marker-end="url(#go)"/>
-    <text x="541" y="207.6" font-size="6.6" text-anchor="middle" font-weight="bold" fill="#E8551E">④ p_tgt·cs</text>
+    <text x="541" y="207.6" font-size="6.6" text-anchor="middle" font-weight="bold" fill="#E8551E">④ p_tgt·base_X</text>
     <!-- STGN → π : ⑤ cmd_vel (하단 → 좌측 진입 y192) -->
     <path d="M522 360 L548 360 L548 230.4 L560 230.4" fill="none" stroke="#1B2431" stroke-width="1.3" marker-end="url(#g)"/>
     <text x="540" y="223.2" font-size="6.4" text-anchor="middle" font-weight="bold" fill="#1B2431">⑤ cmd_vel</text>
@@ -639,6 +639,8 @@
     <path d="M746 331.2 L746 465.6 L73 465.6 L73 343.2" fill="none" stroke="#1B2431" stroke-width="1.2" marker-end="url(#g)"/>
     <text x="410" y="460.8" font-size="6.8" text-anchor="middle" fill="#5A6577">자기수용 피드백: q · <tspan font-family="'DejaVu Sans',sans-serif">q&#775;</tspan> · 접촉 · IMU  (로봇 → 지각층 센서)</text>
   </svg></div>
+
+  <div class="warn2" style="margin:2mm 0 2.6mm"><b>▲ F2 개정 근거 (경계·소스 정정)</b> — <b>① STGN→TO = cmd_vel*</b>: 표준은 <b>순간 cmd_vel</b>(TO 수신지평이 곡률오차를 흡수). <b>velocity 프로파일</b>(곡률 보존)은 <b>선택</b>이며 소스는 <b>Nav2 로컬플래너(DWB <span class="mono">sim_time</span>·MPPI)의 호라이즌 rollout 노출</b> — 표준 Nav2는 rollout의 첫 샘플만 <span class="mono">cmd_vel</span>로 발행하므로, 프로파일을 원하면 그 내부 궤적을 내보내면 된다(별도 생성기 불요). <b>② TOWR 제외</b>: TOWR=<b>오프라인 IPOPT 교사</b>(S0 데이터 공장)이라 실시간 루프에 없음 — 배포 TO=<b>TAMOLS</b>(오프라인 캐시 조회, 실시간 수신지평은 구축예정). <b>③ base_X 추가</b>: TO 출력 <b>base 참조</b>를 정책 ④ 채널에 포함(<b>발판 p_tgt 주 · base_X 보조</b>, DTC 관례) — TO 박스 out과 정책 in 정합. <b>④ TO ⊄ STGN</b>: TO는 <b>cmd_vel 경계 아래</b> 보행계획층(<b>odom·국소</b>, cmd_vel→발판), STGN은 <b>경계 위</b> 항법(<b>map·전역</b>, path→cmd_vel). 분리 유지가 사족 표준(발판은 경계 아래 보행층이 생성). <b>⑤ cs ∉ TAMOLS 결정변수</b>: TAMOLS는 <b>고정 게이트</b> 전제 — 접촉 스케줄 cs는 <b>게이트 스케줄러(예: trot T=0.4)가 공급하는 입력</b>이지 최적화 대상이 아니다. TAMOLS <b>결정변수 = p_tgt(발판) · base_X(스플라인)</b>뿐. cs는 정책에 참조로 전달할 수도 있으나(대안) — 타이밍까지 최적화하려면 위상길이를 변수화한 별도 정식화(TOWR 가변 stance·contact-implicit)가 필요. <b>★채택 설계</b>: cs는 <b>TO 내부(GIAC 지지구조)용으로만</b> 쓰고 <b>RL엔 발판 p_tgt(·base_X)만 전달</b> → RL이 <b>타이밍/게이트를 창발</b>(WHERE=TO · WHEN=RL). 근거=관용지형 <b>DTC-OFF&gt;ON</b> · cs-hard참조 <b>타이밍 충돌</b> 회피 · 후퇴선(cs 제외). 이미 <b>APT 게이트(2 Hz)</b>가 정책의 게이트 창발을 담당하므로 정합 — cs 전달은 <b>M1 검증 대안</b>. 정밀지형선 발판=지형 기하가 강제라 <b>타이밍-독립</b>이라 다른 리듬에도 유효. <b>⑥ TO=험지·정밀 전용</b>: 명시적 발판생성은 <b>정밀·희소 발판지형</b>서만 켠다(샘플효율 레버). <b>평지·관용지형은 순수 RL이 이김</b>(DTC-OFF&gt;ON 실측) → 그 지형선 TO 미사용.</div>
 
   <div class="sec-label" style="margin:1mm 0 1.6mm"><span class="n">F3</span> BehaviorTree.CPP v4 오케스트레이션 — stgn_bt 런타임 시퀀스 (STGN 계획 ↔ Nav2 추종을 엮는 상태머신)</div>
   <div style="border:1px solid var(--hair);border-radius:2mm;background:#fff;padding:2mm 2.5mm;margin-bottom:3mm;">
@@ -714,7 +716,7 @@
       <tr><td>로컬</td><td>VoxelSLAM 라이브 허브 <span class="mono">(A)</span></td><td><b>별도 repo 존재</b> — <span class="mono">RGA-Robotics/SLAM_VoxelSLAM2</span> = <b>라이브 SLAM</b>(맵빌드+로컬라이즈·deskew·map→odom·/map_scan). GICP <span class="mono">SLAM_STGN/gicp_localization·fast_gicp</span>는 <b>(A)에선 VoxelSLAM이 대체</b>(미사용)</td><td><b style="color:#1E7B4D">구축</b> (별도 repo · 미통합)</td></tr>
       <tr><td>지도</td><td>TerrainMap</td><td><span class="mono">terrain_map.hpp</span> (mj_ray, robot-centric, footScore/slope/edgeSDF)</td><td><b style="color:#E8551E">부분</b> (sim 백엔드만)</td></tr>
       <tr><td>계획</td><td>STGN 플래너 (A*)</td><td><b>별도 ROS2 repo 존재</b> <span class="mono">SLAM_STGN/src/stgn_core · stgn_bt · nav2_bridge · navigation2</span></td><td><b style="color:#1E7B4D">구축</b> (별도 repo · 미통합)</td></tr>
-      <tr><td>DTC</td><td>발판·타이밍 생성기</td><td><b>TOWR·TAMOLS</b> <span class="mono">quad/towr/towr_cd.py · quad/tamols/</span></td><td><b style="color:#1E7B4D">구축</b> (오프라인 IPOPT)</td></tr>
+      <tr><td>DTC</td><td>발판·타이밍 생성기</td><td><b>TOWR·TAMOLS</b> <span class="mono">quad/towr/towr_cd.py · quad/tamols/</span></td><td><b style="color:#1E7B4D">구축</b> — TOWR=오프라인 IPOPT · TAMOLS=<b>오프라인 캐시 조회</b>(실시간 수신지평=구축예정)</td></tr>
       <tr><td>제어</td><td>통합 정책 π (APT)</td><td>quad용 <b>없음</b>. RL 체크포인트 <span class="mono">gt.pt</span>=HindLeg(2족 실험)·별도 트리·미통합</td><td><b style="color:#C0392B">미구축(quad)</b></td></tr>
       <tr><td>제어</td><td>Estimator</td><td><span class="mono">state_estimator.hpp</span> leg-odom + IMU + KF (InEKF 아님)</td><td><b style="color:#1E7B4D">구축</b></td></tr>
       <tr><td>제어</td><td>로봇 (접촉=물리)</td><td>MuJoCo 시뮬</td><td><b style="color:#1E7B4D">구축</b> (sim) · 실기 대기</td></tr>

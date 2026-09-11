@@ -37,6 +37,7 @@
 | **[MAINTENANCE.md](MAINTENANCE.md)** | 품질 프로세스(하네스·스킬·파리티·문서동기화 규칙) | md |
 | **[datasheet_load_17dof.html](datasheet_load_17dof.html)** | 관절별 τ·ω peak/RMS 부하 데이터시트(trot·walk, 실모터 한계 대비) | 아티팩트 |
 | **[sim2real_checklist_17dof.html](sim2real_checklist_17dof.html)** | 실기 이식 갭(액추에이터 물리·미모델·운용) | 아티팩트 |
+| **[bringup_sequence.html](bringup_sequence.html)** | **실기 브링업 순서** — 모터 격리(위치·토크·ID: 백래쉬·τ_c·b·Rotor_I·지연)→다리(J·G·M,C→F)→로봇 층별 검증 런북. **F↔모델 순서 정정·백래쉬 우선·F센서 불요**(F=WBC QP 결정변수) | 아티팩트 |
 | **[biped.html](biped.html)** | **biped** — 2족 MPC+WBIC. 점발/평발 접촉모드·1점/2점 전환·개발여정(C++ 배포) | 아티팩트 |
 | [RECORDING.md](RECORDING.md) · [DEVLOG.md](DEVLOG.md) | 화면 녹화 가이드 · 개발일지(연대기) | md |
 
