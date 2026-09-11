@@ -9,6 +9,7 @@
 |---|---|---|
 | **[pipeline_fullstack.html](pipeline_fullstack.html)** | **전체 시스템 프레임워크** — 형태→기능(기구 4요소)·4계보(CI-MPC·DTC·APT·AMP) 통합 배포 아키텍처·지각/SLAM/계획/제어 층구조(F1–F3)·**실제 코드 대조·수정사항(F4–F5, DOF R¹⁶·다중 repo 통합)**·**부록: nav 통합·RL 정책 구조(구 pipeline_nav·pipeline_rl 흡수, F6–F7)** | 아티팩트 |
 | **[rl_module_train.html](rl_module_train.html)** | **RL 모듈 구축·학습 가이드** — 제어층 정책을 **어떻게 만들고 학습하는가**. 두 참조골격(DTC 계획↔제어·APT-RL 3단계)·학습 3단계(표현/RL+RMA/지각증류)·**모듈 카탈로그(ActorCriticRMA: actor·estimator·history/priv_encoder·critic — 배포 vs 학습전용)**·**보상설계 실증(2점 평발 plateau→shuffle→limp 3재균형)**·예정 Depth CNN+GRU·PACE 정합. fullstack이 개요면 이건 **학습법 심화** | 아티팩트 |
+| **[SLAM_연동_참조노트.md](SLAM_연동_참조노트.md)** | **SLAM/Nav 연동 인터페이스 설계** — 제어기↔SLAM 경계 4개(cmd_vel·odom·map→odom·/map_scan)·핵심 설계결정·함정. fullstack F2 블록도의 설계 근거 | md |
 
 ### 제어기별 (pipeline · params)
 | 제어기 | pipeline | params | 비고 |
@@ -37,6 +38,8 @@
 | **[MAINTENANCE.md](MAINTENANCE.md)** | 품질 프로세스(하네스·스킬·파리티·문서동기화 규칙) | md |
 | **[datasheet_load_17dof.html](datasheet_load_17dof.html)** | 관절별 τ·ω peak/RMS 부하 데이터시트(trot·walk, 실모터 한계 대비) | 아티팩트 |
 | **[sim2real_checklist_17dof.html](sim2real_checklist_17dof.html)** | 실기 이식 갭(액추에이터 물리·미모델·운용) | 아티팩트 |
+| **[PACE_액추에이터_식별_체크리스트.md](PACE_액추에이터_식별_체크리스트.md)** | PACE 액추에이터 식별 실행 체크리스트(MD80 벤치·CMA-ES·가진궤적·관절별 θ) — 브링업 Phase 1 상세 | md |
+| **[actuator_params_PACE_vs_r26.html](actuator_params_PACE_vs_r26.html)** | PACE 최종 식별값 vs Isaac r26 대조(Rotor_I·마찰·감쇠·지연) | 아티팩트 |
 | **[bringup_sequence.html](bringup_sequence.html)** | **실기 브링업 순서** — 모터 격리(위치·토크·ID: 백래쉬·τ_c·b·Rotor_I·지연)→다리(J·G·M,C→F)→로봇 층별 검증 런북. **F↔모델 순서 정정·백래쉬 우선·F센서 불요**(F=WBC QP 결정변수) | 아티팩트 |
 | **[biped.html](biped.html)** | **biped** — 2족 MPC+WBIC. 점발/평발 접촉모드·1점/2점 전환·개발여정(C++ 배포) | 아티팩트 |
 | [RECORDING.md](RECORDING.md) · [DEVLOG.md](DEVLOG.md) | 화면 녹화 가이드 · 개발일지(연대기) | md |
@@ -73,7 +76,6 @@
 ## 🗺️ 로드맵 / 향후 기능
 | 문서 | 내용 | 상태 |
 |---|---|---|
-| **[WBC_layer2_standalone_fix.md](WBC_layer2_standalone_fix.md)** | 2층(TAMOLS→WBC) baseline. standalone WBC z침하=QP 힘품질. 논문(계층적 WBC·GM-observer) 해법. "최소 baseline→RL" 전략. | 진행·게이트 |
 | **[pipeline_tamols.html](pipeline_tamols.html)** | TAMOLS 계획층(A 실행스택 위 ③④ 주입)·TAM_BASE base-발판 협조 실증·한계·D1포팅/DTC. | 아티팩트 |
 
 ## ✅ 유지 워크플로 (요약)
@@ -83,6 +85,7 @@
 4. 논리단위 커밋(요청 시). 상세=[MAINTENANCE.md](MAINTENANCE.md).
 
 ## 🗑️ 정리됨
+- (2026-09-11) **문서 통폐합·경로 정비**: `TAMOLS_논문_한계_검증조건` → TAMOLS_개발리포트 §부록 병합·삭제 · `성과_총정리`(중복 요약) 삭제 · `PACE_액추에이터_식별_체크리스트`·`SLAM_연동_참조노트`·`actuator_params_PACE_vs_r26` 인덱스 링크(보존). 백업 삭제(`pipeline_fullstack.html.bak_fixedgait`·`.docbackup` dupe 3). 깨진 링크 `WBC_layer2_standalone_fix` 제거. (참조본 7개=RPET·MPC_RL전략 등은 메모리·코드 참조라 `.docbackup`에 보존.)
 - (2026-07-30) **개발리포트 6개 → 5개로 통일·최신화·트림** (`<트랙>_개발리포트.md`): B_elevation_perceptive_NMPC → D1에 흡수, MPC_RL_하이브리드_전략_리포트 → DTC로 재초점, `모델기반_갭크로싱_탐색리포트.html` → TAMOLS §7 통합(삭제). 원본 백업=`.docbackup_20260730/`.
 - (2026-07-30) **RPET 미래설계/계획서 3종 삭제**(제어기 개발기록이 아님·백업됨): RPET_JUMP(점프는 live-solve로 완료, DTC §5) · RPET_TERRAIN_MAP(perception 인프라 설계, 메모리 `terrainmap-elevation-pointcloud`) · RPET_HEAD_GAZE(head 미래설계). RPET_ALIGATOR 참조행도 제거.
 - (2026-07-09) 삭제: `RBQGUI-x86_64.AppImage`(167M)·`squashfs-root/`(448M) = 써드파티. 상위 흩어진 노트(`실행코드`·`obs.md`·`개발일지`·`메모`) → 이 docs/로 통합.
