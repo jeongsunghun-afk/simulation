@@ -27,6 +27,7 @@ def main() -> int:
     if ra is None:
         print("⚠ bind_aux None (.so 미지원) — aux 못 읽음");
     q0 = hw.read(ch)[0]
+    hw.arm(ch, 0.0, 0.0)     # step() 전제 충족용. 게인 0 + 모드 0x4A(disable) → 모터는 자유 유지(무토크)
     print("[aux_read] ch%d  MOT_BASE_MODE=%s  (0x4A=disable+aux=자유) — ch%d 를 손으로 돌리세요. Ctrl+C 종료."
           % (ch, mode, ch))
     print("  %-10s %-10s %-8s" % ("q(1차)", "aux(2차)", "aux−q(유격)"))
