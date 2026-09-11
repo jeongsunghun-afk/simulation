@@ -59,7 +59,10 @@ DRV_PEAK  = np.array([84, 84, 126, 100.8, 84, 84, 126, 100.8])   # HL/HR × (hip
 #   ⚠foot 의 dof_armature 는 **0** 이다 — tendon 으로 옮겨 갔다(_foot_rotor_to_tendon).
 GEAR    = np.array([7.0, 7.0, 10.5, 8.4])   # hip,thigh,calf,foot
                                             # ★foot 8.0→8.4 (총 8.4 = 7×1.2 추가단, 2026-08-05 확인)
-ROTOR_I = 7.327e-4                          # ★실측 확정(2026-08-14). 구 7.4e-4
+ROTOR_I = 6.11e-4                           # ★α-보정 물리값(2026-09-12): 옛 7.327e-4 는 I/α
+                                            #   (PACE 적합에 토크스케일 항 없음 → α 가 관성에 흡수).
+                                            #   벤치 측정 α=0.834 로 ×α = 6.11e-4. datasheet 5.29e-4 근접.
+                                            #   ★actuator_gear ×α(아래)와 별개 항 — 중복 아님(토크 vs 관성).
 #          hip     thigh    calf     foot   ← kind 순. j%4 로 색인한다
 # ★2026-08-14 fit_v2 → **fit_v6**. C++ biped_control.hpp 와 **같은 값**이어야 한다.
 #   JDAMP.calf 0.0092★→0 확정 · JDAMP.thigh 0.1696→0.022 · JFRIC.thigh 0.5064→0.592
@@ -194,13 +197,14 @@ class BipedWBIC:
             m.dof_damping[dof] = JDAMP[j % 4]          # ★kind 별(2026-08-14 PACE 최종)
             m.dof_frictionloss[dof] = JFRIC[j % 4]
         self._foot_rotor_to_tendon()
-        # ★α(토크스케일) 주입 — 실기 저울 실측(2026-08-25): 명령의 ~0.80 만 나간다.
-        #   자리는 actuator_gear (적용토크 = gear·ctrl) — 제어기(WBIC·마찰보상)는 α 를
-        #   모른 채 두는 것이 핵심이다: 실기와 같은 "약한 로봇" 을 재현해야
-        #   보상 전략(STAND_TAU 등)을 sim 에서 검증할 수 있다.
-        #   ALPHA_AXIS="0.80,0.80,0.80,0.80"(kind 별 4개) 또는 8개(축별). 기본 1=끔.
-        #   ⚠C++ 파리티: biped_control.hpp 쪽도 같이 고칠 것(추후).
-        a = [float(x) for x in os.environ.get('ALPHA_AXIS', '1').split(',')]
+        # ★α(토크스케일) 주입 — **벤치 실측 확정 α=0.834**(2026-09-12, 이전 저울추정 0.80).
+        #   명령의 α 만 실현된다. 자리는 actuator_gear (적용토크 = gear·ctrl) — 제어기(WBIC·
+        #   마찰보상)는 α 를 모른 채 두는 것이 핵심: 실기와 같은 "약한 로봇" 을 재현해야
+        #   보상(deploy 의 1/α FF보정)을 sim 에서 검증할 수 있다.
+        #   ★기본 0.834 로 켬(측정 반영). 끄려면 ALPHA_AXIS=1. kind별 4개/축별 8개도 가능.
+        #   ⚠ROTOR_I 를 물리값(×α)으로 이미 내렸으니 여기 α 와 **중복 아님**(토크 vs 관성).
+        #   ⚠C++ 파리티: biped_deploy.cpp 가 1/α FF보정으로 대응(2026-09-12 반영).
+        a = [float(x) for x in os.environ.get('ALPHA_AXIS', '0.834').split(',')]
         if len(a) == 1: a = a * 4
         self.ALPHA = np.array(a * 2 if len(a) == 4 else a)
         assert len(self.ALPHA) == self.nu, "ALPHA_AXIS 는 1·4·8개"

@@ -630,6 +630,36 @@ int main(int argc, char** argv){
     std::printf("\n"
                 "         ⚠접지 상태에서 토크가 그만큼 올라간다 — 크레인을 남긴 채 켤 것.\n");
   }
+  // ══ 액추에이터 토크스케일 α 보정 (벤치 실측 2026-09-12) ══════════════════════════════
+  //   드라이버가 명령토크의 α(0.834) 만 실현한다(α·τ_cmd). FF 를 1/α 로 올려 **실현 = 의도**.
+  //   ★전 모드(hold/float/push/stand/walk) 의 write_mit 에 일괄 적용(write_ff).
+  //   ⚠벤치는 bare 7:1(thigh 기저). 벨트 있는 축(calf)은 실효 α 가 더 낮을 수 있어
+  //     ACT_ALPHA_JOINT="a0,a1,..,a7"(축순) 로 축별 지정 가능. ⚠접지 토크 ~+20% —
+  //     크레인 남긴 채 hold/stand 로 검증 후 walk. 끄려면 ACT_ALPHA=1.
+  //   sim 파리티: biped_wbic.py 가 actuator_gear ×α(0.834)로 "약한 로봇" 재현.
+  const double ACT_ALPHA = getenv("ACT_ALPHA") ? atof(getenv("ACT_ALPHA")) : 0.834;
+  std::vector<double> alpha_ax(NJ, -1.0);
+  if(const char* aa = getenv("ACT_ALPHA_JOINT")){
+    std::stringstream ss(aa); std::string t; int i=0;
+    while(std::getline(ss, t, ',') && i < NJ){ if(!t.empty()) alpha_ax[i]=atof(t.c_str()); i++; }
+  }
+  std::vector<float> ff_comp(NCH, 1.0f);
+  for(int j=0;j<NJ;j++){
+    const double al = alpha_ax[j] > 0 ? alpha_ax[j] : ACT_ALPHA;
+    ff_comp[cfg.joints[j].channel] = (al > 0.1) ? (float)(1.0/al) : 1.0f;
+  }
+  std::vector<float> tau_ff_out(NCH, 0.f);
+  // FF 토크에 1/α 를 곱해 실기 실현토크를 모델값으로 되돌린다. 전 write_mit 이 이걸 쓴다.
+  auto write_ff = [&](const float* qd, const std::vector<float>& tau,
+                      const float* kpd, const float* kdd){
+    for(int i=0;i<NCH;i++) tau_ff_out[i] = tau[i] * ff_comp[i];
+    return hw->write_mit(qd, zero.data(), tau_ff_out.data(), kpd, kdd, NCH);
+  };
+  if(ACT_ALPHA != 1.0 || alpha_ax[0] > 0){
+    std::printf("[deploy] ★액추에이터 α 보정 ON — FF ×1/α (α=%.3f → ×%.3f · ~+%.0f%% 토크).\n"
+                "         ⚠접지 토크 그만큼 오른다 — 크레인 남긴 채 hold/stand 검증 후 walk. 끄려면 ACT_ALPHA=1.\n",
+                ACT_ALPHA, 1.0/ACT_ALPHA, (1.0/ACT_ALPHA-1.0)*100.0);
+  }
   double kp_scale_tgt = getenv("POS_KP_SCALE") ? atof(getenv("POS_KP_SCALE")) : 1.0;
   kp_scale_tgt = std::max(0.0, std::min(KP_SCALE_MAX, kp_scale_tgt));
   double POS_KP = kp_scale_tgt;                    // ★램프 중인 **현재** 배율
@@ -1808,8 +1838,7 @@ int main(int argc, char** argv){
         }
         jm.tau_ctrl_to_ch(tau_ctrl.data(), tau_ch.data());
         foot_comp(tau_ch);
-        hw->write_mit(hold_ch.data(), zero.data(), tau_ch.data(),
-                      kp_ch.data(), kd_ch.data(), NCH);
+        write_ff(hold_ch.data(), tau_ch, kp_ch.data(), kd_ch.data());   // ★α 보정 FF
         // ★1초 진단 — 브링업 중엔 항상 찍는다(지지율 0 이면 이 가지에 안 들어온다).
         //   읽는 법: 지지율을 올릴수록 **오차가 줄고 τ_ff 가 그만큼 커져야** 정상이다.
         //   오차가 안 줄면 그 축은 명령을 못 따르는 것(구동 결손·기구 걸림)이다.
@@ -1987,8 +2016,7 @@ int main(int argc, char** argv){
       }
       for(int i=0;i<NCH;i++) if(float_axes.empty() || float_axes.count(i)) q_ch[i] = hs.q_deg[i];
       qcmd_ch = q_ch; kpcmd_ch = kp_ch; kdcmd_ch = kd_ch;
-      hw->write_mit(q_ch.data(), zero.data(), tau_ch.data(),
-                    kp_ch.data(), kd_ch.data(), NCH);
+      write_ff(q_ch.data(), tau_ch, kp_ch.data(), kd_ch.data());   // ★α 보정 FF
     } else if(mode=="push"){
       // ★발밀기 — float 와 같은 골격(베이스 고정·중력보상) + 선택 다리 발끝에 Jᵀ·F.
       //   J 는 MuJoCo(mj_jacGeom)가 준다 — DH 수식을 복사하지 않는다(참조 구현
@@ -2047,8 +2075,7 @@ int main(int argc, char** argv){
       }
       for(int i=0;i<NCH;i++) q_ch[i] = hs.q_deg[i];
       qcmd_ch = q_ch; kpcmd_ch = kp_ch; kdcmd_ch = kd_ch;
-      hw->write_mit(q_ch.data(), zero.data(), tau_ch.data(),
-                    kp_ch.data(), kd_ch.data(), NCH);
+      write_ff(q_ch.data(), tau_ch, kp_ch.data(), kd_ch.data());   // ★α 보정 FF
     } else {  // stand / walk — 모델기반
       // 접촉: 실기엔 발 힘센서가 없다. 게이트 위상(스탠스 다리)을 접촉으로 쓴다.
       //   ⚠추정에 쓰는 접촉이 제어기 자신의 계획이라 순환처럼 보이지만, 힘센서 없는
@@ -2209,8 +2236,7 @@ int main(int argc, char** argv){
       for(int i=0;i<NCH;i++)
         stand_ref[i] = stand_hold[i] + (float)(bs*(double)(stand_to[i]-stand_hold[i]));
       qcmd_ch = stand_ref; kpcmd_ch = kp_ch; kdcmd_ch = kd_ch;
-      hw->write_mit(stand_ref.data(), zero.data(), tau_ch.data(),
-                    kp_ch.data(), kd_ch.data(), NCH);
+      write_ff(stand_ref.data(), tau_ch, kp_ch.data(), kd_ch.data());   // ★α 보정 FF
       // ★stand 폭주 가드 (2026-09-03 · 상단 선언부 주석). 기준자세 이탈이
       //   STAND_RUNAWAY_DEG 를 0.3s 지속하면 hold 로 강하 + 래치(off 재무장까지 거부).
       if(mode=="stand"){
