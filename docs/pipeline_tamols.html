@@ -159,6 +159,10 @@
     <h3>결정변수</h3>
     <div class="eq"><span class="lbl">a[phase] ∈ R<sup>6×4</sup> = </span>base pose 스플라인 계수 [x,y,z,roll,pitch,yaw] × 4-poly / phase&nbsp;&nbsp;<span class="lbl">nz = 24·P + 12 + P</span></div>
     <div class="eq"><span class="lbl">p ∈ R<sup>4×3</sup> = </span>발판 위치(4발 착지 xy·z)&nbsp;&nbsp;&nbsp;<span class="lbl">ε ∈ R<sup>P</sup> = GIAC slack</span></div>
+    <div class="note" style="margin-top:10px">
+      <b>★변수 상세 (2026-09)</b> — <b>a[k]만이 결정변수</b>, pos/vel/acc는 전부 파생: base_d(τ)=a(d,0)+a(d,1)τ+a(d,2)τ²+a(d,3)τ³ → <code>vel=Σi·a(d,i)τ^(i-1)</code>·<code>acc=Σi(i-1)a(d,i)τ^(i-2)</code>는 <b>a의 미분</b>(변수 아님). τ=0 대입 시 <b>a(d,0)=위치·a(d,1)=속도</b>(그래서 초기·연속 등식이 계수 등식이 됨).
+      <br><b>ε(GIAC 슬랙)</b> = GIAC 17b/c/d를 국면별 ε만큼 완화(<code>residual ≤ ε</code>, ε≥0)하는 <b>안전밸브</b> — 2점지지처럼 GIAC 빡빡한 국면서 QP infeasible 방지. 비용 <code>w_eps‖ε‖²</code>로 눌러 "가능하면 위반0". ε 큰 국면 = 아슬아슬함의 지표.
+    </div>
     <h3>비용 (핵심)</h3>
     <div class="scroll"><table>
       <thead><tr><th>task</th><th>내용</th><th>가중</th></tr></thead>
@@ -181,8 +185,10 @@
       <b>★GIAC 유도 &amp; 성립조건 (2026-09 정리)</b> — GIAC = <b>동역학+마찰콘에서 힘 f를 소거</b>한 것. 볼록성 덕에 개별 발 마찰콘의 합력 조건이 CoM 가속으로 접힘: <b>17a</b> <code>(μ·aG_z)²≥aG_x²+aG_y²</code> = 마찰콘의 CoM 버전, <b>17b</b> <code>m·det(pij,pB−pi,aG)−pij·L<sup style="font-size:.72em;vertical-align:.35em">˙</sup>≥0</code> = 각운동량의 지지영역 버전. 힘을 안 풀어 QP가 가벼움(&lt;20ms).
       <br><b>대가 = 예측 base 부재</b>: base 스플라인은 운동학 계획이라 "지금 넘어짐"을 못 봄 → <b>pure-online RSL 추종은 정지조차 못함</b>. 성립하려면 <b>준정적(a≈0) + walk(3점지지=GIAC 유효)</b>. trot(2점)은 느려도 선분지지라 대각축 퇴화로 실패.
       <br><b>τ는 TAMOLS가 안 냄</b>: 힘도 τ도 없음. 추종기(WBC)가 계획을 참조로 [q<sup style="font-size:.72em;vertical-align:.35em">¨</sup>,f] 재계산 → <code>τ=Mq<sup style="font-size:.72em;vertical-align:.35em">¨</sup>+h−Jᵀf</code>. 강건도 순서: RSL(순수추종) &lt; injection(A 예측층 빌림·flat견고·gap실패·마진얇음) &lt; <b>D1(통합 NMPC·예측 내장)</b>이 종착점.
-    </div>
-  </div>
+    
+      <br><b>★힘 소거 유도</b>: 뉴턴 <code>Σfᵢ=m·aG</code>로 힘의 합을 CoM 가속으로 치환 → 17a서 fᵢ 사라짐(마찰콘의 CoM 버전). 오일러 <code>L<sup style="font-size:.72em;vertical-align:.35em">˙</sup>=Σ(pᵢ−pB)×fᵢ</code> + <code>fz≥0</code>(발은 누르기만)로 모멘트를 지지영역에 한정 → 17b. 힘을 없앤 게 아니라 <b>"마찰콘 안 힘이 존재할 조건"을 힘 없는 부등식으로</b>(Farkas류). 대가=힘·예측base 상실→τ 못냄(추종기 필요).
+      <br><b>★동역학 예측 발판 생성하려면</b>(=TAMOLS 한계 극복): 힘 f를 <b>변수로 부활</b>(GIAC 버림)+동역학 <code>x[k+1]=f_dyn(x[k],u[k])</code>을 <b>등식 제약</b>으로 → 다중스텝 롤아웃이 곧 예측base. 변수 = 상태 x궤적·<b>입력 u=[힘f·발속도]</b>(=제어입력=결정변수, 외부값 아님)·발판 p. GIAC 대신 마찰콘(힘 직접). = 정확히 <b>centroidal NMPC(D1)</b> 구조(더 정확=full-dyn OCP crocoddyl).
+    </div>  </div>
 </section>
 
 <section id="coord">
