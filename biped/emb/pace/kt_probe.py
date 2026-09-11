@@ -91,15 +91,27 @@ def _verdict(R, mass, lever, log):
         log("      복제(독립전류 없음) → **Nm/A 절대측정 불가**. datasheet 사용:")
         log(f"      k_t(모터)={KT_MOTOR_SPEC}, k_t(관절)=0.2×{GEAR:.0f}×η=1.26~1.40 [피크토크 86.8≈84Nm 로 이미 정합].")
         return dict(alpha=alpha, r2=r2, q0_deg=float(np.rad2deg(q0)), independent=False, maxdiff=maxdiff)
-    # 독립전류일 때만 진짜 회귀
+    # 독립전류 → τ vs i 회귀. slope = τ/i 상수[Nm/A].
     A = np.column_stack([cur, np.ones_like(cur)])
     (slope, intercept), *_ = np.linalg.lstsq(A, tau, rcond=None)
-    kt_joint = float(slope); kt_motor = kt_joint / GEAR
+    kt = float(slope)
+    pred = A @ np.array([slope, intercept])
+    ss_t = float(np.sum((tau - tau.mean()) ** 2))
+    r2b = 1.0 - float(np.sum((tau - pred) ** 2)) / ss_t if ss_t > 1e-12 else float("nan")
     i_dead = -intercept / slope if abs(slope) > 1e-9 else float("nan")
-    log(f"      ✔독립전류 → k_t(관절)={kt_joint:.4f}, k_t(모터)={kt_motor:.4f} Nm/A"
-        f" (datasheet {KT_MOTOR_SPEC}, 편차 {100*(kt_motor-KT_MOTOR_SPEC)/KT_MOTOR_SPEC:+.0f}%) · 전류데드존 {i_dead:+.3f} A")
-    return dict(alpha=alpha, r2=r2, q0_deg=float(np.rad2deg(q0)),
-                independent=True, maxdiff=maxdiff, kt_joint=kt_joint, kt_motor=kt_motor)
+    # ★프레임 모호성: fTorque·fCurrent 기준이 모터냐 관절이냐에 따라 slope 가 k_t,motor 또는
+    #   k_t,joint. datasheet 모터 0.2 / 관절 0.2×7=1.4 **양쪽과 대조**해 어느 프레임인지 판정.
+    kt_j_spec = KT_MOTOR_SPEC * GEAR
+    d_motor = abs(kt - KT_MOTOR_SPEC); d_joint = abs(kt - kt_j_spec)
+    log(f"      ✔독립전류 → **τ/i 기울기 k_t = {kt:.4f} Nm/A** · R²={r2b:.4f} · 전류데드존 {i_dead:+.3f} A")
+    log(f"        datasheet 대조: 모터 {KT_MOTOR_SPEC} (편차 {100*(kt-KT_MOTOR_SPEC)/KT_MOTOR_SPEC:+.0f}%)"
+        f" · 관절 {kt_j_spec:.2f} (편차 {100*(kt-kt_j_spec)/kt_j_spec:+.0f}%)")
+    if d_motor < d_joint:
+        log(f"        ⇒ **모터프레임**: k_t,motor≈{kt:.3f}(=datasheet), k_t,joint=slope×7={kt*GEAR:.2f}")
+    else:
+        log(f"        ⇒ **관절프레임**: k_t,joint≈{kt:.3f}, k_t,motor=slope/7={kt/GEAR:.3f}")
+    return dict(alpha=alpha, r2=r2, q0_deg=float(np.rad2deg(q0)), independent=True,
+                maxdiff=maxdiff, kt_slope=kt, r2_kt=r2b)
 
 
 def _selftest():
@@ -117,8 +129,8 @@ def _selftest():
     R_ind = np.column_stack([q, tau, cur, np.abs(tau - cur)])
     r2 = _verdict(R_ind, mass, lever, lambda m: print("   " + m))
     assert r2["independent"] is True, "독립을 복제로 오판"
-    assert abs(r2["kt_joint"] - 1.40) < 0.05, f"k_t 복원 실패 {r2['kt_joint']}"
-    print(f"  [selftest] OK — 역산 α({r1['alpha']:.3f}≈1.0) · 복제/독립 판정 · k_t 복원({r2['kt_joint']:.3f}≈1.40)")
+    assert abs(r2["kt_slope"] - 1.40) < 0.05, f"k_t 기울기 복원 실패 {r2['kt_slope']}"
+    print(f"  [selftest] OK — 역산 α({r1['alpha']:.3f}≈1.0) · 복제/독립 판정 · k_t 기울기 복원({r2['kt_slope']:.3f}≈1.40)")
     return 0
 
 
