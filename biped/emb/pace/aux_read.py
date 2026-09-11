@@ -31,16 +31,22 @@ def main() -> int:
     print("[aux_read] ch%d  MOT_BASE_MODE=%s  (0x4A=disable+aux=자유) — ch%d 를 손으로 돌리세요. Ctrl+C 종료."
           % (ch, mode, ch))
     print("  %-10s %-10s %-8s" % ("q(1차)", "aux(2차)", "aux−q(유격)"))
+    # ★빠른 연속쓰기(≈100Hz)로 MotCmd pass-through 를 켠다 → 우리 0-게인이 RobotEmbedded 강제게인을
+    #   이겨 모터가 자유가 된다(느린 쓰기면 init 경로 게인이 이겨 hold). 화면은 ~5Hz 로만 찍는다.
+    #   권장: AUX_MODE=1 (0x5A=Enable+aux, 게인0=자유). 0x4A 는 RobotEmbedded 가 Disable 을 덮어써 hold 됨.
+    k = 0
     try:
         while True:
-            s = hw.step(ch, q0, 0.0, 0.0)              # kp=kd=0 + mode=MOT_BASE_MODE → 0x4A 면 자유
-            a = ra(ch) if ra else None
-            aux = a[0] if a else None
-            print("  %-10.2f %-10s %-8s" % (
-                s.q_deg,
-                ("%.2f" % aux) if aux is not None else "0/None",
-                ("%+.2f" % (aux - s.q_deg)) if aux is not None else "-"))
-            time.sleep(0.2)
+            s = hw.step(ch, q0, 0.0, 0.0)              # kp=kd=tau=0 → (MotCmd 활성 시) 자유
+            k += 1
+            if k % 20 == 0:
+                a = ra(ch) if ra else None
+                aux = a[0] if a else None
+                print("  %-10.2f %-10s %-8s" % (
+                    s.q_deg,
+                    ("%.2f" % aux) if aux is not None else "0/None",
+                    ("%+.2f" % (aux - s.q_deg)) if aux is not None else "-"))
+            time.sleep(0.01)
     except KeyboardInterrupt:
         print("\n종료")
     finally:
