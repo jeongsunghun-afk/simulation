@@ -123,8 +123,11 @@ def _cols(samples):
     q = np.deg2rad(np.array([s.q_deg for s in samples]))
     dq = np.deg2rad(np.array([s.dq_dps for s in samples]))
     kp = np.array([s.kp for s in samples])
+    kd = np.array([s.kd for s in samples])
     q_cmd = np.deg2rad(np.array([s.q_cmd_deg for s in samples]))
-    tau_cmd = kp * (q_cmd - q)                                    # 명령토크[Nm] = kp[Nm/rad]·오차[rad]
+    # ★임피던스 실제 인가토크 = kp·(q_des−q) + kd·(q̇_des−q̇), q̇_des=0 → **kp·err − kd·q̇**.
+    #   −kd·q̇ 를 빼먹으면 그 항(α·kd)이 점성 b 로 흡수돼 b 가 α·kd 만큼 과대(=처프 b 오류 원인).
+    tau_cmd = kp * (q_cmd - q) - kd * dq                          # 명령토크[Nm] (정지 시 −kd·q̇≈0 → alpha 불변)
     return q, dq, tau_cmd, t, q_cmd
 
 
