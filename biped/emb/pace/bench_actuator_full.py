@@ -297,6 +297,8 @@ def main() -> int:
     ap.add_argument("--spec", default=os.path.join(HERE, "spec.yaml"))
     ap.add_argument("--out", default=os.path.join(HERE, "results"))
     ap.add_argument("--selftest", action="store_true", help="하드웨어 없이 로직만 검증")
+    ap.add_argument("--pause", action="store_true",
+                    help="각 페이즈 시작 전 Enter 대기(리그 점검·재배치용). tn(자유가속)은 이 옵션과 무관하게 항상 확인.")
     a = ap.parse_args()
 
     spec = yaml.safe_load(open(a.spec, encoding="utf-8"))
@@ -323,6 +325,15 @@ def main() -> int:
         print("  aux(출력엔코더) 활성 — 교차확인 가능(AUX_MODE=1)")
     results = {"meta": dict(ch=a.ch, name=name, mass=a.mass, lever=a.lever, mgl=mgl)}
 
+    def gate(header, danger=False):
+        """페이즈 헤더 출력. --pause 또는 danger 면 Enter 대기(중단은 Ctrl+C)."""
+        print(header)
+        if a.pause or danger:
+            try:
+                input("  ⏎ Enter 로 이 페이즈 진행 · Ctrl+C 로 전체 중단 …")
+            except (EOFError, KeyboardInterrupt):
+                raise KeyboardInterrupt
+
     try:
         with hw:
             if "backlash" in phases:
@@ -330,7 +341,7 @@ def main() -> int:
                     print("\n[백래시] ⚠ --clamped 아님 → 건너뜀(무게추론 백래시 측정불가). "
                           "레버를 하드스톱에 고정하고 `--clamped --phases backlash` 로.")
                 else:
-                    print("\n[4] 백래시·강성 (클램프, 양방향 토크왕복)")
+                    gate("\n[4] 백래시·강성 (클램프, 양방향 토크왕복)")
                     results["backlash"] = phase_backlash(hw, spec, a.ch, a.out, log=print)
 
             free = [p for p in phases if p in ("alpha", "chirp", "freeswing")]
@@ -340,22 +351,22 @@ def main() -> int:
 
             q0 = a.q0 if a.q0 is not None else 0.0
             if "alpha" in phases:
-                print("\n[1] α + 정지마찰 (각도별 step-hold, 양방향접근)")
+                gate("\n[1] α + 정지마찰 (각도별 step-hold, 양방향접근)")
                 r = phase_alpha(hw, a.ch, a.mass, a.lever, a.kp, a.span_deg, a.n_ang, log=print)
                 results["alpha"] = r; q0 = r["q0_deg"]
             elif a.q0 is None and any(p in phases for p in ("chirp", "freeswing", "tn")):
                 print("  ⚠ alpha 미실행·--q0 없음 → 수평기준각 q0=0 가정(부하모델 부정확).")
                 print("    → --phases 에 alpha 포함하거나, 앞선 alpha 결과의 q0 을 --q0 로 지정할 것.")
             if "chirp" in phases:
-                print("\n[2] 점성 b + 관성 I_act (위치 처프)")
+                gate("\n[2] 점성 b + 관성 I_act (위치 처프)")
                 results["chirp"] = phase_chirp(hw, a.ch, a.mass, a.lever, a.kp,
                                                results.get("alpha", {}).get("alpha", 0.83),
                                                q0, amp, f0, f1, T, log=print)
             if "freeswing" in phases:
-                print("\n[3] I_act 교차확인 (자유진동)")
+                gate("\n[3] I_act 교차확인 (자유진동)")
                 results["freeswing"] = phase_freeswing(hw, a.ch, a.mass, a.lever, a.kp, q0, log=print)
             if "tn" in phases:
-                print("\n[5] T-N 선도 (자유가속·최대토크) — ⚠하드스톱·여유공간 확인")
+                gate("\n[5] T-N 선도 (자유가속·최대토크) — ⚠하드스톱·여유공간 확인", danger=True)
                 tau_cmd, span, dur = (float(x) for x in a.tn.split(","))
                 results["tn"] = phase_tn(hw, a.ch, a.mass, a.lever, a.kp, q0,
                                          results.get("chirp", {}), tau_cmd, span, dur, log=print)
