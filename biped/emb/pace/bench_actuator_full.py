@@ -122,12 +122,22 @@ def _cols(samples):
     return q, dq, tau_cmd, a["t"], np.deg2rad(a["q_cmd_deg"])
 
 
-def goto_zero(hw, ch, kp, kd, zero_deg=0.0, speed_dps=10.0, log=print):
-    """궤적 전/후 **0점 복귀**(에너자이즈 상태로 등속 이동 후 그 자리 유지).
+def goto_zero(hw, ch, kp, kd, zero_deg=0.0, speed_dps=8.0, log=print):
+    """궤적 전/후 **0점으로 부드럽게(코사인 S-curve) 복귀**. 급출발/급정지 없음.
+    ★이미 arm 돼 있으면 재arm 안 함 — arm 은 게인을 0→kp 로 램프하므로 재호출하면
+      순간 무여자로 축이 훅 처졌다 다시 잡혀 튄다(특히 추 장착 시). 첫 호출만 arm.
     ⚠--clamped(레버 하드스톱 고정)에서는 호출 금지 — 스톱과 충돌해 스톨/과전류."""
-    hw.arm(ch, kp, kd)
-    hw.goto(ch, zero_deg, kp, kd, speed_dps=speed_dps)
-    log(f"  0점 복귀 → {zero_deg:+.1f}° (현재 q={hw.read(ch)[0]:+.2f}°)")
+    if not hw._armed:
+        hw.arm(ch, kp, kd)
+    q0 = hw.read(ch)[0]
+    dist = zero_deg - q0
+    if abs(dist) < 0.2:
+        log(f"  0점({zero_deg:+.1f}°) — 이미 근처(q={q0:+.2f}°)")
+        return
+    T = max(abs(dist) / max(speed_dps, 1e-6), 0.5)          # 최소 0.5s
+    # 코사인 이징: 시작·끝 속도 0 (가속도 불연속 없음) → 훅 튐 제거
+    hw.run(ch, lambda t: q0 + dist * 0.5 * (1.0 - np.cos(np.pi * min(t / T, 1.0))), T + 0.3, kp, kd)
+    log(f"  0점 복귀 → {zero_deg:+.1f}° (부드럽게 {T:.1f}s · 현재 q={hw.read(ch)[0]:+.2f}°)")
 
 
 # ══════════════════════════════════════════════════════════════════════════

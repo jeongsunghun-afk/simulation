@@ -159,8 +159,15 @@ def phase_bw(hw, ch, kp, kd, f0, f1, T, amp, log):
     def qcmd(t):
         f = f0 + (f1 - f0) * t / (2 * T)
         return center + amp * np.sin(2 * np.pi * f * t)
-    ss = hw.run(ch, qcmd, T, kp, kd, progress="  bw-chirp")
-    hw.goto(ch, center, kp, kd, speed_dps=10.0)
+    # ★대역폭 측정은 고주파에서 q 가 **의도적으로 감쇠**(그게 −3dB)라, 측정값이 거의 안 변해
+    #   stale 검사가 오탐한다(실제 EtherCAT 정지가 아님). 처프 동안만 stale 끔(tau/vel/err 유지).
+    _stale = hw.lim.stale_ms
+    hw.lim.stale_ms = 1e9
+    try:
+        ss = hw.run(ch, qcmd, T, kp, kd, progress="  bw-chirp")
+    finally:
+        hw.lim.stale_ms = _stale
+    hw.goto(ch, center, kp, kd, speed_dps=8.0)
     a = samples_to_arrays(ss)
     t, q, qcmd_a = a["t"], a["q"], a["q_cmd"]
     fs = 1.0 / float(np.median(np.diff(t)))
