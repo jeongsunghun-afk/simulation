@@ -541,119 +541,74 @@ def _refresh_offsets():
                   if diff else '')
 
 
-def _calib_say(txt, append=True):
-    _calib_buf[0] = (_calib_buf[0] + txt) if append else txt
+# ── ★드라이버 알람 로그 (2026-09-11) ──────────────────────────────────────
+#   영점세팅(calib_zero 러너)은 제거했다 — 실기 영점은 ZeroSet_RobotEmbedded(0xE2 하드웨어)
+#   로만 잡는다. 이 로그는 그 자리를 이어받아 **드라이버 에러/두절/estop 을 시각별로 남긴다.**
+#   ★모드 LED·모터 LED 는 '지금 상태'만 보여줘 순간 폴트(5× 강성 중 off 등)를 놓친다 —
+#     로그는 edge(전이) 를 잡으므로 자기클리어된 폴트도 기록에 남는다.
+#   ★데이터원 = deploy state JSON 의 err(=ucStatus)·health·n_dead·estop (별도 .so 불요).
+_ALARM_BITS = ['과전류', '과전압', '저전압', '모터과온', 'MOSFET과온', 'ADC오프셋']  # ucStatus bit0..5
+
+
+def _alarm_decode(e):
+    e = int(e) & 0xFF
+    if e == 0:
+        return ''
+    w = [_ALARM_BITS[b] for b in range(6) if e & (1 << b)]
+    hi = [b for b in (6, 7) if e & (1 << b)]
+    if hi:
+        w.append('보호셧다운(bit%s·전원사이클로만 클리어)' % ','.join(map(str, hi)))
+    return ('·'.join(w) if w else '정의밖') + ' [0x%02X]' % e
+
+
+def _alarm_log(msg):
+    ts = time.strftime('%H:%M:%S')
+    _calib_buf[0] = (_calib_buf[0] + '[%s] %s\n' % (ts, msg))[-6000:]   # 최근분만 유지
     try:
         dpg.set_value('calib_out', _calib_buf[0])
     except Exception:
         pass
 
 
-def _find_mujoco_py():
-    """mujoco 를 import 할 수 있는 python 을 찾는다. 없으면 None."""
-    import sys as _sys
-    for cand in (os.path.expanduser('~/.venv-mujoco/bin/python3'), _sys.executable, 'python3'):
-        if not cand:
-            continue
-        try:
-            if subprocess.run([cand, '-c', 'import mujoco'],
-                              capture_output=True, timeout=30).returncode == 0:
-                return cand
-        except Exception:
-            pass
-    return None
+_alarm_prev = [None]      # 직전 관측(health·err·n_dead·estop·motors_on) — edge 검출용
 
 
-def _run_into_panel(argv, cwd):
-    """argv 를 돌리며 출력을 창에 **줄 단위로** 흘린다. 반환 = 종료코드."""
-    bar = '─' * 74
-    _calib_say('\n' + bar + '\n$ ' + ' '.join(argv) + '\n' + bar + '\n')
-    try:
-        pr = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
-                              stderr=subprocess.STDOUT, text=True, bufsize=1)
-        for line in pr.stdout:
-            _calib_say(line)
-        return pr.wait(timeout=300)
-    except Exception as e:
-        _calib_say('✗ 실행 실패: %s\n' % e)
-        return -1
-
-
-def _calib_worker():
-    _calib_say('', append=False)
-    _off_base[0] = _off_cfg_read()      # ★Δ 의 기준 — 지금 값을 찍어 두고, 뒤에 비교한다
-    if not os.path.exists(_CALIB_PY):
-        _calib_say('✗ 도구가 없다: %s\n' % _CALIB_PY); _calib_busy[0] = False; return
-
-    # ── ★게이트: 중력표를 만들 수 있는가 — **offset 을 건드리기 전에** 본다 ──
-    _calib_say('중력표 생성기(mujoco) 확인 중…\n')
-    gpy = _find_mujoco_py()
-    if gpy is None or not os.path.exists(_GRAV_PY):
-        _calib_say('\n  ❌ **아무것도 하지 않았다** — 중력표를 재생성할 수 없다.\n\n'
-                   '     mujoco 를 import 할 수 있는 python 을 못 찾았다.\n'
-                   '     중력표는 **채널각으로 색인**돼 있어서, offset 만 바꾸고 표를 그대로\n'
-                   '     두면 8축 전부 자기 offset 만큼 밀린 중력보상을 쓰게 된다.\n'
-                   '     ⇒ 반쪽 상태를 만드느니 아무것도 안 하는 게 낫다.\n\n'
-                   '     노트북에서 표를 만들어 커밋해 오거나, Pi 에 venv 를 만들 것.\n')
-        _calib_busy[0] = False; return
-    _calib_say('  ✅ ' + gpy + '\n')
-
-    # ── ①계산 — 표를 먼저 찍는다. 무엇이 박히는지 창에 남는다 ──
-    _calib_say('\n⏳정지 게이트 8초가 있다. 매달린 채 limp 이면 hip·thigh·foot 은 자유\n'
-               '  진자라 여기서 거부당하는 게 정상이다 — 지그로 물리고 다시 누를 것.\n')
-    if _run_into_panel(['python3', '-u', _CALIB_PY], _EMB_DIR) != 0:
-        _calib_say('\n  ❌ 계산이 게이트에 막혔다 — **적용하지 않는다**(위 메시지 참조).\n')
-        _calib_busy[0] = False; return
-
-    # ── ②적용 (★--force 없음 — 3° 게이트를 살려 둔다) ──
-    rc = _run_into_panel(['python3', '-u', _CALIB_PY, '--apply'], _EMB_DIR)
-    if rc != 0:
-        _calib_say('\n  ❌ 영점이 적용되지 않았다(종료코드 %d). 중력표는 건드리지 않는다.\n'
-                   '     3° 문턱에 막혔다면 **지그가 덜 물린 것**이다 — 다시 물리고 누를 것.\n'
-                   '     (--force 는 이 버튼에 없다. 정말 필요하면 터미널에서, 이유를 알고 쓸 것.)\n'
-                   % rc)
-        _calib_busy[0] = False; return
-
-    # ── ③중력표 재생성 — ②가 성공했으면 **반드시** 돈다 ──
-    rc2 = _run_into_panel([gpy, '-u', _GRAV_PY, '--apply'], os.path.dirname(_GRAV_PY))
-    if rc2 != 0:
-        _calib_say('\n  ⚠⚠**반쪽 상태다** — offset 은 바뀌었는데 중력표가 낡았다(종료코드 %d).\n'
-                   '     지금 중력보상은 틀린다. 표를 손으로 만들거나 영점을 되돌릴 것:\n'
-                   '       cd ~/simulation/biped/emb && cp config/biped_emb.yaml.bak config/biped_emb.yaml\n'
-                   % rc2)
-    else:
-        _calib_say('\n  ✅ **영점 + 중력표 둘 다 적용됐다.**\n\n'
-                   '  다음:\n'
-                   '   ① **제어기**를 재시작해야 반영된다(기동 시 config 를 읽는다).\n'
-                   '      ⚠RobotEmbedded(Emb) 는 이 파일을 안 읽는다 — 건드리지 말 것.\n'
-                   '        emb_ctl.sh 는 그쪽 스크립트라 여기선 소용없다. 게다가 재기동하면\n'
-                   '        Emb 가 **약 4.6초(수신 100틱 + 램프 4500틱 @1kHz)간 SHM 명령을\n'
-                   '        무시**한다 — 소프트웨어로 못 막는 게이트다. 그동안 제어기가 무슨\n'
-                   '        모드를 쏘든 버려지고, Emb 는 자기 램프로 마지막 자세를 잡고 있다.\n'
-                   '        즉 제어기와 Emb 가 4.6초 동안 **따로 논다**. 그게 부담스러운 이유다.\n'
-                   '        (2026-08-26 정정: 예전엔 여기 "전 관절을 4.5초에 걸쳐 0°로 램프한다"\n'
-                   '         고 적혀 있었다. halGait.cpp:586 이 램프 목표를 **측정각**으로\n'
-                   '         덮어쓴 뒤로 램프는 제자리 유지다 — 로봇이 안 움직이는 게 정상이다.\n'
-                   '         위험한 건 자세가 튀는 것이 아니라 명령이 먹지 않는 4.6초의 공백이다.)\n'
-                   '      biped_emb.py 를 쓰는 경우:\n'
-                   '        pkill -f app/biped_emb.py\n'
-                   '        cd ~/simulation/biped/emb && python3 app/biped_emb.py --start-mode off\n'
-                   '      biped_deploy 를 쓰는 경우: 그 프로세스만 끄고 같은 인자로 다시 띄울 것.\n'
-                   '      ★확인은 위 [영점] 표의 **제어기 줄이 초록으로 바뀌는지**로 한다.\n'
-                   '   ② 재시작 뒤 **무중력으로 좌우 대조**할 것. 영점이 원인이었다면\n'
-                   '      HL/HR thigh 가 이제 같은 배율에서 중립이 돼야 한다.\n'
-                   '   ③ 되돌리려면 config/biped_emb.yaml.bak (또는 git checkout)\n'
-                   '   ④ 마음에 들면 커밋할 것 — config 와 spec 이 **같이** 바뀌었다.\n')
-    _calib_busy[0] = False
-
-
-def on_calib_zero():
-    """영점 — 계산 → 적용 → 중력표까지. 백그라운드 스레드(도구가 10초+ 걸린다)."""
-    if _calib_busy[0]:
+def _check_driver_alarms(st):
+    """state 의 health/err/두절/estop 변화를 edge 로 잡아 로그에 남긴다."""
+    health = st.get('health') or []
+    err = st.get('err') or []
+    nd, nf = st.get('n_dead', 0), st.get('n_fault', 0)
+    estop = bool(st.get('estop') or st.get('estop_latched'))
+    mon = bool(st.get('motors_on'))
+    mode = st.get('mode')
+    cur = {'h': tuple(health), 'e': tuple(int(x) for x in err),
+           'nd': nd, 'nf': nf, 'estop': estop, 'mon': mon, 'mode': mode}
+    prev = _alarm_prev[0]
+    if prev is None:
+        _alarm_prev[0] = cur
+        _alarm_log('▶ 알람 감시 시작 — mode=%s 모터on=%s (정상%s/에러%s/두절%s)'
+                   % (mode, mon, st.get('n_ok', '?'), nf, nd))
         return
-    _calib_busy[0] = True
-    dpg.configure_item('calib_win', show=True)
-    threading.Thread(target=_calib_worker, daemon=True).start()
+    for i in range(min(len(JOG_NAMES), max(len(cur['h']), len(cur['e'])))):
+        nm = JOG_NAMES[i]
+        ph = prev['h'][i] if i < len(prev['h']) else None
+        ch = cur['h'][i] if i < len(cur['h']) else None
+        if ch != ph and ch is not None:
+            if ch in ('fault', 'dead'):
+                _alarm_log('⚠ %s → %s' % (nm, {'fault': '에러(FAULT)', 'dead': '두절(DEAD)'}.get(ch, ch)))
+            elif ch == 'ok' and ph in ('fault', 'dead'):
+                _alarm_log('✓ %s 정상 복귀' % nm)
+        pe = prev['e'][i] if i < len(prev['e']) else 0
+        ce = cur['e'][i] if i < len(cur['e']) else 0
+        if ce != pe and ce != 0:
+            _alarm_log('⚠ %s 드라이버에러: %s' % (nm, _alarm_decode(ce)))
+    if cur['estop'] and not prev['estop']:
+        _alarm_log('⛔ E-STOP 래치 (reason=%s)' % st.get('estop_reason'))
+    if (not cur['mon']) and prev['mon'] and mode not in ('off', 'soft_off'):
+        _alarm_log('⚠ 모터 OFF 전환 (mode=%s 인데 motors_on=False — 드라이버 드롭 의심)' % mode)
+    _alarm_prev[0] = cur
+
+
 
 
 # ── ★제어기 재기동 (통신 두절 복구) ──────────────────────────────────────
@@ -1076,7 +1031,7 @@ with dpg.window(tag='main'):
                  color=(210, 150, 90))
     dpg.add_separator()
     # ── ★영점 (2026-08-24) ────────────────────────────────────────────────
-    dpg.add_text('● 영점 offset_deg — 계산 → 적용 → 중력표 재생성까지 한 번에', color=(255, 205, 120))
+    dpg.add_text('● 영점 offset_deg 대조 (config vs 제어기 · 하드웨어영점=ZeroSet_RobotEmbedded)', color=(255, 205, 120))
     with dpg.table(header_row=True, policy=dpg.mvTable_SizingFixedFit,
                    borders_innerV=True, borders_outerH=True, borders_outerV=True):
         dpg.add_table_column(label='')
@@ -1095,23 +1050,8 @@ with dpg.window(tag='main'):
             for _i in range(NJ):
                 dpg.add_text('', tag='offd_%d' % _i, color=(255, 180, 90))
     dpg.add_text('', tag='off_msg', color=(240, 170, 90))
-    with dpg.group(horizontal=True):
-        _zb = dpg.add_button(label='영점', width=100, callback=on_calib_zero)
-        dpg.bind_item_theme(_zb, _stop)      # ★config 를 바꾸는 동작 — 정지계열 색으로 구분
-        dpg.add_text('(Off 전원 + 지그 물린 상태에서)', color=(120, 130, 150))
-    with dpg.tooltip(_zb):
-        dpg.add_text('★config 를 **실제로 바꾼다**. 한 번 누르면 셋을 순서대로 한다:\n'
-                     '  ① calib_zero.py              → 계산(표를 창에 찍는다)\n'
-                     '  ② calib_zero.py --apply      → config 의 offset_deg\n'
-                     '  ③ gen_grav_table.py --apply  → spec 의 중력표(채널각 색인)\n'
-                     '③을 빠뜨리면 8축 전부 자기 offset 만큼 밀린 중력보상을 쓴다.\n'
-                     '③을 못 돌릴 상황이면(mujoco 없음) **아무것도 안 한다**.\n\n'
-                     '⚠먼저 [Off 전원] 을 누를 것. 제어기가 축을 붙들고 있으면 그 자세는\n'
-                     '  "제어기가 생각하는 홈" 이지 기준자세가 아니다 — 도구가 거부한다.\n'
-                     '⚠정지 게이트 8초. 매달린 채 limp 이면 hip·thigh·foot 은 자유 진자라\n'
-                     '  거부되는 게 정상이다. 영점은 **기구(지그)** 가 정의해야 한다.\n'
-                     '⚠--force 는 없다. 3° 문턱에 막히면 지그를 다시 물 것.\n'
-                     '⚠적용 뒤 제어기 **재시작** 필요. 되돌리기는 biped_emb.yaml.bak.')
+    dpg.add_text('(영점세팅 제거 — 하드웨어영점 ZeroSet_RobotEmbedded 사용. 위 표는 config↔제어기 영점 대조 진단용)',
+                 color=(120, 130, 150))
     dpg.add_separator()
     # ── ★각축(JOG) 패널: 8관절 슬라이더(모터 1:1) + 실측 + 통신 상태 LED ──
     dpg.add_text('● 각축 JOG 검증 (슬라이더=목표각° · 실측° · ●=상태LED)', color=(255, 205, 120))
@@ -1149,14 +1089,18 @@ with dpg.handler_registry():
     dpg.add_mouse_release_handler(callback=lambda: (left.release(), right.release()))
     dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right, callback=lambda: (left.toggle_latch(), right.toggle_latch()))
 
-# ★영점 계산 출력창 — 'main' **밖**에 만든다(안에 넣으면 자식 위젯이 돼 창이 안 뜬다).
-#   기본 숨김. 버튼을 누를 때만 보인다 — 세로 공간을 상시 잡아먹지 않게.
-with dpg.window(label='영점 — 계산·적용·중력표 재생성', tag='calib_win',
-                width=660, height=470, pos=(20, 120), show=False):
-    dpg.add_text('offset = 채널각(기준자세) − raw각(기준자세)·sign·k', color=(150, 155, 175))
+# ★드라이버 알람 로그창 — 'main' **밖**에 만든다(안에 넣으면 자식 위젯이 돼 창이 안 뜬다).
+#   상시 표시. 모드/모터 LED 는 '지금'만 보여줘 순간 폴트를 놓치므로, 여기 시각별로 남긴다.
+with dpg.window(label='드라이버 알람 로그', tag='calib_win',
+                width=660, height=330, pos=(30, 430), show=True):
+    with dpg.group(horizontal=True):
+        dpg.add_text('드라이버 에러·두절·estop·모터OFF 를 시각별 기록 (state err=ucStatus 기반)',
+                     color=(150, 155, 175))
+        dpg.add_button(label='지우기', width=70,
+                       callback=lambda: (_calib_buf.__setitem__(0, ''), dpg.set_value('calib_out', '')))
     dpg.add_separator()
     dpg.add_input_text(tag='calib_out', multiline=True, readonly=True,
-                       width=-1, height=390, default_value='')
+                       width=-1, height=270, default_value='(감시 대기중… 컨트롤러 연결되면 시작)')
 
 dpg.bind_theme(_dark)
 if _kf is not None:
@@ -1176,6 +1120,8 @@ while dpg.is_dearpygui_running():
     try:
         with open(STATE) as f:
             st = json.load(f)
+        try: _check_driver_alarms(st)            # ★드라이버 에러/두절/estop edge → 알람 로그
+        except Exception: pass
         _off_live[0] = st.get('offset_deg')      # ★제어기가 **기동 시 읽은** 영점
         _refresh_mode_led(st)                    # ★모드/힘 LED — 실제 상태 기준
         if 'health' in st or 'q_leg_deg' in st:          # ── emb(app/biped_emb) 상태: LED+실측 ──
