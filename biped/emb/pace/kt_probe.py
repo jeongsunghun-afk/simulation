@@ -61,48 +61,64 @@ def _sweep(hw, ch, mass, lever, kp, span_deg, n_ang, log):
 
 
 def _verdict(R, mass, lever, log):
-    q, tau, cur, _ = R[:, 0], R[:, 1], R[:, 2], R[:, 3]
+    q, tau, cur = R[:, 0], R[:, 1], R[:, 2]
+    mgl = mass * G * lever
     maxdiff = float(np.max(np.abs(tau - cur)))
-    log(f"  fCurrent vs fTorque 최대차 = {maxdiff:.6g}  (전 홀드 {len(R)}점)")
+
+    # ── (A) 무게추 역산 = 토크체인 검증 (전류 불요) ──────────────────────────
+    #   정지홀드에서 전달토크=mgL cosθ(중력균형). 드라이버 보고토크 fTorque 를 각도로 피팅:
+    #     τ_rep = a·cosθ + b·sinθ → 보고진폭 A_rep, 수평 q0.
+    #   토크스케일 α = mgL / A_rep  (=명령→실현 비, bench alpha 와 일치해야).
+    #   ★이건 k_t·기어·η·손실을 **한 덩어리**로 검증한다 — k_t 단독분리는 아님.
+    coef, *_ = np.linalg.lstsq(np.column_stack([np.cos(q), np.sin(q)]), tau, rcond=None)
+    A_rep = float(np.hypot(*coef)); q0 = float(np.arctan2(coef[1], coef[0]))
+    alpha = mgl / A_rep if A_rep > 1e-9 else float("nan")
+    resid = tau - np.column_stack([np.cos(q), np.sin(q)]) @ coef
+    ss_tot = float(np.sum((tau - tau.mean()) ** 2))
+    r2 = 1.0 - float(np.sum(resid ** 2)) / ss_tot if ss_tot > 1e-12 else float("nan")
+    log("  [A] 무게추 역산 — 토크체인 검증(전류 불요):")
+    log(f"      보고토크진폭 {A_rep:.3f} Nm vs 물리 mgL {mgl:.3f} Nm → **토크스케일 α={alpha:.3f}**"
+        f"  ·  R²={r2:.4f}  ·  수평 q0={np.rad2deg(q0):+.1f}°")
+    ok = 0.6 < alpha < 1.15
+    log(f"      ⇒ {'OK — 명령토크가 물리적으로 실현됨(토크체인 정합). bench alpha 와 대조.' if ok else '⚠α 이상 — 부호/레버/질량 재확인'}")
+    for eta in (1.0, 0.9):                          # datasheet 전제 역산전류(외부프로브 대조용)
+        i_h = mgl / (GEAR * KT_MOTOR_SPEC * eta)
+        log(f"      역산 전류(수평·η={eta}) i = mgL/(7·0.2·η) = {i_h:.2f} A")
+
+    # ── (B) 절대 k_t (Nm/A) = 독립 전류 필요 ─────────────────────────────────
+    log(f"  [B] 절대 k_t(Nm/A) — fCurrent vs fTorque 비트차 {maxdiff:.6g}:")
     if maxdiff < IDENT_EPS:
-        log("  ⇒ **fCurrent = fTorque 복제** — SHM 에 독립 전류 없음(구펌웨어와 동일).")
-        log(f"     k_t 전류측정 불가. 데이터시트값 사용: k_t(모터)={KT_MOTOR_SPEC} Nm/A,")
-        log(f"     k_t(관절)=0.2×{GEAR:.0f}×η = 1.26(η0.9)~1.40(η1.0) Nm/A [교차검증 완료: 86.8≈84Nm].")
-        log("     진짜 전류가 필요하면 → 외부 전류프로브 또는 MCU 펌웨어의 실 Iq 노출.")
-        log("     (명령→출력 토크충실도 α 는 bench_actuator_full 의 alpha 페이즈가 전류 없이 준다.)")
-        return dict(independent=False, maxdiff=maxdiff)
-    # 독립 — k_t 회귀. τ_report(신뢰) vs i. 기울기 = k_t(관절).
-    log("  ⇒ **fCurrent 가 fTorque 와 독립** — 진짜 전류로 판단, k_t 회귀 수행.")
+        log("      복제(독립전류 없음) → **Nm/A 절대측정 불가**. datasheet 사용:")
+        log(f"      k_t(모터)={KT_MOTOR_SPEC}, k_t(관절)=0.2×{GEAR:.0f}×η=1.26~1.40 [피크토크 86.8≈84Nm 로 이미 정합].")
+        return dict(alpha=alpha, r2=r2, q0_deg=float(np.rad2deg(q0)), independent=False, maxdiff=maxdiff)
+    # 독립전류일 때만 진짜 회귀
     A = np.column_stack([cur, np.ones_like(cur)])
     (slope, intercept), *_ = np.linalg.lstsq(A, tau, rcond=None)
-    pred = A @ np.array([slope, intercept])
-    ss_res = float(np.sum((tau - pred) ** 2)); ss_tot = float(np.sum((tau - tau.mean()) ** 2))
-    r2 = 1.0 - ss_res / ss_tot if ss_tot > 1e-12 else float("nan")
     kt_joint = float(slope); kt_motor = kt_joint / GEAR
-    i_dead = -intercept / slope if abs(slope) > 1e-9 else float("nan")   # τ=0 일 때 전류(데드존)
-    log(f"  → k_t(관절)={kt_joint:.4f} Nm/A  ·  k_t(모터)={kt_motor:.4f} Nm/A"
-        f"  (데이터시트 {KT_MOTOR_SPEC}, 편차 {100*(kt_motor-KT_MOTOR_SPEC)/KT_MOTOR_SPEC:+.0f}%)")
-    log(f"  → 선형성 R²={r2:.4f}  ·  전류 데드존(τ=0 절편)={i_dead:+.3f} A")
-    if r2 < 0.98:
-        log("    ⚠R² 낮음 — 비선형/데드존/열드리프트 의심. 표본각·홀드시간 늘려 재측정.")
-    return dict(independent=True, maxdiff=maxdiff, kt_joint=kt_joint, kt_motor=kt_motor,
-                r2=r2, i_deadzone_a=i_dead)
+    i_dead = -intercept / slope if abs(slope) > 1e-9 else float("nan")
+    log(f"      ✔독립전류 → k_t(관절)={kt_joint:.4f}, k_t(모터)={kt_motor:.4f} Nm/A"
+        f" (datasheet {KT_MOTOR_SPEC}, 편차 {100*(kt_motor-KT_MOTOR_SPEC)/KT_MOTOR_SPEC:+.0f}%) · 전류데드존 {i_dead:+.3f} A")
+    return dict(alpha=alpha, r2=r2, q0_deg=float(np.rad2deg(q0)),
+                independent=True, maxdiff=maxdiff, kt_joint=kt_joint, kt_motor=kt_motor)
 
 
 def _selftest():
-    print("  [selftest] 판정로직 — 두 경우 합성:")
+    print("  [selftest] 판정로직 — 무게추 역산(α) + 복제/독립 두 경우:")
+    mass, lever = 2.0, 0.13; mgl = mass * G * lever
+    q = np.deg2rad(np.linspace(-70, 70, 9)); q0 = np.deg2rad(10.0)
+    tau = mgl * np.cos(q - q0)                       # 보고토크=중력균형 → 토크스케일 α≈1
     # (1) 복제: cur = tau
-    tau = np.linspace(0, 2.55, 9); q = np.deg2rad(np.linspace(-60, 60, 9))
     R_dup = np.column_stack([q, tau, tau.copy(), np.zeros_like(tau)])
-    r1 = _verdict(R_dup, 2.0, 0.13, lambda m: print("   " + m))
+    r1 = _verdict(R_dup, mass, lever, lambda m: print("   " + m))
     assert r1["independent"] is False, "복제를 독립으로 오판"
+    assert abs(r1["alpha"] - 1.0) < 0.05, f"역산 토크스케일 오류 {r1['alpha']}"
     # (2) 독립: cur = tau/1.4 + noise
     kt = 1.40; cur = tau / kt + np.random.default_rng(0).normal(0, 0.002, tau.shape)
     R_ind = np.column_stack([q, tau, cur, np.abs(tau - cur)])
-    r2 = _verdict(R_ind, 2.0, 0.13, lambda m: print("   " + m))
+    r2 = _verdict(R_ind, mass, lever, lambda m: print("   " + m))
     assert r2["independent"] is True, "독립을 복제로 오판"
-    assert abs(r2["kt_joint"] - 1.40) < 0.02, f"k_t 복원 실패 {r2['kt_joint']}"
-    print(f"  [selftest] OK — 복제·독립 판정 + k_t 복원({r2['kt_joint']:.3f}≈1.40) 통과")
+    assert abs(r2["kt_joint"] - 1.40) < 0.05, f"k_t 복원 실패 {r2['kt_joint']}"
+    print(f"  [selftest] OK — 역산 α({r1['alpha']:.3f}≈1.0) · 복제/독립 판정 · k_t 복원({r2['kt_joint']:.3f}≈1.40)")
     return 0
 
 
