@@ -187,7 +187,20 @@ def measure_backlash(hw, spec, joint, plotdir, log=print) -> tuple[str, dict]:
     hw.arm(ch, 0.0, 0.0)
     time.sleep(0.3)
     q0 = hw.read(ch)[0]
-    qs, ts, tc_all, rotated = [], [], [], False
+    # ★aux(2차 출력축 엔코더, 벨트 전단계) 동시 캡처 — q(1차,모터측)−aux = 감속기 유격,
+    #   aux 이동폭 = 클램프 견고성(출력이 진짜 고정됐나) 검증.
+    import ctypes as _C
+    _rd_aux = None
+    try:
+        hw.lib.bridge_aux.restype = _C.c_int
+        hw.lib.bridge_aux.argtypes = [_C.POINTER(_C.c_float), _C.POINTER(_C.c_float)]
+        _ap = (_C.c_float * hw.n)(); _av = (_C.c_float * hw.n)()
+        def _rd_aux():
+            hw.lib.bridge_aux(_ap, _av); return float(_ap[ch])
+        aux0 = _rd_aux()
+    except Exception:
+        aux0 = 0.0
+    qs, ts, tc_all, auxs, rotated = [], [], [], [], False
     seg_bounds = []                                  # ★경계를 추측하지 말고 가진 시점에 기록
     for a, b in segs:
         seg_bounds.append(len(qs))
@@ -199,13 +212,14 @@ def measure_backlash(hw, spec, joint, plotdir, log=print) -> tuple[str, dict]:
             tc = a + (b - a) * (t / T)
             s = hw.step_torque(ch, tc, tau_max)
             qs.append(s.q_deg - q0); ts.append(s.tau); tc_all.append(tc)
+            auxs.append((_rd_aux() - aux0) if _rd_aux else float("nan"))
             if abs(s.q_deg - q0) > q_elastic_max:      # 탄성범위 초과 = 회전 시작
                 rotated = True; break
             time.sleep(hw.dt)
         if rotated: break
     hw.limp()
 
-    q = np.array(qs); tau = np.array(ts); tcmd = np.array(tc_all)
+    q = np.array(qs); tau = np.array(ts); tcmd = np.array(tc_all); aux = np.array(auxs)
     if rotated:
         warn.append(f"<b>관절이 회전했다</b>(이동 {abs(q).max():.2f}° > {q_elastic_max}°) — "
                     f"τ_max 를 낮춰 재시험할 것. 이 결과는 무효다.")
@@ -275,6 +289,17 @@ def measure_backlash(hw, spec, joint, plotdir, log=print) -> tuple[str, dict]:
     if ksens:
         log("    임계 민감도(물린구간 |tau|> f·tau_max 일 때 강성 Nm/deg):")
         log("      " + " · ".join(f"f={f}: {v:.2f}" for f, v in ksens.items()))
+    # ── aux(2차) 교차: 클램프 견고성(2차 이동폭) + 감속기 유격(q−aux) ──
+    res_aux = {}
+    if aux.size == q.size and np.isfinite(aux).all() and not rotated:
+        aux_pp = float(aux.ptp())
+        qa = q - aux                                     # 1차−2차 = 감속기 구간 유격+비틀림
+        qa_lash, qa_k, _n, _e = _analyze(qa, tau, tau_max, lambda *a: None)
+        log(f"    [aux] 2차(출력축) 이동폭 {aux_pp:.4f}° (클램프 견고성 — 작을수록 출력이 잘 고정된 것)")
+        log(f"          q−aux(감속기 유격) 백래시 {('%.4f°' % qa_lash) if qa_lash is not None else '미검출(유의미한 유격 없음)'}"
+            + (f" · 감속기강성 {qa_k:.2f} Nm/deg" if qa_k else ""))
+        res_aux = dict(aux_ptp_deg=aux_pp, backlash_q_minus_aux_deg=qa_lash,
+                       stiffness_q_minus_aux=qa_k)
     return html, {"backlash_deg": lash, "stiffness_nm_per_deg": k_deg, "loop_width_deg": loop_w,
                   "rotated": rotated, "ch": ch, "name": name, "k_vs_threshold": ksens,
-                  "npz": npz}
+                  "npz": npz, **res_aux}
