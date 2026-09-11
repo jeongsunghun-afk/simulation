@@ -342,7 +342,7 @@ def main() -> int:
     hw = open_hw(spec)
     read_aux = bind_aux(hw)
     if read_aux and read_aux(a.ch) is not None:
-        print("  aux(출력엔코더) 활성 — 교차확인 가능(AUX_MODE=1)")
+        print("  aux(출력엔코더) 활성 — q(1차)vs aux(2차) 교차확인 가능 (0x50 상시)")
     results = {"meta": dict(ch=a.ch, name=name, mass=a.mass, lever=a.lever, mgl=mgl)}
 
     def gate(header, danger=False):
@@ -355,7 +355,7 @@ def main() -> int:
             except (EOFError, KeyboardInterrupt):
                 raise KeyboardInterrupt
         if not a.clamped:
-            goto_zero(hw, a.ch, a.kp, a.kd, a.zero)
+            goto_zero(hw, a.ch, a.kp, 2.0, a.zero)
 
     try:
         with hw:
@@ -396,7 +396,7 @@ def main() -> int:
             # ★정상 완료 → 마지막 0점 복귀 후 종료(limp 전). clamped 면 생략(하드스톱).
             if not a.clamped:
                 print("\n[종료] 0점 복귀")
-                goto_zero(hw, a.ch, a.kp, a.kd, a.zero)
+                goto_zero(hw, a.ch, a.kp, 2.0, a.zero)
     except SafetyAbort as e:
         print(f"\n✗ 안전중단: {e}"); return 1
     except KeyboardInterrupt:
