@@ -212,10 +212,15 @@ def phase_chirp(hw, ch, mass, lever, kp, alpha, q0_deg, amp_deg, f0, f1, T, log)
     hw.goto(ch, center, kp, kd, speed_dps=12.0)
 
     q, dq, tau, t, _ = _cols(ss)
-    ddq = np.gradient(dq, t)                       # 각가속[rad/s²]
+    # ★dq(SHM 속도)는 노이즈가 커서 그대로 미분하면 θ̈ 가 쓰레기 → 관성 오식별(음수 등).
+    #   이동평균(~30ms)으로 dq 를 매끈하게 한 뒤 미분한다. 회귀에도 평활 dq 사용(일관).
+    dt_med = max(float(np.median(np.diff(t))), 1e-4)
+    wdq = max(1, int(0.03 / dt_med))
+    dq_s = np.convolve(dq, np.ones(wdq) / wdq, mode="same")
+    ddq = np.gradient(dq_s, t)                     # 각가속[rad/s²]
     load_free = alpha * tau - mgl * np.cos(q - q0)
-    good = np.abs(dq) > np.deg2rad(8.0)            # 정지부근 제외(마찰부호 모호)
-    Xd = np.column_stack([ddq[good], dq[good], np.sign(dq[good])])
+    good = np.abs(dq_s) > np.deg2rad(8.0)          # 정지부근 제외(마찰부호 모호)
+    Xd = np.column_stack([ddq[good], dq_s[good], np.sign(dq_s[good])])
     coef, *_ = np.linalg.lstsq(Xd, load_free[good], rcond=None)
     I_tot, b, Fc = float(coef[0]), float(coef[1]), float(coef[2])
     I_act = I_tot - mL2
@@ -238,21 +243,29 @@ def phase_freeswing(hw, ch, mass, lever, kp, q0_deg, log):
     while time.monotonic() - t0 < 6.0:
         qs.append(hw.read(ch)[0]); ts.append(time.monotonic() - t0)
         time.sleep(0.005)
-    t = np.array(ts); q = np.array(qs) - np.mean(np.array(qs)[-100:])
-    zc = np.where((q[:-1] < 0) & (q[1:] >= 0))[0]
-    if len(zc) >= 2:
-        Tosc = float(np.median(np.diff(t[zc])))
+    t = np.array(ts); q_raw = np.array(qs)
+    # ★저역필터(이동평균 ~60ms)로 노이즈 제거 — 안 하면 노이즈 영점교차를 진동으로 오판한다
+    #   (실측: 필터없이 T=0.02s·232회 = 50Hz 노이즈였음).
+    dt = 0.005; w = max(1, int(0.06 / dt))
+    qf = np.convolve(q_raw, np.ones(w) / w, mode="same")
+    qf = qf - np.mean(qf[-100:])
+    half = len(qf) // 2
+    amp_swing = float(np.max(qf[:half]) - np.min(qf[:half])) if half > 10 else 0.0
+    zc = np.where((qf[:-1] < 0) & (qf[1:] >= 0))[0]
+    Tosc = float(np.median(np.diff(t[zc]))) if len(zc) >= 2 else 0.0
+    # 진자주기 물리범위(0.2~4s) + 유의미한 스윙(>4°)이라야 유효
+    if amp_swing > 4.0 and 0.2 < Tosc < 4.0:
         I_tot = mgl * (Tosc / (2 * np.pi)) ** 2
-        log(f"  → 자유진동 T={Tosc:.3f}s ⇒ I_act={I_tot - mL2:.4f} kg·m²(교차확인, {len(zc)}회)")
+        log(f"  → 자유진동 T={Tosc:.3f}s · 스윙 {amp_swing:.0f}° ⇒ I_act={I_tot - mL2:.4f} kg·m²(교차확인)")
         return dict(T=Tosc, I_act_free=I_tot - mL2, oscillated=True)
-    log("  ⚠ 과감쇠(마찰↑) — 자유진동 미검출. 처프 관성만 사용.")
+    log(f"  ⚠ 자유진동 미검출(스윙 {amp_swing:.1f}° · 주기 {Tosc:.3f}s) — 과감쇠/노이즈. 처프 관성만 사용.")
     return dict(oscillated=False)
 
 
 # ══════════════════════════════════════════════════════════════════════════
 #  5.  T-N 선도  — 알려진 관성 자유가속 (최대토크, ~보행속도까지)
 # ══════════════════════════════════════════════════════════════════════════
-def phase_tn(hw, ch, mass, lever, kp, q0_deg, dyn, tau_cmd, span_deg, dur, log):
+def phase_tn(hw, ch, mass, lever, kp, q0_deg, dyn, tau_cmd, span_deg, dur, log, velcap=700.0):
     """순수토크 tau_cmd 로 **알려진 관성**(I_tot)을 자유가속시키고 θ̈(ω) 를 잰다.
          τ_out(ω) = I_tot·θ̈ + m·g·L·cosθ + Fc·sgn(ω) + b·ω     (전부 기지/측정)
        τ_out vs ω = **T-N 선도**. 평탄=전류제한(α 일정)·고속하락=역기전력/전압 제한.
@@ -267,11 +280,21 @@ def phase_tn(hw, ch, mass, lever, kp, q0_deg, dyn, tau_cmd, span_deg, dur, log):
     hw.arm(ch, kp, kd)
     start = q0_deg - 90.0 - span_deg                    # 바닥보다 span 아래(한쪽 끝)
     hw.goto(ch, start, kp, kd, speed_dps=12.0)
-    ss = hw.run_torque(ch, lambda t: tau_cmd, dur, tau_max=tau_cmd + 1.0,
-                       drift_max_deg=2 * span_deg + 15.0, progress="  T-N")
+    # ★T-N 은 속도掃引이 목적 — 자유가속 동안만 vel_trip 을 velcap 으로 상향(정지는 drift_max·brake).
+    #   36V/10A 공급: 전류10A→토크상한 ~14Nm(전류제한), 속도는 back-EMF(36V)로 제한. ⚠여유공간·캐치 필수.
+    _vt = hw.lim.vel_trip
+    hw.lim.vel_trip = max(_vt, float(velcap))
+    log(f"    (vel_trip {_vt:.0f}→{hw.lim.vel_trip:.0f} dps 일시상향 · drift {2*span_deg+15:.0f}° 로 정지)")
+    try:
+        ss = hw.run_torque(ch, lambda t: tau_cmd, dur, tau_max=tau_cmd + 1.0,
+                           drift_max_deg=2 * span_deg + 15.0, progress="  T-N")
+    finally:
+        hw.lim.vel_trip = _vt
     hw.brake(ch, kp, kd, 0.4)                           # 가속 후 잡기
     hw.goto(ch, q0_deg - 90.0, kp, kd, speed_dps=12.0)
     q, dq, _tau, t, _ = _cols(ss)
+    _w = max(1, int(0.03 / max(float(np.median(np.diff(t))), 1e-4)))
+    dq = np.convolve(dq, np.ones(_w) / _w, mode="same")  # 평활(노이즈 미분 방지) — 이후 전부 평활 dq
     ddq = np.gradient(dq, t)
     tau_out = I_tot * ddq + mgl * np.cos(q - q0) + Fc * np.sign(dq) + b * dq
     keep = dq > np.deg2rad(20.0)                        # 가속 중(정지부근 제외)
@@ -312,8 +335,11 @@ def main() -> int:
     ap.add_argument("--kp", type=float, default=100.0)
     ap.add_argument("--span-deg", type=float, default=60.0, help="α hold 각도범위 ±[°]")
     ap.add_argument("--n-ang", type=int, default=9, help="α hold 각도 개수")
-    ap.add_argument("--chirp", default="0.3,2.0,25,12", help="f0[Hz],f1[Hz],T[s],amp[°]")
+    ap.add_argument("--chirp", default="0.5,5.0,20,7",
+                    help="f0[Hz],f1[Hz],T[s],amp[°] — 관성 여기엔 고주파 필요(f1 낮으면 I 오식별)")
     ap.add_argument("--tn", default="5.0,40,0.5", help="T-N: tau_cmd[Nm],span[°],dur[s]")
+    ap.add_argument("--tn-velcap", type=float, default=700.0,
+                    help="T-N 자유가속 동안 vel_trip 상향치[dps] (36V/10A 공급 기준 掃引 상한)")
     ap.add_argument("--q0", type=float, default=None,
                     help="수평기준각[deg]. alpha 없이 chirp/tn 만 돌릴 때 지정(안 하면 부하모델 부정확)")
     ap.add_argument("--clamped", action="store_true", help="레버 클램프(백래시용)")
@@ -398,7 +424,8 @@ def main() -> int:
                 gate("\n[5] T-N 선도 (자유가속·최대토크) — ⚠하드스톱·여유공간 확인", danger=True)
                 tau_cmd, span, dur = (float(x) for x in a.tn.split(","))
                 results["tn"] = phase_tn(hw, a.ch, a.mass, a.lever, a.kp, q0,
-                                         results.get("chirp", {}), tau_cmd, span, dur, log=print)
+                                         results.get("chirp", {}), tau_cmd, span, dur, log=print,
+                                         velcap=a.tn_velcap)
             # ★정상 완료 → 마지막 0점 복귀 후 종료(limp 전). clamped 면 생략(하드스톱).
             if not a.clamped:
                 print("\n[종료] 0점 복귀")
