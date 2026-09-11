@@ -132,6 +132,7 @@ def main() -> int:
     ap.add_argument("--span-deg", type=float, default=70.0, help="홀드 각도범위 ±[°] (중력 τ 스윕폭)")
     ap.add_argument("--n-ang", type=int, default=9)
     ap.add_argument("--spec", default=os.path.join(HERE, "spec.yaml"))
+    ap.add_argument("--zero", type=float, default=0.0, help="궤적 전/후 복귀할 0점[deg]")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
@@ -140,7 +141,7 @@ def main() -> int:
         ap.error("--ch 필요 (또는 --selftest)")
 
     import yaml
-    from bench_actuator_full import open_hw
+    from bench_actuator_full import open_hw, goto_zero
     spec = yaml.safe_load(open(a.spec, encoding="utf-8"))
     mgl = a.mass * G * a.lever
     print("=" * 72)
@@ -150,8 +151,12 @@ def main() -> int:
     hw = open_hw(spec)
     try:
         with hw:
+            print("[시작] 0점 복귀")
+            goto_zero(hw, a.ch, a.kp, 2.0, a.zero)          # ★궤적 전 0점 복귀
             R = _sweep(hw, a.ch, a.mass, a.lever, a.kp, a.span_deg, a.n_ang, log=print)
             res = _verdict(R, a.mass, a.lever, log=print)
+            print("\n[종료] 0점 복귀")                       # ★정상 완료 → 0점 복귀 후 종료
+            goto_zero(hw, a.ch, a.kp, 2.0, a.zero)
     finally:
         hw.limp()
     return 0

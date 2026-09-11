@@ -218,6 +218,7 @@ def main() -> int:
     ap.add_argument("--chirp", default="0.5,10,24,3", help="bw: f0[Hz],f1[Hz],T[s],amp[°]")
     ap.add_argument("--phases", default="step,bw")
     ap.add_argument("--spec", default=os.path.join(HERE, "spec.yaml"))
+    ap.add_argument("--zero", type=float, default=0.0, help="각 궤적 전/후 복귀할 0점[deg]")
     ap.add_argument("--pause", action="store_true", help="각 페이즈 전 Enter 대기")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
@@ -227,7 +228,7 @@ def main() -> int:
         ap.error("--ch 필요 (또는 --selftest)")
 
     import yaml
-    from bench_actuator_full import open_hw
+    from bench_actuator_full import open_hw, goto_zero
     spec = yaml.safe_load(open(a.spec, encoding="utf-8"))
     phases = [p.strip() for p in a.phases.split(",") if p.strip()]
     f0, f1, T, amp = (float(x) for x in a.chirp.split(","))
@@ -238,12 +239,14 @@ def main() -> int:
     res = {}
 
     def gate(header, danger=False):
+        """헤더 → (Enter 대기) → **0점 복귀 후** 페이즈 진행."""
         print(header)
         if a.pause or danger:
             try:
                 input("  ⏎ Enter 로 진행 · Ctrl+C 로 중단 …")
             except (EOFError, KeyboardInterrupt):
                 raise KeyboardInterrupt
+        goto_zero(hw, a.ch, a.kp, a.kd, a.zero)
     try:
         with hw:
             if "step" in phases:
@@ -252,6 +255,8 @@ def main() -> int:
             if "bw" in phases:
                 gate("\n[②] 대역폭 (위치 처프 · 닫힌루프 FRF)")
                 res["bw"] = phase_bw(hw, a.ch, a.kp, a.kd, f0, f1, T, amp, log=print)
+            print("\n[종료] 0점 복귀")            # ★정상 완료 → 마지막 0점 복귀 후 종료
+            goto_zero(hw, a.ch, a.kp, a.kd, a.zero)
     finally:
         hw.limp()
 

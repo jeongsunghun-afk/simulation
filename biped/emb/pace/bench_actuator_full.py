@@ -122,6 +122,14 @@ def _cols(samples):
     return q, dq, tau_cmd, a["t"], np.deg2rad(a["q_cmd_deg"])
 
 
+def goto_zero(hw, ch, kp, kd, zero_deg=0.0, speed_dps=10.0, log=print):
+    """궤적 전/후 **0점 복귀**(에너자이즈 상태로 등속 이동 후 그 자리 유지).
+    ⚠--clamped(레버 하드스톱 고정)에서는 호출 금지 — 스톱과 충돌해 스톨/과전류."""
+    hw.arm(ch, kp, kd)
+    hw.goto(ch, zero_deg, kp, kd, speed_dps=speed_dps)
+    log(f"  0점 복귀 → {zero_deg:+.1f}° (현재 q={hw.read(ch)[0]:+.2f}°)")
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  1.  α + 정지마찰 Fs  — 각도별 step-and-hold (위·아래 양방향 접근)
 # ══════════════════════════════════════════════════════════════════════════
@@ -299,6 +307,8 @@ def main() -> int:
     ap.add_argument("--selftest", action="store_true", help="하드웨어 없이 로직만 검증")
     ap.add_argument("--pause", action="store_true",
                     help="각 페이즈 시작 전 Enter 대기(리그 점검·재배치용). tn(자유가속)은 이 옵션과 무관하게 항상 확인.")
+    ap.add_argument("--zero", type=float, default=0.0,
+                    help="각 궤적 전/후 복귀할 0점[deg]. --clamped 에서는 무시(하드스톱 충돌 방지).")
     a = ap.parse_args()
 
     spec = yaml.safe_load(open(a.spec, encoding="utf-8"))
@@ -326,13 +336,16 @@ def main() -> int:
     results = {"meta": dict(ch=a.ch, name=name, mass=a.mass, lever=a.lever, mgl=mgl)}
 
     def gate(header, danger=False):
-        """페이즈 헤더 출력. --pause 또는 danger 면 Enter 대기(중단은 Ctrl+C)."""
+        """페이즈 헤더 출력 → (Enter 대기) → **0점 복귀 후** 페이즈 진행. 중단은 Ctrl+C.
+        ⚠--clamped 면 0점 복귀 생략(레버가 하드스톱에 고정돼 있어 충돌)."""
         print(header)
         if a.pause or danger:
             try:
                 input("  ⏎ Enter 로 이 페이즈 진행 · Ctrl+C 로 전체 중단 …")
             except (EOFError, KeyboardInterrupt):
                 raise KeyboardInterrupt
+        if not a.clamped:
+            goto_zero(hw, a.ch, a.kp, a.kd, a.zero)
 
     try:
         with hw:
@@ -370,6 +383,10 @@ def main() -> int:
                 tau_cmd, span, dur = (float(x) for x in a.tn.split(","))
                 results["tn"] = phase_tn(hw, a.ch, a.mass, a.lever, a.kp, q0,
                                          results.get("chirp", {}), tau_cmd, span, dur, log=print)
+            # ★정상 완료 → 마지막 0점 복귀 후 종료(limp 전). clamped 면 생략(하드스톱).
+            if not a.clamped:
+                print("\n[종료] 0점 복귀")
+                goto_zero(hw, a.ch, a.kp, a.kd, a.zero)
     except SafetyAbort as e:
         print(f"\n✗ 안전중단: {e}"); return 1
     except KeyboardInterrupt:
