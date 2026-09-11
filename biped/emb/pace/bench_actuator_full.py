@@ -318,6 +318,49 @@ def phase_tn(hw, ch, mass, lever, kp, q0_deg, dyn, tau_cmd, span_deg, dur, log, 
 
 
 # ══════════════════════════════════════════════════════════════════════════
+#  5b. 저속 T-N (안전판) — 위치제어 등속스윕 마찰-속도 곡선
+# ══════════════════════════════════════════════════════════════════════════
+def phase_tnlow(hw, ch, mass, lever, kp, q0_deg, alpha, speeds, span_deg, log):
+    """★저속 T-N (안전): **위치제어 등속스윕**으로 여러 ω 에서 저항토크 τ(ω) 측정.
+       자유가속·brake 없음 → 회생 보호셧다운(고속 T-N 폴트) 원천 회피.
+
+       수직아래(중력≈0) 중심에서 ±span 을 속도 ω 로 훑고, 등속구간의 명령토크로:
+           α·τ_cmd = Fc + b·ω     (중력 상쇄)  →  τ(ω) 회귀 → Fc·b 교차확인·Stribeck
+       ⚠**최대토크 포락선 아님**(그건 다이나모/자유가속 필요). α 속도의존·마찰-속도용.
+       ⚠속도는 vel_trip(400) 아래로만(기본 ≤300dps). 위치제어라 폭주 없음."""
+    kd = 2.0
+    hw.arm(ch, kp, kd)
+    center = q0_deg - 90.0                              # 수직 아래(부하 최소)
+    lo = center - span_deg / 2.0; hi = center + span_deg / 2.0
+    rows = []                                           # (ω_dps, τ_resist[Nm])
+    for w in speeds:
+        w = float(w)
+        if w > 350.0:
+            log(f"    ω{w:.0f} 건너뜀 — vel_trip 보호(≤350dps 만)"); continue
+        hw.goto(ch, lo, kp, kd, speed_dps=max(w, 15.0))
+        T = span_deg / max(w, 1e-6) + 0.15
+        ss = hw.run(ch, lambda t, wl=w: min(lo + wl * t, hi), T, kp, kd)
+        hw.goto(ch, center, kp, kd, speed_dps=15.0)
+        q, dq, tau, tt, _ = _cols(ss)
+        dqd = np.rad2deg(dq)
+        good = np.abs(dqd - w) < (0.35 * w + 4.0)       # 등속(가감속·정지 제외)
+        if int(good.sum()) < 5:
+            log(f"    ω={w:6.1f}dps → 등속표본 부족(건너뜀)"); continue
+        tau_r = float(alpha * np.mean(tau[good]))        # 저항토크 = α·명령(수직서 중력≈0)
+        w_m = float(np.mean(dqd[good]))
+        rows.append((w_m, tau_r))
+        log(f"    ω={w_m:6.1f}dps → 저항토크(α보정) {tau_r:+.3f} Nm")
+    if len(rows) < 2:
+        log("  ⚠ 저속 T-N 표본 부족 — speeds/span 조정"); return dict(ok=False, rows=rows)
+    R = np.array(rows); w_rad = R[:, 0] * np.pi / 180.0; tr = np.abs(R[:, 1])
+    (b_fit, Fc_fit), *_ = np.linalg.lstsq(np.column_stack([w_rad, np.ones(len(R))]), tr, rcond=None)
+    note = "Stribeck(저속 하강, b<0)" if b_fit < -1e-3 else "점성 상승" if b_fit > 1e-3 else "평탄"
+    log(f"  → 저속 T-N(마찰-속도): **Fc={Fc_fit:.3f} Nm · b={b_fit:.4f} Nm·s/rad** ({note}) — chirp Fc·b 교차확인")
+    log(f"     ⚠최대토크 포락선(τ_max·q̇_max)은 아님 — 다이나모/자유가속 필요")
+    return dict(ok=True, Fc_tnlow=Fc_fit, b_tnlow=b_fit, rows=rows)
+
+
+# ══════════════════════════════════════════════════════════════════════════
 #  4.  백래시 + 강성  — 양방향 토크왕복 (기존 툴, 레버 클램프)
 # ══════════════════════════════════════════════════════════════════════════
 def phase_backlash(hw, spec, ch, out, log):
@@ -341,6 +384,8 @@ def main() -> int:
     ap.add_argument("--chirp", default="0.5,5.0,20,7",
                     help="f0[Hz],f1[Hz],T[s],amp[°] — 관성 여기엔 고주파 필요(f1 낮으면 I 오식별)")
     ap.add_argument("--tn", default="5.0,40,0.5", help="T-N: tau_cmd[Nm],span[°],dur[s]")
+    ap.add_argument("--tnlow-speeds", default="30,60,120,200,300",
+                    help="저속 T-N(안전판) 등속스윕 속도[dps], ≤350. 자유가속·brake 없음")
     ap.add_argument("--tn-velcap", type=float, default=700.0,
                     help="T-N 자유가속 동안 vel_trip 상향치[dps] (36V/10A 공급 기준 掃引 상한)")
     ap.add_argument("--q0", type=float, default=None,
@@ -423,6 +468,12 @@ def main() -> int:
             if "freeswing" in phases:
                 gate("\n[3] I_act 교차확인 (자유진동)")
                 results["freeswing"] = phase_freeswing(hw, a.ch, a.mass, a.lever, a.kp, q0, log=print)
+            if "tnlow" in phases:
+                gate("\n[5b] 저속 T-N (위치제어 등속스윕 · 안전 · 마찰-속도)")
+                al = results.get("alpha", {}).get("alpha", 0.834)
+                sps = [float(x) for x in a.tnlow_speeds.split(",") if x.strip()]
+                results["tnlow"] = phase_tnlow(hw, a.ch, a.mass, a.lever, a.kp, q0, al,
+                                               sps, a.span_deg, log=print)
             if "tn" in phases:
                 gate("\n[5] T-N 선도 (자유가속·최대토크) — ⚠하드스톱·여유공간 확인", danger=True)
                 tau_cmd, span, dur = (float(x) for x in a.tn.split(","))
