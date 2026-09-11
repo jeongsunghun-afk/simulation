@@ -173,10 +173,19 @@ def phase_bw(hw, ch, kp, kd, f0, f1, T, amp, log):
     fs = 1.0 / float(np.median(np.diff(t)))
     f, H = tfestimate(qcmd_a, q, fs)
     bw = bandwidth(f, H, f0, f1)
-    log(f"  → −3dB 대역폭 {bw['bw_hz']:.2f} Hz  ·  대역서 위상 {bw['phase_deg']:+.0f}°"
-        f"  ·  저역게인 {bw['gain_dc']:.3f}  (fs={fs:.0f}Hz, 스윕 {f0}-{f1}Hz)")
+    # 주파수별 |H|/저역 롤오프 표 (−3dB=0.707 위치가 보이게)
+    mag = np.abs(H); g0 = bw["gain_dc"] if bw["gain_dc"] > 1e-9 else 1.0
+    log("  |H|/저역 롤오프 (−3dB=0.707):")
+    for ftgt in (1, 2, 4, 6, 8, 10, 12, 15, 20):
+        if ftgt <= f1 + 0.5:
+            j = int(np.argmin(np.abs(f - ftgt)))
+            r = mag[j] / g0
+            ph = np.rad2deg(np.angle(H[j]))
+            log(f"      {f[j]:5.1f}Hz: {r:.3f} ({ph:+4.0f}°){'  ← −3dB' if abs(r - 0.707) < 0.06 else ''}")
+    log(f"  → −3dB 대역폭 {bw['bw_hz']:.2f} Hz · 위상 {bw['phase_deg']:+.0f}° · 저역게인 {bw['gain_dc']:.3f}"
+        f" (fs={fs:.0f}Hz, 스윕 {f0}-{f1}Hz)")
     if not np.isfinite(bw["bw_hz"]):
-        log(f"    ⚠대역 내 −3dB 없음 → 대역폭 > {f1}Hz (또는 저역게인 이상). f1 확대 재측정.")
+        log(f"    ⚠대역 내 −3dB 없음 → 대역폭 > {f1}Hz (루프가 빠름). step 상승시간으로 교차확인.")
     return bw
 
 
@@ -222,7 +231,7 @@ def main() -> int:
     ap.add_argument("--kd", type=float, default=2.0)
     ap.add_argument("--delta", type=float, default=10.0, help="스텝 크기 ±[°]")
     ap.add_argument("--window", type=float, default=0.5, help="스텝 관측창[s]")
-    ap.add_argument("--chirp", default="0.5,10,24,3", help="bw: f0[Hz],f1[Hz],T[s],amp[°]")
+    ap.add_argument("--chirp", default="0.5,15,24,2.5", help="bw: f0[Hz],f1[Hz],T[s],amp[°]")
     ap.add_argument("--phases", default="step,bw")
     ap.add_argument("--spec", default=os.path.join(HERE, "spec.yaml"))
     ap.add_argument("--zero", type=float, default=0.0, help="각 궤적 전/후 복귀할 0점[deg]")
