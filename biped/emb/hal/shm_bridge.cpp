@@ -43,7 +43,7 @@ static const int CONN_WINDOW = 250;      // 이 콜 수(≈0.5s@500Hz) 동안 �
 //   ⇒ 상위 니블에 4비트 카운터를 실으면 Pi↔MCU 왕복을 직접 셀 수 있다 — 동결 포렌식이
 //     carrier 로 추정하던 것을 대체한다. 지금까지도 ucCommand 는 Emb 카운트가 실려
 //     매 틱 변하는 값이었으므로(우리가 0 을 보내도) 새 값이 가는 것 자체는 새 위험이 아니다.
-static unsigned char g_mode = 1;         // ucMode: 1=MIT/임피던스 · 0x5A=+출력축 엔코더 응답
+static unsigned char g_mode = 0x50;      // ucMode 주모드: 0x50=ENA_MOT(Enable+임피던스) · 0x5A=+aux (신펌웨어 2026-09; 구=1)
 static int   g_ack_on = 1;               // ACK_CTR=0 으로 끔
 static unsigned g_tick = 0;              // write 틱마다 +1 (전 채널 공통 — 상관 가능하게)
 static float g_aux_pos[16] = {0};        // 마지막 aux pos[deg] (fGainKp 슬롯)
@@ -59,13 +59,17 @@ static void sleep_ms(int ms){ struct timespec ts{ ms/1000, (long)(ms%1000)*10000
 int bridge_init(int recv_wait_ms){
     // env 는 여기서 한 번만 읽는다(운전 중 바뀌면 계단이 되므로 재읽기 금지)
     { const char* am = getenv("AUX_MODE");
-      g_mode = (am && atoi(am) != 0) ? (unsigned char)0x5A : (unsigned char)1;
+      // ★신펌웨어(2026-09 모드스킴, defineConfigMotor.h): 모터는 부팅 시 **Disable** →
+      //   Enable(0x50)/+aux(0x5A) 를 보내야만 켜져 제어된다. 구 ucMode=1(MIT)은 새 스킴서
+      //   주모드 0x00 = 미정의 → **모터 안 켜짐**. 그래서 기본 제어모드를 0x50 으로 바꿨다.
+      //   ⚠구펌웨어로 되돌리거나 시험할 땐 MOT_BASE_MODE=1(또는 0x.. 임의값) 로 override.
+      g_mode = (am && atoi(am) != 0) ? (unsigned char)0x5A : (unsigned char)0x50;
+      if (const char* mb = getenv("MOT_BASE_MODE")) g_mode = (unsigned char)strtol(mb, nullptr, 0);
       const char* ac = getenv("ACK_CTR");
       g_ack_on = (ac && atoi(ac) == 0) ? 0 : 1;
       for (int i = 0; i < 16; i++) g_echo_nib[i] = -1;
-      if (g_mode == 0x5A)
-          std::printf("[shm_bridge] ★AUX_MODE — ucMode=0x5A: 상태 GainKp/Kd 슬롯 = 출력축 pos/vel\n"
-                      "             ⚠MD80 명령 프레임 영향 미확인 — 매달린 상태에서만 시험할 것\n");
+      std::printf("[shm_bridge] ucMode(주모드)=0x%02X %s\n", g_mode,
+                  (g_mode & 0x0F) == 0x0A ? "(Enable+aux 엔코더 · 매달린 채만)" : "(Enable/제어)");
       if (!g_ack_on)
           std::printf("[shm_bridge] ACK 카운터 꺼짐(ACK_CTR=0) — ucCommand 상위 니블 0 고정\n");
     }
