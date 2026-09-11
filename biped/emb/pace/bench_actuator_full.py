@@ -115,11 +115,17 @@ def bind_aux(hw: Hardware):
 
 
 def _cols(samples):
-    """Sample 리스트 → (q[rad], dq[rad/s], tau_cmd[Nm], t[s], q_cmd[rad])."""
-    a = samples_to_arrays(samples)
-    q = np.deg2rad(a["q_deg"]); dq = np.deg2rad(a["dq_dps"])
-    tau_cmd = a["kp"] * np.deg2rad(a["q_cmd_deg"] - a["q_deg"])   # 명령토크[Nm]
-    return q, dq, tau_cmd, a["t"], np.deg2rad(a["q_cmd_deg"])
+    """Sample 리스트 → (q[rad], dq[rad/s], tau_cmd[Nm], t[s], q_cmd[rad]).
+    ★Sample 필드에서 직접 만든다 — samples_to_arrays 는 kp 를 안 주고 키가 q/dq/q_cmd 라
+      다르다. tau_cmd(명령 임피던스 토크) = kp·(q_cmd−q)[rad] 계산에 kp 가 필요하다."""
+    t0 = samples[0].t
+    t = np.array([s.t - t0 for s in samples])
+    q = np.deg2rad(np.array([s.q_deg for s in samples]))
+    dq = np.deg2rad(np.array([s.dq_dps for s in samples]))
+    kp = np.array([s.kp for s in samples])
+    q_cmd = np.deg2rad(np.array([s.q_cmd_deg for s in samples]))
+    tau_cmd = kp * (q_cmd - q)                                    # 명령토크[Nm] = kp[Nm/rad]·오차[rad]
+    return q, dq, tau_cmd, t, q_cmd
 
 
 def goto_zero(hw, ch, kp, kd, zero_deg=0.0, speed_dps=8.0, log=print):
