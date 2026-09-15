@@ -15,7 +15,12 @@ set -u
 
 EMB_DIR=/home/rpetubt/ZSource/RobotEmbedded/build
 EMB_BIN=$EMB_DIR/src/RobotEmbedded
-LOG=/tmp/emb.log
+# ★로그 기본 /dev/null (2026-09-15): 디버그매크로 5개 ON 상태서 RobotEmbedded 가 /tmp(=SD카드)에
+#   2.45GB/h 로그를 쏟아 **SD I/O 포화 → GUI 의 cmd 파일쓰기 스톨 → deploy 명령워치독(500ms) →
+#   무경고 limp**(실측: cmd_seq 0.59s 동결 → "명령두절 0.59s>0.50s → limp"). 매크로는 printf 뿐이라
+#   데이터엔 무해(defineGeneral.h:44-54). 매크로 OFF 재빌드 전까지 홍수를 여기서 차단한다.
+#   실로그가 필요하면 EMB_LOG=/tmp/emb.log 로 override. 매크로 OFF 후엔 실로그 복원 가능.
+LOG=${EMB_LOG:-/dev/null}
 DIAG=$(cd "$(dirname "$0")" && pwd)
 
 running(){ pgrep -x RobotEmbedded >/dev/null 2>&1; }
