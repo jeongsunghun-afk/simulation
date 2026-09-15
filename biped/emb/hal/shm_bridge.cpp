@@ -63,17 +63,22 @@ int bridge_init(int recv_wait_ms){
       //   Enable(0x50)/+aux(0x5A) 를 보내야만 켜져 제어된다. 구 ucMode=1(MIT)은 새 스킴서
       //   주모드 0x00 = 미정의 → **모터 안 켜짐**. 그래서 기본 제어모드를 0x50 으로 바꿨다.
       //   ⚠구펌웨어로 되돌리거나 시험할 땐 MOT_BASE_MODE=1(또는 0x.. 임의값) 로 override.
-      // ★2026-09-12: aux(2차 출력엔코더)는 신펌웨어에서 **모드 무관 상시** 상태의 fGainKp/fGainKd
-      //   슬롯으로 온다(실측: 0x50 에서 ch2 fGainKp=8.7° = 1차 7.75°+감속단비틀림). **0x5A 는
-      //   현재 버그로 사용금지** → AUX_MODE 로 0x5A 를 켜지 않는다(변수는 하위호환 위해 받되 무시).
+      // ★aux 경로 (2026-09-15 갱신·실측): **.19 신펌웨어(2026-09-14)는 0x5A(ENA+AUX)에서만**
+      //   aux(2차 출력엔코더)를 status 의 fGainKp/fGainKd 슬롯에 싣는다(실측 7/8축 aux≈q_ch).
+      //   (.46 구펌웨어는 0x50 에서 상시였음 — 펌웨어 판차. 과거 "0x5A 버그"는 이 업데이트로 해결.)
+      //   ⇒ AUX_MODE=1 → g_mode=0x5A(aux 켬) · 기본(미설정)=0x50(제어 전용, aux 안 옴).
+      //   ⚠aux 측정 opt-in. 0x5A 의 nonzero-토크 제어 정합은 매달린 채 검증 후 상시화할 것.
       g_mode = (unsigned char)0x50;
-      if (am && atoi(am) != 0)
-          std::printf("[shm_bridge] ⚠AUX_MODE 무시 — aux 는 0x50 에서 상시 수신(0x5A 는 버그로 사용금지)\n");
+      if (am && atoi(am) != 0) {
+          g_mode = (unsigned char)0x5A;   // ENA_MOT_WITH_AUX_ENC (defineConfigMotor.h)
+          std::printf("[shm_bridge] AUX_MODE=1 → ucMode=0x5A (aux 출력엔코더 수신)\n");
+      }
       if (const char* mb = getenv("MOT_BASE_MODE")) g_mode = (unsigned char)strtol(mb, nullptr, 0);
       const char* ac = getenv("ACK_CTR");
       g_ack_on = (ac && atoi(ac) == 0) ? 0 : 1;
       for (int i = 0; i < 16; i++) g_echo_nib[i] = -1;
-      std::printf("[shm_bridge] ucMode(주모드)=0x%02X (Enable/제어 · aux 상시 fGainKp/Kd)\n", g_mode);
+      std::printf("[shm_bridge] ucMode(주모드)=0x%02X (%s)\n", g_mode,
+                  g_mode == 0x5A ? "Enable+aux 출력엔코더" : "Enable/제어");
       if (!g_ack_on)
           std::printf("[shm_bridge] ACK 카운터 꺼짐(ACK_CTR=0) — ucCommand 상위 니블 0 고정\n");
     }
