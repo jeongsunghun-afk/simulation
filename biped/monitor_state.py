@@ -379,6 +379,17 @@ def main() -> int:
                 _wa = max((abs(v) for v in dqa if v is not None), default=0.0)
                 out.append(_arow("Δ aux-q", dqa, lvl(_wa, 1.0, 3.0)))
 
+            # ★GRF 추정 (grf_est.py → /dev/shm/grf.json) — 접지 하중분포. (2026-09-15)
+            try:
+                _g = json.load(open("/dev/shm/grf.json"))
+                if time.time() - float(_g.get("t", 0)) < 2.0:
+                    out.append("\n  " + paint("GRF 추정[N] │ fCurrent·매달림타레·상대(스케일 미보정) — 접지 시 하중분포", "c", col) + "\n")
+                    out.append("  " + paint("HL", "d", col) + fmt(_g.get("HL_GRF"), 9, 1)
+                               + paint("    HR", "d", col) + fmt(_g.get("HR_GRF"), 9, 1)
+                               + paint("    합", "d", col) + fmt(_g.get("sum"), 8, 1) + "\n")
+            except Exception:
+                pass
+
             out.append("\n  " + paint("세션 최대 │ ", "d", col)
                        + paint(f"|Δq| {max(peak_eq):5.2f}°  |dq| {max(peak_dq):6.1f}dps  "
                                f"|τ| {max(peak_tm):5.2f}Nm", "d", col) + "\n")
