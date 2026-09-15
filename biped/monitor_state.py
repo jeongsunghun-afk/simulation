@@ -360,6 +360,25 @@ def main() -> int:
                     out.append("  " + paint(pad("stand", 8, False), "d", col)
                                + paint("아직 안 잡혔다 — stand 로 전환하고 블렌드+1.5s 기다릴 것", "d", col) + "\n")
 
+            # ★1차(q_ch) vs 2차(aux) 출력엔코더 — AUX_MODE=1(0x5A) 수신 시만. (2026-09-15)
+            #   hip/thigh: aux=진짜 링크각 · calf/foot: aux=벨트 앞단(감속단만·벨트유격 안보임).
+            aux = get(st, "aux_deg", nj)
+            if st.get("aux_on") and any((x is not None) and abs(x) > 1e-9 for x in aux):
+                Wa = 9
+                out.append("\n  " + paint("1차 q_ch vs 2차 aux[°] │ Δ=aux−q_ch (감속단 비틀림+2차 영점/스케일) · "
+                                          "calf/foot 은 감속단만", "c", col) + "\n")
+                out.append("  " + pad("", 8, False)
+                           + "".join(pad(names[i], Wa, True) for i in range(nj)) + "\n")
+                def _arow(lbl, vec, colr=None):
+                    cs = "".join(fmt(vec[i] if i < len(vec) else None, Wa, 2) for i in range(nj))
+                    return "  " + paint(pad(lbl, 8, False), "d", col) + (paint(cs, colr, col) if colr else cs) + "\n"
+                dqa = [aux[i] - qch[i] if (i < len(aux) and i < len(qch) and aux[i] is not None and qch[i] is not None) else None
+                       for i in range(nj)]
+                out.append(_arow("q_ch", qch))
+                out.append(_arow("aux", aux))
+                _wa = max((abs(v) for v in dqa if v is not None), default=0.0)
+                out.append(_arow("Δ aux-q", dqa, lvl(_wa, 1.0, 3.0)))
+
             out.append("\n  " + paint("세션 최대 │ ", "d", col)
                        + paint(f"|Δq| {max(peak_eq):5.2f}°  |dq| {max(peak_dq):6.1f}dps  "
                                f"|τ| {max(peak_tm):5.2f}Nm", "d", col) + "\n")
