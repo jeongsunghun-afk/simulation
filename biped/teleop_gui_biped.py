@@ -780,6 +780,64 @@ def set_mode(mode):
     dpg.set_value('spd_sl', 0); dpg.set_value('vy_sl', 0); dpg.set_value('turn_sl', 0)
 
 
+# ── Walk 위치재생 (2026-09-16) ──────────────────────────────────────────────
+#   ref_lib/*.npz(MPC+WBIC 시뮬 q(t), 8관절·rad·50Hz·JOG_NAMES 순서)를 jog 목표각으로 순차발행
+#   = 위치제어 재생. deploy jog 20dps 클램프+관절한계 → max관절속도<15dps 로 자동 슬로우.
+#   ⚠실제 재생은 EtherCAT 케이블·왼무릎 벨트 수리 후, 크레인 매달림 전제. 동적 walk(MPC+WBIC) 아님.
+_WALK_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ref_lib')
+_WALK_FILES  = {'제자리(vx0)': 'biped_ref_inplace.npz', 'walk 0.2': 'biped_ref_walk02.npz',
+                'walk 0.3': 'biped_ref_walk03.npz'}
+_WALK_MAXDPS = 15.0                 # jog 20dps 한계 아래 여유
+_walk_stop   = threading.Event()
+_walk_thr    = None
+
+def _walk_loop(qdeg, dt, speed, loop):
+    try:
+        N = len(qdeg); nj = len(qdeg[0])
+        vmax = max((abs(qdeg[i + 1][j] - qdeg[i][j]) / dt
+                    for i in range(N - 1) for j in range(nj)), default=0.0)
+        S = max(1.0, vmax / _WALK_MAXDPS) / max(speed, 0.05)   # 최대 관절속도 <= MAXDPS
+        pub.set(mode='jog', jog_deg=list(qdeg[0]))             # 첫 자세로 진입
+        for _ in range(30):                                    # ~3s 서행 램프 여유(20dps)
+            if _walk_stop.is_set(): return
+            time.sleep(0.1)
+        i = 0
+        while not _walk_stop.is_set():
+            pub.set(jog_deg=list(qdeg[i])); i += 1
+            if i >= N:
+                if loop: i = 0
+                else: break
+            time.sleep(dt * S)
+    except Exception as e:
+        print('[gui] walk 재생 오류: %s' % e, flush=True)
+    finally:
+        try: pub.set(mode='reset')
+        except Exception: pass
+
+def walk_start(key, speed, loop):
+    global _walk_thr
+    walk_stop()
+    try:
+        import numpy as _np
+        d = _np.load(os.path.join(_WALK_DIR, _WALK_FILES[key]))
+        qdeg = _np.rad2deg(d['q']).tolist(); dt = float(d['dt'])
+    except Exception as e:
+        print('[gui] walk 로드 실패(%s): %s' % (key, e), flush=True)
+        try: dpg.set_value('state', 'walk 로드 실패: %s' % e)
+        except Exception: pass
+        return
+    _walk_stop.clear()
+    _walk_thr = threading.Thread(target=_walk_loop, args=(qdeg, dt, speed, loop), daemon=True)
+    _walk_thr.start()
+    print('[gui] walk 재생: %s (%d프레임 · 속도×%.1f · 반복=%s)' % (key, len(qdeg), speed, loop), flush=True)
+
+def walk_stop():
+    global _walk_thr
+    _walk_stop.set()
+    if _walk_thr is not None:
+        _walk_thr.join(timeout=1.0); _walk_thr = None
+
+
 left  = JoyPad('joyL', 190, on_left, cross_only=True)   # ★십자만(전후 XOR 측방, 대각 금지)
 right = JoyPad('joyR', 190, on_right, x_only=True)
 
@@ -943,6 +1001,20 @@ with dpg.window(tag='main'):
         dpg.bind_item_theme(_wb, _walk)
     dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 2점 평발 stand'
                  '   · Off=명령토크 0 (Kp=Kd=τ=0)', color=(150, 155, 175))
+    with dpg.group(horizontal=True):   # ★Walk 위치재생 (시뮬 궤적 replay) — 2026-09-16
+        dpg.add_text('Walk 재생(위치):')
+        dpg.add_combo(list(_WALK_FILES.keys()), default_value='제자리(vx0)', width=110, tag='walk_sel')
+        dpg.add_text('속도×')
+        dpg.add_slider_float(default_value=1.0, min_value=0.1, max_value=1.0, width=100,
+                             tag='walk_spd', format='%.1f')
+        dpg.add_checkbox(label='반복', default_value=True, tag='walk_loop')
+        dpg.add_button(label='▶재생', width=64,
+                       callback=lambda: walk_start(dpg.get_value('walk_sel'),
+                                                    dpg.get_value('walk_spd'), dpg.get_value('walk_loop')))
+        dpg.add_button(label='■정지', width=64,
+                       callback=lambda: (walk_stop(), set_mode('reset')))
+    dpg.add_text('⚠위치제어 미리보기 — 케이블/벨트 수리 후·크레인 매달림. 동적 walk 아님. jog 한계 초과축은 클램프.',
+                 color=(200, 150, 120))
     dpg.add_text('⚠매달린 채로 stand/보행을 켜지 말 것 — GRF 를 전제한 QP 라 해가 안 나오고 '
                  '중력보상 폴백으로 떨어진다(겉보기엔 안정돼 보인다). 매달려서 되는 건 off/jog/home 뿐.',
                  color=(210, 150, 90))
