@@ -838,6 +838,170 @@ def walk_stop():
         _walk_thr.join(timeout=1.0); _walk_thr = None
 
 
+# ── 다축 처프 + fCurrent(측정토크) 모니터 (2026-09-16) ────────────────────────────
+#   walk 재생과 같은 jog 발행 경로에 얹는다: 선택 축을 현재자세(center) 주변으로 선형
+#   처프(주파수 스윕)시키며, 매 틱 deploy state 의 **명령**(q_cmd_deg·tau_cmd_nm)과
+#   **측정**(q_leg_deg·tau_leg_nm = SIGN·fCurrent·KT·GEAR, 관절Nm)을 쌍으로 수집 →
+#   "제어명령 대비 fCurrent 가 살아서 따라오나" 를 상관·표준편차·추종오차로 판정 + CSV.
+#   ⚠jog 20dps 클램프 안에서만 논다 — 진폭은 peak vel<15dps 로 **자동 축소**(고주파일수록 작아짐).
+#   ⚠jog 호환 자세(홈·매달림)에서만. 평발 stand(발목 100°)면 진입 거부(set_mode('jog') 규약과 동일).
+#   측정 토크(fCurrent)는 hold q̇≈0 이 아니라 처프로 움직일 때라야 관측된다 → calf 마찰/추종 진단에 직결.
+_CHIRP_AXES  = {'calf 양쪽': [2, 6], 'HL_calf': [2], 'HR_calf': [6], 'thigh 양쪽': [1, 5],
+                'hip 양쪽': [0, 4], 'HL(4)': [0, 1, 2, 3], 'HR(4)': [4, 5, 6, 7],
+                '전축(8)': list(range(NJ))}
+_CHIRP_FREQ  = {'저속 0.2–0.6Hz': (0.2, 0.6), '중속 0.3–1.0Hz': (0.3, 1.0),
+                '광대역 0.2–1.5Hz': (0.2, 1.5)}
+_CHIRP_MAXDPS = 15.0                       # jog 20dps 클램프 아래 여유 → 진폭 상한 근거
+_CHIRP_FS     = 50.0                       # 발행/표본 주파수 [Hz]
+_CHIRP_LOGDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chirp_logs')
+_chirp_stop  = threading.Event()
+_chirp_thr   = None
+
+def _chirp_seed():
+    """실측각을 center 로 시드 + jog 진입. 모든 축을 검증해 한계 밖이면 거부(명령점프 방지)
+       — set_mode('jog') 과 같은 fail-closed 규약. **메인스레드에서 호출**(dpg 조작). center[deg] 반환."""
+    q = json.load(open(STATE))['q_leg_deg']            # 실패 시 예외 → 호출부가 처리(진입 취소)
+    if len(q) < NJ:
+        raise ValueError('q_leg_deg 길이 %d < %d' % (len(q), NJ))
+    center = []
+    for i in range(NJ):
+        v = float(max(JOG_LIM[i][0], min(JOG_LIM[i][1], q[i])))
+        if abs(v - float(q[i])) > 0.5:
+            raise ValueError('%s 실측 %+.1f° 가 jog 한계 [%+.1f,%+.1f] 밖 — 홈/매달림에서 할 것'
+                             % (JOG_NAMES[i], q[i], JOG_LIM[i][0], JOG_LIM[i][1]))
+        center.append(v)
+    for i in range(NJ):
+        try: dpg.set_value('jog_%d' % i, center[i])
+        except Exception: pass
+        pub.cmd['jog_deg'][i] = center[i]
+    pub.set(mode='jog', jog_deg=list(center))
+    return center
+
+def _chirp_effamp(center, axes, amp_req, f1):
+    """축별 유효 진폭[deg] = min(요청, 속도한계 15dps, 관절한계 여유 90%). {i: amp} 반환."""
+    import math
+    vlim = _CHIRP_MAXDPS / (2.0 * math.pi * max(f1, 1e-3))     # peak vel<MAXDPS → 진폭 상한
+    eff = {}
+    for i in axes:
+        room = 0.9 * min(center[i] - JOG_LIM[i][0], JOG_LIM[i][1] - center[i])
+        eff[i] = max(0.0, min(float(amp_req), vlim, room))
+    return eff
+
+def _chirp_loop(center, axes, amp_req, f0, f1, T):
+    import math
+    dt = 1.0 / _CHIRP_FS; nsteps = int(T * _CHIRP_FS)
+    rows = []                                          # [t, qcmd×NJ, qmeas×NJ, taucmd×NJ, taumeas×NJ]
+    eff = _chirp_effamp(center, axes, amp_req, f1)
+    ph  = {i: 2.0 * math.pi * k / max(len(axes), 1) for k, i in enumerate(axes)}   # 축별 위상분산=다축
+    print('[gui] 처프 시작: 축=%s · 유효진폭=%s° · %.2f→%.2fHz · %.0fs @%.0fHz'
+          % (axes, {i: round(eff[i], 2) for i in axes}, f0, f1, T, _CHIRP_FS), flush=True)
+    for _ in range(int(3 * _CHIRP_FS)):                # ~3s 진입 램프(center 로 서행 도달)
+        if _chirp_stop.is_set(): return
+        time.sleep(dt)
+    t0 = time.monotonic(); last_ui = -1.0
+    for k in range(nsteps):
+        if _chirp_stop.is_set(): break
+        t = k * dt
+        finst = f0 + (f1 - f0) * t / T                             # 순시주파수(로그용)
+        phase = 2.0 * math.pi * (f0 * t + 0.5 * (f1 - f0) * t * t / T)   # 선형처프 위상적분
+        tgt = list(center)
+        for i in axes:
+            v = center[i] + eff[i] * math.sin(phase + ph[i])
+            tgt[i] = max(JOG_LIM[i][0], min(JOG_LIM[i][1], v))
+        pub.set(jog_deg=tgt)
+        try:                                                       # 명령·측정 쌍 수집
+            st = json.load(open(STATE))
+            qc = st.get('q_cmd_deg'); qm = st.get('q_leg_deg')
+            tc = st.get('tau_cmd_nm'); tm = st.get('tau_leg_nm')
+            if qc and qm and tc and tm and min(len(qc), len(qm), len(tc), len(tm)) >= NJ:
+                rows.append([t] + [float(qc[i]) for i in range(NJ)]
+                                 + [float(qm[i]) for i in range(NJ)]
+                                 + [float(tc[i]) for i in range(NJ)]
+                                 + [float(tm[i]) for i in range(NJ)])
+        except Exception:
+            pass
+        if t - last_ui > 0.5:                                      # 저빈도 상태갱신(스레드→dpg best-effort)
+            last_ui = t; pa = axes[0]; base = 1 + 3 * NJ + pa
+            tmv = [r[base] for r in rows[-25:]] or [0.0]
+            msg = '처프 %.0f/%.0fs · f≈%.2fHz · %s 측정τ %.2f~%.2f Nm (표본%d)' % (
+                t, T, finst, JOG_NAMES[pa], min(tmv), max(tmv), len(rows))
+            print('[gui] %s' % msg, flush=True)
+            try: dpg.set_value('chirp_stat', msg)
+            except Exception: pass
+        nt = t0 + (k + 1) * dt; sl = nt - time.monotonic()
+        if sl > 0: time.sleep(sl)
+    if not _chirp_stop.is_set():                                   # 자연종료: center 로 복귀(정지는 ■버튼이 reset)
+        try: pub.set(jog_deg=list(center))
+        except Exception: pass
+    _chirp_report(rows, axes, eff)
+
+def _chirp_report(rows, axes, eff):
+    import numpy as _np, math, csv as _csv
+    if len(rows) < 10:
+        msg = '처프 종료 — 표본 부족(%d). state 를 못 읽었을 수 있음(deploy·QUAD_STATE 확인)' % len(rows)
+        print('[gui] %s' % msg, flush=True)
+        try: dpg.set_value('chirp_stat', msg)
+        except Exception: pass
+        return
+    A = _np.array(rows, float)
+    qc = A[:, 1:1 + NJ]; qm = A[:, 1 + NJ:1 + 2 * NJ]
+    tc = A[:, 1 + 2 * NJ:1 + 3 * NJ]; tm = A[:, 1 + 3 * NJ:1 + 4 * NJ]
+    try:                                                           # CSV 저장(RAM 아님·홍수아님: 수백KB)
+        os.makedirs(_CHIRP_LOGDIR, exist_ok=True)
+        fn = os.path.join(_CHIRP_LOGDIR, 'chirp_%s.csv' % time.strftime('%Y%m%d_%H%M%S'))
+        with open(fn, 'w', newline='') as f:
+            w = _csv.writer(f)
+            w.writerow(['t'] + ['qcmd_%s' % n for n in JOG_NAMES] + ['qmeas_%s' % n for n in JOG_NAMES]
+                       + ['taucmd_%s' % n for n in JOG_NAMES] + ['taumeas_%s' % n for n in JOG_NAMES])
+            w.writerows(rows)
+        fnb = os.path.basename(fn)
+    except Exception as e:
+        fnb = '(저장실패:%s)' % e
+    lines = []; verdict_ok = True
+    for i in axes:                                                 # 축별 판정
+        sd = float(_np.std(tm[:, i]))                              # 측정토크(fCurrent) 살아있음
+        cc = tc[:, i]; mm = tm[:, i]
+        corr = float(_np.corrcoef(cc, mm)[0, 1]) if (_np.std(cc) > 1e-6 and _np.std(mm) > 1e-6) else float('nan')
+        rmse = float(_np.sqrt(_np.mean((qm[:, i] - qc[:, i]) ** 2)))   # 위치 추종오차
+        ok = (sd > 0.05) and (not math.isnan(corr)) and (corr > 0.4)
+        verdict_ok = verdict_ok and ok
+        lines.append('%-9s 측정τσ=%.3f Nm · corr(명령,측정)=%s · 추종RMS=%.2f° %s'
+                     % (JOG_NAMES[i], sd, ('%+.2f' % corr if not math.isnan(corr) else ' n/a'),
+                        rmse, '✓' if ok else '⚠'))
+    head = '처프 완료 · %d표본 · fCurrent 응답 %s · CSV=%s' % (
+        len(rows), 'OK' if verdict_ok else '의심(약함)', fnb)
+    print('[gui] ' + head, flush=True)
+    for ln in lines: print('   ' + ln, flush=True)
+    try:
+        brief = ' / '.join('%s:%s' % (JOG_NAMES[i].split('_')[-1], 'OK' if _np.std(tm[:, i]) > 0.05 else '약')
+                           for i in axes)
+        dpg.set_value('chirp_stat', head + '  |  ' + brief)
+    except Exception: pass
+
+def chirp_start(axkey, amp, freqkey, T):
+    global _chirp_thr
+    chirp_stop()
+    axes = _CHIRP_AXES.get(axkey, list(range(NJ))); f0, f1 = _CHIRP_FREQ.get(freqkey, (0.2, 0.6))
+    try:
+        center = _chirp_seed()                         # 메인스레드에서 시드+jog 진입(fail-closed)
+    except Exception as e:
+        msg = '처프 진입 취소 — %s' % e
+        print('[gui] %s' % msg, flush=True)
+        try: dpg.set_value('chirp_stat', msg)
+        except Exception: pass
+        return
+    _chirp_stop.clear()
+    _chirp_thr = threading.Thread(target=_chirp_loop,
+                                  args=(center, axes, float(amp), f0, f1, float(T)), daemon=True)
+    _chirp_thr.start()
+
+def chirp_stop():
+    global _chirp_thr
+    _chirp_stop.set()
+    if _chirp_thr is not None:
+        _chirp_thr.join(timeout=1.5); _chirp_thr = None
+
+
 left  = JoyPad('joyL', 190, on_left, cross_only=True)   # ★십자만(전후 XOR 측방, 대각 금지)
 right = JoyPad('joyR', 190, on_right, x_only=True)
 
@@ -913,7 +1077,11 @@ with dpg.theme() as _kp_off:                # 강성 배율 — 나머지(어둡
         dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (70, 76, 96))
 
 with dpg.window(tag='main'):
-    dpg.add_text('biped teleop  —  MPC + WBIC (event-DCM)', color=(150, 200, 255))
+    with dpg.group(horizontal=True):
+        dpg.add_text('biped teleop  —  MPC + WBIC (event-DCM)', color=(150, 200, 255))
+        # ★드라이버 알람 로그창 토글 — 기본 숨김. 체크하면 뜬다(감시는 숨겨도 계속 쌓임).
+        dpg.add_checkbox(label='로그창', default_value=False, tag='show_calib',
+                         callback=lambda s, a: dpg.configure_item('calib_win', show=a))
     dpg.add_separator()
     with dpg.group(horizontal=True):
         with dpg.group():
@@ -1013,7 +1181,25 @@ with dpg.window(tag='main'):
                                                     dpg.get_value('walk_spd'), dpg.get_value('walk_loop')))
         dpg.add_button(label='■정지', width=64,
                        callback=lambda: (walk_stop(), set_mode('reset')))
+    with dpg.group(horizontal=True):   # ★다축 처프 + fCurrent(측정토크) 모니터 — 2026-09-16
+        dpg.add_text('처프+fCurrent:')
+        dpg.add_combo(list(_CHIRP_AXES.keys()), default_value='calf 양쪽', width=92, tag='chirp_ax')
+        dpg.add_text('진폭°')
+        dpg.add_slider_float(default_value=3.0, min_value=0.5, max_value=6.0, width=80,
+                             tag='chirp_amp', format='%.1f')
+        dpg.add_combo(list(_CHIRP_FREQ.keys()), default_value='저속 0.2–0.6Hz', width=124, tag='chirp_fk')
+        dpg.add_text('초')
+        dpg.add_slider_int(default_value=15, min_value=5, max_value=30, width=64, tag='chirp_T')
+        dpg.add_button(label='▶처프', width=64,
+                       callback=lambda: chirp_start(dpg.get_value('chirp_ax'), dpg.get_value('chirp_amp'),
+                                                     dpg.get_value('chirp_fk'), dpg.get_value('chirp_T')))
+        dpg.add_button(label='■정지', width=64,
+                       callback=lambda: (chirp_stop(), set_mode('reset')))
+    dpg.add_text('처프 대기 — 명령(q_cmd·tau_cmd) 대비 측정 tau_leg(=fCurrent) 상관·추종을 로깅', tag='chirp_stat',
+                 color=(150, 200, 220))
     dpg.add_text('⚠위치제어 미리보기 — 케이블/벨트 수리 후·크레인 매달림. 동적 walk 아님. jog 한계 초과축은 클램프.',
+                 color=(200, 150, 120))
+    dpg.add_text('⚠처프=jog 20dps 클램프 안 소진동(진폭 자동축소·고주파일수록↓). 홈/매달림에서만. 결과 CSV=chirp_logs/.',
                  color=(200, 150, 120))
     dpg.add_text('⚠매달린 채로 stand/보행을 켜지 말 것 — GRF 를 전제한 QP 라 해가 안 나오고 '
                  '중력보상 폴백으로 떨어진다(겉보기엔 안정돼 보인다). 매달려서 되는 건 off/jog/home 뿐.',
@@ -1162,9 +1348,11 @@ with dpg.handler_registry():
     dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right, callback=lambda: (left.toggle_latch(), right.toggle_latch()))
 
 # ★드라이버 알람 로그창 — 'main' **밖**에 만든다(안에 넣으면 자식 위젯이 돼 창이 안 뜬다).
-#   상시 표시. 모드/모터 LED 는 '지금'만 보여줘 순간 폴트를 놓치므로, 여기 시각별로 남긴다.
+#   모드/모터 LED 는 '지금'만 보여줘 순간 폴트를 놓치므로, 여기 시각별로 남긴다.
+#   ★2026-09-16 기본 숨김(show=False) — 메인창 상단 '로그창' 체크박스로 연다. 감시 자체는
+#     숨겨도 계속 돈다(_check_driver_alarms 는 창 표시와 무관하게 버퍼에 계속 쌓는다).
 with dpg.window(label='드라이버 알람 로그', tag='calib_win',
-                width=660, height=330, pos=(30, 430), show=True):
+                width=660, height=330, pos=(30, 430), show=False):
     with dpg.group(horizontal=True):
         dpg.add_text('드라이버 에러·두절·estop·모터OFF 를 시각별 기록 (state err=ucStatus 기반)',
                      color=(150, 155, 175))
