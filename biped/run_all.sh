@@ -19,9 +19,12 @@ export AUX_MODE="${AUX_MODE:-1}"      # 2차엔코더 로깅(매달림). 떨림/
 MJCF="${MJCF:-flat}"                  # flat=2점평발 · point=1점점발
 # JOG_SPEED_DPS 는 **설정된 경우에만** deploy 로 넘어감(스윙 고대역 전용, [5,150]). 평시 미설정.
 
-_emb_up(){ pgrep -f "app/biped_emb|RobotEmbedded" >/dev/null; }
+_emb_up(){ pgrep -x RobotEmbedded >/dev/null 2>&1 || pgrep -f "app/biped_emb" >/dev/null 2>&1; }
 
 start_emb(){
+  # ★idempotent: 이미 떠 있으면 재사용(중복기동 안 함)·deploy 진행. emb_ctl 은 중복 시 exit 1 이라
+  #   그냥 부르면 ctrl 재실행 때 deploy 가 스킵된다 — 그래서 먼저 검사.
+  if _emb_up; then echo "① Emb 이미 기동됨 — 재사용(중복 안 함)"; return 0; fi
   echo "① Emb 기동… (halGait 초기화 ≈5s)"
   ( cd "$HERE/emb" && diag/emb_ctl.sh start ) || { echo "✗ Emb 기동 실패 — tail /tmp/emb.log"; return 1; }
 }
