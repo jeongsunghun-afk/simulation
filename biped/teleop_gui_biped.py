@@ -804,6 +804,10 @@ _WALK_FILES  = {'스쿼트(1점)': 'biped_ref_squat.npz', '제자리(vx0)': 'bip
 #     수직으로 Δz(0.08m) 내렸다 올린다 — 비행 위상 없음(준정적) → 위치제어 재생 OK.
 #     biped_ref_squat_export.py 로 IK 생성. 재생 loop 켜면 홈→홈 매끈해 이음매 없이 반복.
 _WALK_MAXDPS = 15.0                 # jog 20dps 한계 아래 여유
+#   ★재생 자동 anti-ring 게인 (2026-09-17): 저감쇠 PD 6Hz 공진(calf/foot belt) 억제.
+#     ζ ∝ kd/√kp — 자동kd(√kp)는 ζ 고정(~0.3, 저감쇠)이라 링잉. 재생 땐 kp↓+kd명시↑ 로 ζ↑.
+_REPLAY_KP = 2.0    # 재생 kp 배율(낮게 — belt 공진 자극↓)
+_REPLAY_KD = 3.0    # 재생 kd 배율(자동 아닌 고정 — 감쇠↑, ζ≈0.6 near-critical)
 _walk_stop   = threading.Event()
 _walk_thr    = None
 
@@ -842,6 +846,8 @@ def walk_start(key, speed, loop):
         try: dpg.set_value('state', 'walk 로드 실패: %s' % e)
         except Exception: pass
         return
+    try: set_kp_scale(_REPLAY_KP); set_kd_scale(_REPLAY_KD)   # ★재생 anti-ring 게인 자동(6Hz 링 억제)
+    except Exception: pass
     _walk_stop.clear()
     _walk_thr = threading.Thread(target=_walk_loop, args=(qdeg, dt, speed, loop), daemon=True)
     _walk_thr.start()
