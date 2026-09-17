@@ -68,9 +68,15 @@ MJCF="$HERE/biped_from_quad.mjcf"                  # 1점 점발
 # ── ①float(무중력) 축별 중력배율 — 측정된 중립점 g* 그대로 ──────────────────
 #   이 값이면 무중력에서 전 축이 중립이다(뜨지도 지지도 않음). GUI 배율은 이 위에
 #   공통 계수로 곱해진다(×1.00 이 이 값 그대로라는 뜻).
-# ★2026-09-17 env 오버라이드 허용 — 재조립 후 과보상(float 상승·지그충돌) 시 낮춰 재기동:
-#   GRAV_SCALE_JOINT="1.0,1.0,1.0,1.0,1.0,1.0,1.0,1.0" ./run_all.sh ctrl   (또는 0.9 로 살짝 sag)
-export GRAV_SCALE_JOINT="${GRAV_SCALE_JOINT:-1.20,1.10,1.22,1.00,1.18,1.10,1.22,1.00}"
+# ★2026-09-17 재튜닝 — ff_comp(1/α) 이중계상 해소 + 재조립 후 float 브래킷.
+#   원인: g*(1.20…)가 이미 α 보상하는데 ff_comp(2026-09-12 신설)가 α 를 또 보상 → float 이
+#     realized ~1.5×중력으로 과보상, 다리가 떠서 고정지그와 충돌.
+#   해법: ACT_ALPHA=1 로 ff_comp 끔(옛 g* 가 α 담당) + g* 를 float 브래킷값으로 재튜닝.
+#     실기 브래킷(다리 놓아 안 뜨는 값): hip 만 약간 높음(HL 0.97 / HR 0.95), 나머지 0.90.
+#   둘 다 env 로 덮어쓰기 가능. 옛 방식 복원:
+#     ACT_ALPHA=0.834 GRAV_SCALE_JOINT="1.20,1.10,1.22,1.00,1.18,1.10,1.22,1.00" ./run_all.sh ctrl
+export ACT_ALPHA="${ACT_ALPHA:-1.0}"                 # ff_comp(1/α) 끔 — g* 가 α 담당(이중계상 방지)
+export GRAV_SCALE_JOINT="${GRAV_SCALE_JOINT:-0.97,0.90,0.90,0.90,0.95,0.90,0.90,0.90}"
 # ★foot 상수결손 보상 (2026-08-27 무게추 캠페인 → 실기 검증: E4 blend 0.66→0.77)
 #   r_foot(G)=α−k/G 의 상수항 k 를 토크부호 기반 k·tanh(τ_ch/τ0) 로 전방보상.
 #   끄려면 FOOT_COMP_NM=0. 근거: data/push/PLAN_0826.md 최종표.
