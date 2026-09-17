@@ -734,7 +734,20 @@ def _check_driver_alarms(st):
 #     threading.Thread(target=_restart_worker, daemon=True).start()
 #
 #
+def stop_all_traj():
+    """실행 중인 모든 궤적/처프/스윙 스레드를 즉시 정지 — rogue 명령 방지. 안전최우선 → 예외무시.
+       (walk/squat 재생·처프·스윙. 각 stopper 는 stop 이벤트 set + join.)"""
+    for fn in (walk_stop, swing_stop, chirp_stop):
+        try: fn()
+        except Exception: pass
+
 def set_mode(mode):
+    # ★안전 가드(2026-09-17): 어느 모드로 바꾸든 **실행 중 궤적 스레드부터 즉시 정지**한다.
+    #   안 그러면 재생/스윙 루프가 매 틱 jog_deg 를 계속 써서 새 모드(off 포함)를 덮는다.
+    stop_all_traj()
+    if mode in ('off', 'reset'):
+        try: explog.stop()              # ★off/reset = 기록도 중지(안전종료 계약)
+        except Exception: pass
     if mode == 'reset':
         left.clear(); right.clear()
         pub.set(mode='reset', v=0.0, vy=0.0, w=0.0)
@@ -1179,10 +1192,11 @@ def exp_run(name):
     elif name == 'walk':  set_mode('walk')
 
 def exp_stop(name):
-    """안전종료 — 모션 정지 + reset + 저장 종료(순서 중요)."""
-    walk_stop(); swing_stop()                # 리플레이·스윙 스레드 정지(무해)
-    set_mode('reset')                        # 명령 안전화
-    explog.stop()                            # CSV 마감
+    """안전종료 — 전 궤적(walk/squat/처프/스윙) 정지 + reset + 저장 종료(순서 중요)."""
+    stop_all_traj()                          # ★walk·squat·chirp·swing 스레드 모두 정지
+    set_mode('reset')                        # 명령 안전화(+ 기록 중지 내장)
+    try: explog.stop()                       # CSV 마감(중복 무해)
+    except Exception: pass
     try: dpg.set_value('exp_stat', '안전종료: %s' % name)
     except Exception: pass
 
