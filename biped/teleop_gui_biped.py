@@ -785,8 +785,11 @@ def set_mode(mode):
 #   = 위치제어 재생. deploy jog 20dps 클램프+관절한계 → max관절속도<15dps 로 자동 슬로우.
 #   ⚠실제 재생은 EtherCAT 케이블·왼무릎 벨트 수리 후, 크레인 매달림 전제. 동적 walk(MPC+WBIC) 아님.
 _WALK_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ref_lib')
-_WALK_FILES  = {'제자리(vx0)': 'biped_ref_inplace.npz', 'walk 0.2': 'biped_ref_walk02.npz',
-                'walk 0.3': 'biped_ref_walk03.npz'}
+_WALK_FILES  = {'스쿼트(1점)': 'biped_ref_squat.npz', '제자리(vx0)': 'biped_ref_inplace.npz',
+                'walk 0.2': 'biped_ref_walk02.npz', 'walk 0.3': 'biped_ref_walk03.npz'}
+#   ★스쿼트(1점): 앉았다-일어서기. 1점 점발 위에서 접촉점(발 sphere x·y) 고정한 채 몸통을
+#     수직으로 Δz(0.08m) 내렸다 올린다 — 비행 위상 없음(준정적) → 위치제어 재생 OK.
+#     biped_ref_squat_export.py 로 IK 생성. 재생 loop 켜면 홈→홈 매끈해 이음매 없이 반복.
 _WALK_MAXDPS = 15.0                 # jog 20dps 한계 아래 여유
 _walk_stop   = threading.Event()
 _walk_thr    = None
@@ -1169,9 +1172,9 @@ with dpg.window(tag='main'):
         dpg.bind_item_theme(_wb, _walk)
     dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 2점 평발 stand'
                  '   · Off=명령토크 0 (Kp=Kd=τ=0)', color=(150, 155, 175))
-    with dpg.group(horizontal=True):   # ★Walk 위치재생 (시뮬 궤적 replay) — 2026-09-16
-        dpg.add_text('Walk 재생(위치):')
-        dpg.add_combo(list(_WALK_FILES.keys()), default_value='제자리(vx0)', width=110, tag='walk_sel')
+    with dpg.group(horizontal=True):   # ★궤적 위치재생 (스쿼트/walk replay) — 2026-09-16
+        dpg.add_text('궤적 재생(위치):')
+        dpg.add_combo(list(_WALK_FILES.keys()), default_value='스쿼트(1점)', width=110, tag='walk_sel')
         dpg.add_text('속도×')
         dpg.add_slider_float(default_value=1.0, min_value=0.1, max_value=1.0, width=100,
                              tag='walk_spd', format='%.1f')
