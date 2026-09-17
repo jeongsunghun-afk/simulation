@@ -1018,12 +1018,12 @@ def chirp_stop():
         _chirp_thr.join(timeout=1.5); _chirp_thr = None
 
 
-# ── 자유공간 스윙 처프 (M·C 1차 프로브, 2026-09-17) ──────────────────────────────
+# ── 자유공간 스윙 처프 (M·C 프로브, 2026-09-17) ──────────────────────────────────
 #   목적: 한 관절을 자유공간(발 공중·접촉0)에서 처프로 흔들어 **전 관절 τ·q·q̇** 를 로깅
-#     → 오프라인 swing_mc_fit.py 가 MuJoCo 로 M(q)q̈+C q̇+g(q)+마찰 을 재구성해 M·C 검증.
-#   ⚠**클램프 한계**: jog 20dps 슬루는 deploy 측이라 GUI 가 못 푼다. 이 버튼은 **추종되는
-#     저주파(≤18dps) 스윙**만 = **저대역 관성 프로브**다. 완전한 M·C(고대역·코리올리)는
-#     deploy 에 슬루완화/토크 스윙 모드가 필요(별도 작업). 그전까진 1차 스크리닝.
+#     → 오프라인 biped_swing_mc_fit.py 가 MuJoCo 로 M(q)q̈+Cq̇+g+마찰 재구성해 M·C 검증.
+#   ★대역: deploy 를 JOG_SPEED_DPS=<X>([5,150]) 로 재실행하면 peak dps 슬라이더로 X 까지
+#     = 고대역 M 자극. 기본 20dps 면 저대역(관성 자극 약함). deploy 병행(단일 writer) —
+#     collect_multichirp(자체 Hardware=deploy와 dual) 와 달리 deploy 내릴 필요 없음.
 #   ⚠발이 **지면에 닿으면 안 됨**(접촉력 섞임) — 크레인 자유스윙·한 다리만. 나머지 축은 hold.
 _SWING_JOINTS = {'HL_thigh':1,'HL_calf':2,'HL_foot':3,'HR_thigh':5,'HR_calf':6,'HR_foot':7,
                  'HL_hip':0,'HR_hip':4}
@@ -1039,7 +1039,7 @@ _swing_stop   = threading.Event()
 _swing_thr    = None
 
 def _swing_loop(center, j, amp_req, f0, f1, T, maxdps):
-    import math
+    import math, csv as _csv
     dt = 1.0/_CHIRP_FS; nsteps = int(T*_CHIRP_FS); rows = []
     vlim = float(maxdps)/(2.0*math.pi*max(f1,1e-3))                       # peak dps 유지 진폭상한
     room = 0.9*min(center[j]-JOG_LIM[j][0], JOG_LIM[j][1]-center[j])
@@ -1047,8 +1047,23 @@ def _swing_loop(center, j, amp_req, f0, f1, T, maxdps):
     print('[gui] 스윙 시작: %s · 유효진폭=%.2f° · %.2f→%.2fHz · peak≤%.0fdps · %.0fs '
           '(발 공중! deploy JOG_SPEED_DPS≥%.0f 확인)'
           % (JOG_NAMES[j], amp, f0, f1, maxdps, T, maxdps), flush=True)
+    # ★로그 파일을 **시작 시 열어 증분 기록 + 주기 flush** — 도중 크래시에도 수집분 보존.
+    fh = None; wtr = None; fn = None
+    try:
+        os.makedirs(_SWING_LOGDIR, exist_ok=True)
+        fn = os.path.join(_SWING_LOGDIR, 'swing_%s_%s.csv' % (JOG_NAMES[j], time.strftime('%Y%m%d_%H%M%S')))
+        fh = open(fn, 'w', newline=''); wtr = _csv.writer(fh)
+        wtr.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
+                     + ['tau_%s'%n for n in JOG_NAMES] + ['swung'])
+        fh.flush()
+    except Exception as e:
+        print('[gui] 스윙 로그 열기 실패: %s' % e, flush=True); fh = None
     for _ in range(int(3*_CHIRP_FS)):                                    # 진입 램프
-        if _swing_stop.is_set(): return
+        if _swing_stop.is_set():
+            if fh:
+                try: fh.close()
+                except Exception: pass
+            return
         time.sleep(dt)
     t0 = time.monotonic()
     for k in range(nsteps):
@@ -1062,9 +1077,15 @@ def _swing_loop(center, j, amp_req, f0, f1, T, maxdps):
             st = json.load(open(STATE))
             qm = st.get('q_leg_deg'); dq = st.get('dq_leg_dps'); tm = st.get('tau_leg_nm')
             if qm and dq and tm and min(len(qm),len(dq),len(tm)) >= NJ:
-                rows.append([t] + [float(qm[i]) for i in range(NJ)]
-                                 + [float(dq[i]) for i in range(NJ)]
-                                 + [float(tm[i]) for i in range(NJ)])
+                row = ([t] + [float(qm[i]) for i in range(NJ)]
+                            + [float(dq[i]) for i in range(NJ)]
+                            + [float(tm[i]) for i in range(NJ)])
+                rows.append(row)
+                if wtr:                                                  # 증분 기록 + ~0.5s 마다 flush
+                    try:
+                        wtr.writerow(row + [JOG_NAMES[j]])
+                        if len(rows) % 25 == 0: fh.flush()
+                    except Exception: pass
         except Exception:
             pass
         nt = t0 + (k+1)*dt; sl = nt - time.monotonic()
@@ -1072,28 +1093,22 @@ def _swing_loop(center, j, amp_req, f0, f1, T, maxdps):
     if not _swing_stop.is_set():
         try: pub.set(jog_deg=list(center))
         except Exception: pass
-    _swing_report(rows, j)
-
-def _swing_report(rows, j):
-    import numpy as _np, csv as _csv
-    if len(rows) < 20:
-        try: dpg.set_value('swing_stat', '스윙 종료 — 표본 부족(%d)' % len(rows))
+    if fh:
+        try: fh.close()                                                  # ★남은 버퍼 flush + 마감
         except Exception: pass
-        print('[gui] 스윙 종료 — 표본 부족(%d)' % len(rows), flush=True); return
+    _swing_report(rows, j, fn)
+
+def _swing_report(rows, j, fn):
+    import numpy as _np
+    fnb = os.path.basename(fn) if fn else '(미저장)'
+    if len(rows) < 20:
+        msg = '스윙 종료 — 표본 부족(%d) · CSV=%s' % (len(rows), fnb)
+        try: dpg.set_value('swing_stat', msg)
+        except Exception: pass
+        print('[gui] ' + msg, flush=True); return
     A = _np.array(rows, float); t = A[:,0]
     dq_j = A[:, 1+NJ+j]; tm_j = A[:, 1+2*NJ+j]
     qdd_j = _np.gradient(dq_j, t)                                        # q̈ [deg/s²] (라이브 표시용)
-    try:
-        os.makedirs(_SWING_LOGDIR, exist_ok=True)
-        fn = os.path.join(_SWING_LOGDIR, 'swing_%s_%s.csv' % (JOG_NAMES[j], time.strftime('%Y%m%d_%H%M%S')))
-        with open(fn, 'w', newline='') as f:
-            w = _csv.writer(f)
-            w.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
-                       + ['tau_%s'%n for n in JOG_NAMES] + ['swung'])
-            for r in rows: w.writerow(list(r) + [JOG_NAMES[j]])
-        fnb = os.path.basename(fn)
-    except Exception as e:
-        fnb = '(저장실패:%s)' % e
     head = ('스윙 완료 · %s · %d표본 · |q̇|max=%.1f dps · |q̈|max=%.0f°/s² · |τ|max=%.2f Nm · CSV=%s'
             % (JOG_NAMES[j], len(rows), _np.abs(dq_j).max(), _np.abs(qdd_j).max(), _np.abs(tm_j).max(), fnb))
     print('[gui] ' + head, flush=True)
@@ -1161,6 +1176,7 @@ class ExpLog:
                            + [st.get('mode',''), st.get('tilt_deg',0.0), st.get('est_z',0.0),
                               st.get('qp_fail_pct',0.0), st.get('estop',False)])
                 nrow += 1
+                if nrow % 25 == 0: f.flush()          # ★~0.5s 마다 flush — 크래시 손실 최소화
             except Exception:
                 pass
             time.sleep(1.0/_CHIRP_FS)
