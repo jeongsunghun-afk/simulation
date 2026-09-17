@@ -2520,7 +2520,7 @@ int main(int argc, char** argv){
       const std::string tstand= tau_snap(tau_stand, have_tau_stand);
       const long ts_n_pub = ts_n;
       ts_reset();                       // 창을 비운다 — 다음 발행까지 다시 쌓는다
-      char buf[6144];   // ★5120 → 6144 (2026-09-01): aux/ack 4배열 추가(최대 ~600B)
+      char buf[7168];   // ★6144 → 7168 (2026-09-17): cur_a(실측전류 채널배열) 추가 여유
       // 런타임에 안 변하므로 한 번만 만든다.
       static std::string offs_json;
       if(offs_json.empty()){
@@ -2531,9 +2531,15 @@ int main(int argc, char** argv){
         }
         offs_json += "]";
       }
+      // ★실측 전류[A] (채널, fCurrent) — tau_leg_nm(=fTorque=명령에코)과 달리 **모터 실측**이다.
+      //   2026-09-17 추가: 토크 리플레이 검증·독립 τ 측정용(grf_verify 와 같은 fCurrent). NCH 채널순.
+      //   실 관절토크 = SIGN·cur_a·KT·GEAR/SCALE (소비자가 변환). MockHw(sim)에선 0.
+      std::string curas="[";
+      for(int i=0;i<NCH;i++){ char b[32]; std::snprintf(b,sizeof b,"%s%.4f", i?",":"", (double)hs.cur_a[i]); curas+=b; }
+      curas+="]";
       std::snprintf(buf,sizeof buf,
         "{\"mode\":\"%s\",\"backend\":\"%s\",\"q_leg_deg\":%s,\"q_ch_deg\":%s,"
-        "\"dq_leg_dps\":%s,\"tau_leg_nm\":%s,\"tau_cmd_nm\":%s,\"kp_raw\":%s,\"kd_raw\":%s,"
+        "\"dq_leg_dps\":%s,\"tau_leg_nm\":%s,\"tau_cmd_nm\":%s,\"cur_a\":%s,\"kp_raw\":%s,\"kd_raw\":%s,"
         // ★창 통계 — **500Hz 로 계산**한 값이다(발행 20Hz 표본이 아니라). tau_win_n 은
         //   그 창에 들어간 표본 수 = 통계의 신뢰도. 0 이면 통계를 읽지 말 것.
         "\"tau_std_nm\":%s,\"tau_min_nm\":%s,\"tau_max_nm\":%s,\"tau_win_n\":%ld,"
@@ -2568,7 +2574,7 @@ int main(int argc, char** argv){
         "%s\"offset_deg\":%s}",
         mode.c_str(), hw->name(), qs.c_str(), qchs.c_str(),
         /* dq/tau/tau_cmd/kp/kd 는 다음 줄에서 이어진다 — 아래 5개 뒤에 창통계 4개 */
-        dqs.c_str(), taus.c_str(), taucs.c_str(), kps.c_str(), kds.c_str(),
+        dqs.c_str(), taus.c_str(), taucs.c_str(), curas.c_str(), kps.c_str(), kds.c_str(),
         tsd.c_str(), tmn.c_str(), tmx.c_str(), ts_n_pub,
         rpy[0]*JointMap::R2D, rpy[1]*JointMap::R2D,
         rpy[2]*JointMap::R2D, tilt, hz_ema, (mode!="off"&&!wd)?"true":"false",
