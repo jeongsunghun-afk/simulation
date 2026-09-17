@@ -737,7 +737,7 @@ def _check_driver_alarms(st):
 def stop_all_traj():
     """실행 중인 모든 궤적/처프/스윙 스레드를 즉시 정지 — rogue 명령 방지. 안전최우선 → 예외무시.
        (walk/squat 재생·처프·스윙. 각 stopper 는 stop 이벤트 set + join.)"""
-    for fn in (walk_stop, swing_stop, chirp_stop):
+    for fn in (walk_stop, swing_stop, chirp_stop, wsq_stop):
         try: fn()
         except Exception: pass
 
@@ -1152,6 +1152,46 @@ def swing_stop():
         _swing_thr.join(timeout=1.5); _swing_thr = None
 
 
+# ── WBIC 밸런스 스쿼트 (접지·토크제어) — stand 모드 body_h 오실레이션 (2026-09-17) ──
+#   위치리플레이 스쿼트(궤적재생)와 달리 **WBIC 가 밸런스+토크**로 CoM 높이를 내렸다 올린다.
+#   ⚠접지·GRF 필수(stand=WBIC QP) — **매달림 금지**(해 안 나옴, 중력보상 폴백으로 처짐).
+#   ⚠평발 CoM 실현범위 [0.36,0.42] 클램프라 얕은 스쿼트(~6cm). 더 깊게는 점발(별도).
+_WSQ_LO, _WSQ_HI = 0.36, 0.42      # body_h[m] 범위(평발 기하 실현범위)
+_WSQ_PERIOD = 5.0                  # 한 사이클[s] (준정적)
+_wsq_stop = threading.Event()
+_wsq_thr  = None
+
+def _wsq_loop(period):
+    import math
+    dt = 0.05                      # 20Hz body_h 발행(WBIC 가 매끈히 추종)
+    amp = (_WSQ_HI - _WSQ_LO)/2
+    for _ in range(int(3/dt)):     # stand 안정화 ~3s
+        if _wsq_stop.is_set(): return
+        time.sleep(dt)
+    t0 = time.monotonic()
+    while not _wsq_stop.is_set():
+        t = time.monotonic() - t0
+        h = _WSQ_HI - amp*(1 - math.cos(2*math.pi*t/max(period,0.5)))   # HI→LO→HI raised-cosine
+        try: pub.set(body_h=float(h))
+        except Exception: pass
+        time.sleep(dt)
+
+def wsq_start(period=_WSQ_PERIOD):
+    global _wsq_thr
+    wsq_stop()
+    _wsq_stop.clear()
+    _wsq_thr = threading.Thread(target=_wsq_loop, args=(float(period),), daemon=True)
+    _wsq_thr.start()
+    print('[gui] WBIC 스쿼트 시작 (body_h %.2f~%.2fm · 주기 %.0fs · stand+GRF)'
+          % (_WSQ_LO, _WSQ_HI, period), flush=True)
+
+def wsq_stop():
+    global _wsq_thr
+    _wsq_stop.set()
+    if _wsq_thr is not None:
+        _wsq_thr.join(timeout=1.0); _wsq_thr = None
+
+
 # ── 실험 공용: 데이터저장(ExpLog) + 통일 실행/안전종료 래퍼 (2026-09-17) ──────────
 #   ★모든 실험을 같은 시퀀스로: [버튼] → exp_run(데이터저장 시작 + 궤적/모드 실행)
 #     → exp_stop(모션 정지 + reset + 저장 종료). 실험별 특수 로거(swing 자체 CSV)는 유지.
@@ -1228,7 +1268,7 @@ def exp_run(name):
         return
     explog.start(name)
     if name == 'stand':   set_mode('stand')
-    elif name == 'squat': walk_start('스쿼트(1점)', 1.0, True)     # 1점 스쿼트 위치 replay
+    elif name == 'squat': set_mode('stand'); wsq_start()          # ★WBIC 밸런스 스쿼트(body_h 오실·토크제어)
     elif name == 'walk':  set_mode('walk')
 
 def exp_stop(name):
@@ -1481,10 +1521,10 @@ with dpg.window(tag='main'):
         dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
         dpg.add_text('⚠접지·GRF 필요 (매달림 금지)', color=(210, 150, 90))
     with dpg.group(horizontal=True):
-        dpg.add_text('standup-down  ')
+        dpg.add_text('squat        ')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('squat'))
         dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('squat'))
-        dpg.add_text('1점 스쿼트 접지 · 크레인 안전줄', color=(150, 160, 180))
+        dpg.add_text('⚠WBIC 밸런스(body_h 0.42↔0.36 오실·토크제어)·접지·GRF·크레인 · 매달림 금지', color=(210, 150, 90))
     with dpg.group(horizontal=True):
         dpg.add_text('walk(동적)     ')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('walk'))
