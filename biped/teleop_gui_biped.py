@@ -1166,9 +1166,10 @@ class ExpLog:
             print('[gui] exp 로그 열기 실패: %s' % e, flush=True); return
         w.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['qch_%s'%n for n in JOG_NAMES]
                    + ['aux_%s'%n for n in JOG_NAMES] + ['cur_%s'%n for n in JOG_NAMES]
-                   + ['dq_%s'%n for n in JOG_NAMES]
-                   + ['tau_%s'%n for n in JOG_NAMES] + ['qcmd_%s'%n for n in JOG_NAMES]
+                   + ['dq_%s'%n for n in JOG_NAMES] + ['tau_%s'%n for n in JOG_NAMES]
+                   + ['qcmd_%s'%n for n in JOG_NAMES] + ['dqcmd_%s'%n for n in JOG_NAMES]
                    + ['taucmd_%s'%n for n in JOG_NAMES]
+                   + ['kpraw_%s'%n for n in JOG_NAMES] + ['kdraw_%s'%n for n in JOG_NAMES]
                    + ['mode','roll_deg','pitch_deg','yaw_deg','est_x','est_z','tilt_deg',
                       'qp_fail_pct','loop_hz','estop'])
         t0 = time.monotonic(); nrow = 0
@@ -1181,7 +1182,8 @@ class ExpLog:
                            + arr(st,'q_leg_deg') + arr(st,'q_ch_deg') + arr(st,'aux_deg')
                            + arr(st,'cur_a')                          # ★실측 전류[A](fCurrent) — 실 τ=SIGN·cur·KT·GEAR/SCALE
                            + arr(st,'dq_leg_dps') + arr(st,'tau_leg_nm')
-                           + arr(st,'q_cmd_deg') + arr(st,'tau_cmd_nm')
+                           + arr(st,'q_cmd_deg') + arr(st,'dq_cmd_dps') + arr(st,'tau_cmd_nm')
+                           + arr(st,'kp_raw') + arr(st,'kd_raw')      # ★게인 — 명령τ=kp·err+kd·derr+τ_ff 분해용
                            + [st.get('mode','')] + rpy
                            + [st.get('est_x',0.0), st.get('est_z',0.0), st.get('tilt_deg',0.0),
                               st.get('qp_fail_pct',0.0), st.get('loop_hz',0.0), st.get('estop',False)])
