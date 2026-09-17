@@ -1424,18 +1424,20 @@ with dpg.window(tag='main'):
         dpg.bind_item_theme(_wb, _walk)
     dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 2점 평발 stand'
                  '   · Off=명령토크 0 (Kp=Kd=τ=0)', color=(150, 155, 175))
-    with dpg.group(horizontal=True):   # ★궤적 위치재생 프리뷰(무기록) — 실험 기록판은 아래 '기록 실험'
-        dpg.add_text('궤적 프리뷰(위치):')
+    with dpg.group(horizontal=True):   # ★궤적 위치재생 (기록됨: exp_logs/ — 모델오차 분석용) 2026-09-17
+        dpg.add_text('궤적 재생(기록):')
         dpg.add_combo(list(_WALK_FILES.keys()), default_value='제자리(vx0)', width=110, tag='walk_sel')
         dpg.add_text('속도×')
         dpg.add_slider_float(default_value=1.0, min_value=0.1, max_value=1.0, width=100,
                              tag='walk_spd', format='%.1f')
         dpg.add_checkbox(label='반복', default_value=True, tag='walk_loop')
         dpg.add_button(label='▶재생', width=64,
-                       callback=lambda: walk_start(dpg.get_value('walk_sel'),
-                                                    dpg.get_value('walk_spd'), dpg.get_value('walk_loop')))
+                       callback=lambda: (explog.start(_WALK_FILES[dpg.get_value('walk_sel')]
+                                                      .replace('biped_ref_','').replace('.npz','')),
+                                         walk_start(dpg.get_value('walk_sel'),
+                                                    dpg.get_value('walk_spd'), dpg.get_value('walk_loop'))))
         dpg.add_button(label='■정지', width=64,
-                       callback=lambda: (walk_stop(), set_mode('reset')))
+                       callback=lambda: (walk_stop(), set_mode('reset')))   # set_mode('reset')=explog.stop 포함
     with dpg.group(horizontal=True):   # ★다축 처프 + fCurrent(측정토크) 모니터 — 2026-09-16
         dpg.add_text('처프+fCurrent:')
         dpg.add_combo(list(_CHIRP_AXES.keys()), default_value='calf 양쪽', width=92, tag='chirp_ax')
