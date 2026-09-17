@@ -808,6 +808,7 @@ _WALK_MAXDPS = 15.0                 # jog 20dps 한계 아래 여유
 #     ζ ∝ kd/√kp — 자동kd(√kp)는 ζ 고정(~0.3, 저감쇠)이라 링잉. 재생 땐 kp↓+kd명시↑ 로 ζ↑.
 _REPLAY_KP = 2.0    # 재생 kp 배율(낮게 — belt 공진 자극↓)
 _REPLAY_KD = 3.0    # 재생 kd 배율(자동 아닌 고정 — 감쇠↑, ζ≈0.6 near-critical)
+_saved_gains = [None]   # ★재생 전 kp/kd 저장 → 정지 시 원복(전역 누수 방지)
 _walk_stop   = threading.Event()
 _walk_thr    = None
 
@@ -846,7 +847,8 @@ def walk_start(key, speed, loop):
         try: dpg.set_value('state', 'walk 로드 실패: %s' % e)
         except Exception: pass
         return
-    try: set_kp_scale(_REPLAY_KP); set_kd_scale(_REPLAY_KD)   # ★재생 anti-ring 게인 자동(6Hz 링 억제)
+    _saved_gains[0] = (pub.cmd.get('pos_kp_scale', 1.0), pub.cmd.get('pos_kd_scale', -1.0))  # 원복용 저장
+    try: set_kp_scale(_REPLAY_KP); set_kd_scale(_REPLAY_KD)   # ★재생 anti-ring 게인(정지 시 원복)
     except Exception: pass
     _walk_stop.clear()
     _walk_thr = threading.Thread(target=_walk_loop, args=(qdeg, dt, speed, loop), daemon=True)
@@ -858,6 +860,10 @@ def walk_stop():
     _walk_stop.set()
     if _walk_thr is not None:
         _walk_thr.join(timeout=1.0); _walk_thr = None
+    if _saved_gains[0] is not None:                 # ★재생 anti-ring 게인 원복(전역 누수 방지)
+        _kp, _kd = _saved_gains[0]; _saved_gains[0] = None
+        try: set_kp_scale(_kp); set_kd_scale(None if _kd < 0 else _kd)
+        except Exception: pass
 
 
 # ── 다축 처프 + fCurrent(측정토크) 모니터 (2026-09-16) ────────────────────────────
