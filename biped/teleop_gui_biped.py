@@ -1066,7 +1066,7 @@ def _swing_loop(center, j, amp_req, f0, f1, T, maxdps):
         fn = os.path.join(_SWING_LOGDIR, 'swing_%s_%s.csv' % (JOG_NAMES[j], time.strftime('%Y%m%d_%H%M%S')))
         fh = open(fn, 'w', newline=''); wtr = _csv.writer(fh)
         wtr.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
-                     + ['tau_%s'%n for n in JOG_NAMES] + ['swung'])
+                     + ['tau_%s'%n for n in JOG_NAMES] + ['cur_%s'%n for n in JOG_NAMES] + ['swung'])
         fh.flush()
     except Exception as e:
         print('[gui] 스윙 로그 열기 실패: %s' % e, flush=True); fh = None
@@ -1087,11 +1087,12 @@ def _swing_loop(center, j, amp_req, f0, f1, T, maxdps):
         pub.set(jog_deg=tgt)
         try:                                                             # 전 관절 τ·q·q̇ (M·C 재구성용)
             st = json.load(open(STATE))
-            qm = st.get('q_leg_deg'); dq = st.get('dq_leg_dps'); tm = st.get('tau_leg_nm')
-            if qm and dq and tm and min(len(qm),len(dq),len(tm)) >= NJ:
+            qm = st.get('q_leg_deg'); dq = st.get('dq_leg_dps'); tm = st.get('tau_leg_nm'); cu = st.get('cur_a')
+            if qm and dq and tm and cu and min(len(qm),len(dq),len(tm),len(cu)) >= NJ:
                 row = ([t] + [float(qm[i]) for i in range(NJ)]
                             + [float(dq[i]) for i in range(NJ)]
-                            + [float(tm[i]) for i in range(NJ)])
+                            + [float(tm[i]) for i in range(NJ)]
+                            + [float(cu[i]) for i in range(NJ)])       # ★cur_a(실측전류) — 마찰/M·C 실측용
                 rows.append(row)
                 if wtr:                                                  # 증분 기록 + ~0.5s 마다 flush
                     try:
