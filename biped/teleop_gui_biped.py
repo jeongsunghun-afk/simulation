@@ -1168,16 +1168,20 @@ class ExpLog:
                    + ['aux_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
                    + ['tau_%s'%n for n in JOG_NAMES] + ['qcmd_%s'%n for n in JOG_NAMES]
                    + ['taucmd_%s'%n for n in JOG_NAMES]
-                   + ['mode','tilt_deg','est_z','qp_fail_pct','loop_hz','estop'])
+                   + ['mode','roll_deg','pitch_deg','yaw_deg','est_x','est_z','tilt_deg',
+                      'qp_fail_pct','loop_hz','estop'])
         t0 = time.monotonic(); nrow = 0
         while not self._stop.is_set():
             try:
                 st = json.load(open(STATE))
+                rpy = st.get('rpy_deg') or [0.0, 0.0, 0.0]              # ★estimator 몸통자세(추정)
+                rpy = [float(rpy[k]) if k < len(rpy) else 0.0 for k in range(3)]
                 w.writerow([round(time.monotonic()-t0, 4)]
                            + arr(st,'q_leg_deg') + arr(st,'q_ch_deg') + arr(st,'aux_deg')
                            + arr(st,'dq_leg_dps') + arr(st,'tau_leg_nm')
                            + arr(st,'q_cmd_deg') + arr(st,'tau_cmd_nm')
-                           + [st.get('mode',''), st.get('tilt_deg',0.0), st.get('est_z',0.0),
+                           + [st.get('mode','')] + rpy
+                           + [st.get('est_x',0.0), st.get('est_z',0.0), st.get('tilt_deg',0.0),
                               st.get('qp_fail_pct',0.0), st.get('loop_hz',0.0), st.get('estop',False)])
                 nrow += 1
                 if nrow % 25 == 0: f.flush()          # ★~0.5s 마다 flush — 크래시 손실 최소화
