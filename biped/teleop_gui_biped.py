@@ -1005,6 +1005,182 @@ def chirp_stop():
         _chirp_thr.join(timeout=1.5); _chirp_thr = None
 
 
+# ── 자유공간 스윙 처프 (M·C 1차 프로브, 2026-09-17) ──────────────────────────────
+#   목적: 한 관절을 자유공간(발 공중·접촉0)에서 처프로 흔들어 **전 관절 τ·q·q̇** 를 로깅
+#     → 오프라인 swing_mc_fit.py 가 MuJoCo 로 M(q)q̈+C q̇+g(q)+마찰 을 재구성해 M·C 검증.
+#   ⚠**클램프 한계**: jog 20dps 슬루는 deploy 측이라 GUI 가 못 푼다. 이 버튼은 **추종되는
+#     저주파(≤18dps) 스윙**만 = **저대역 관성 프로브**다. 완전한 M·C(고대역·코리올리)는
+#     deploy 에 슬루완화/토크 스윙 모드가 필요(별도 작업). 그전까진 1차 스크리닝.
+#   ⚠발이 **지면에 닿으면 안 됨**(접촉력 섞임) — 크레인 자유스윙·한 다리만. 나머지 축은 hold.
+_SWING_JOINTS = {'HL_thigh':1,'HL_calf':2,'HL_foot':3,'HR_thigh':5,'HR_calf':6,'HR_foot':7,
+                 'HL_hip':0,'HR_hip':4}
+_SWING_FREQ   = {'0.15–0.4Hz':(0.15,0.4), '0.2–0.6Hz':(0.2,0.6)}
+_SWING_MAXDPS = 18.0                        # 20dps 클램프 바로 아래(추종 유지 = 깨끗한 q̈)
+_SWING_LOGDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'swing_logs')
+_swing_stop   = threading.Event()
+_swing_thr    = None
+
+def _swing_loop(center, j, amp_req, f0, f1, T):
+    import math
+    dt = 1.0/_CHIRP_FS; nsteps = int(T*_CHIRP_FS); rows = []
+    vlim = _SWING_MAXDPS/(2.0*math.pi*max(f1,1e-3))                       # 추종유지 진폭상한
+    room = 0.9*min(center[j]-JOG_LIM[j][0], JOG_LIM[j][1]-center[j])
+    amp  = max(0.0, min(float(amp_req), vlim, room))
+    print('[gui] 스윙 시작: %s · 유효진폭=%.2f° · %.2f→%.2fHz · %.0fs (발 공중·자유스윙 확인!)'
+          % (JOG_NAMES[j], amp, f0, f1, T), flush=True)
+    for _ in range(int(3*_CHIRP_FS)):                                    # 진입 램프
+        if _swing_stop.is_set(): return
+        time.sleep(dt)
+    t0 = time.monotonic()
+    for k in range(nsteps):
+        if _swing_stop.is_set(): break
+        t = k*dt
+        phase = 2.0*math.pi*(f0*t + 0.5*(f1-f0)*t*t/T)
+        tgt = list(center)
+        tgt[j] = max(JOG_LIM[j][0], min(JOG_LIM[j][1], center[j] + amp*math.sin(phase)))
+        pub.set(jog_deg=tgt)
+        try:                                                             # 전 관절 τ·q·q̇ (M·C 재구성용)
+            st = json.load(open(STATE))
+            qm = st.get('q_leg_deg'); dq = st.get('dq_leg_dps'); tm = st.get('tau_leg_nm')
+            if qm and dq and tm and min(len(qm),len(dq),len(tm)) >= NJ:
+                rows.append([t] + [float(qm[i]) for i in range(NJ)]
+                                 + [float(dq[i]) for i in range(NJ)]
+                                 + [float(tm[i]) for i in range(NJ)])
+        except Exception:
+            pass
+        nt = t0 + (k+1)*dt; sl = nt - time.monotonic()
+        if sl > 0: time.sleep(sl)
+    if not _swing_stop.is_set():
+        try: pub.set(jog_deg=list(center))
+        except Exception: pass
+    _swing_report(rows, j)
+
+def _swing_report(rows, j):
+    import numpy as _np, csv as _csv
+    if len(rows) < 20:
+        try: dpg.set_value('swing_stat', '스윙 종료 — 표본 부족(%d)' % len(rows))
+        except Exception: pass
+        print('[gui] 스윙 종료 — 표본 부족(%d)' % len(rows), flush=True); return
+    A = _np.array(rows, float); t = A[:,0]
+    dq_j = A[:, 1+NJ+j]; tm_j = A[:, 1+2*NJ+j]
+    qdd_j = _np.gradient(dq_j, t)                                        # q̈ [deg/s²] (라이브 표시용)
+    try:
+        os.makedirs(_SWING_LOGDIR, exist_ok=True)
+        fn = os.path.join(_SWING_LOGDIR, 'swing_%s_%s.csv' % (JOG_NAMES[j], time.strftime('%Y%m%d_%H%M%S')))
+        with open(fn, 'w', newline='') as f:
+            w = _csv.writer(f)
+            w.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
+                       + ['tau_%s'%n for n in JOG_NAMES] + ['swung'])
+            for r in rows: w.writerow(list(r) + [JOG_NAMES[j]])
+        fnb = os.path.basename(fn)
+    except Exception as e:
+        fnb = '(저장실패:%s)' % e
+    head = ('스윙 완료 · %s · %d표본 · |q̇|max=%.1f dps · |q̈|max=%.0f°/s² · |τ|max=%.2f Nm · CSV=%s'
+            % (JOG_NAMES[j], len(rows), _np.abs(dq_j).max(), _np.abs(qdd_j).max(), _np.abs(tm_j).max(), fnb))
+    print('[gui] ' + head, flush=True)
+    print('   → 오프라인 M·C 적합:  python3 biped_swing_mc_fit.py swing_logs/%s' % fnb, flush=True)
+    try: dpg.set_value('swing_stat', head)
+    except Exception: pass
+
+def swing_start(jkey, amp, fkey, T):
+    global _swing_thr
+    swing_stop()
+    j = _SWING_JOINTS.get(jkey, 1); f0, f1 = _SWING_FREQ.get(fkey, (0.15, 0.4))
+    try:
+        center = _chirp_seed()                             # 재사용: fail-closed 시드 + jog 진입
+    except Exception as e:
+        msg = '스윙 진입 취소 — %s' % e
+        print('[gui] %s' % msg, flush=True)
+        try: dpg.set_value('swing_stat', msg)
+        except Exception: pass
+        return
+    _swing_stop.clear()
+    _swing_thr = threading.Thread(target=_swing_loop,
+                                  args=(center, j, float(amp), f0, f1, float(T)), daemon=True)
+    _swing_thr.start()
+
+def swing_stop():
+    global _swing_thr
+    _swing_stop.set()
+    if _swing_thr is not None:
+        _swing_thr.join(timeout=1.5); _swing_thr = None
+
+
+# ── 실험 공용: 데이터저장(ExpLog) + 통일 실행/안전종료 래퍼 (2026-09-17) ──────────
+#   ★모든 실험을 같은 시퀀스로: [버튼] → exp_run(데이터저장 시작 + 궤적/모드 실행)
+#     → exp_stop(모션 정지 + reset + 저장 종료). 실험별 특수 로거(swing 자체 CSV)는 유지.
+#   ExpLog = state 를 50Hz 로 exp_logs/*.csv 에 적재(q·dq·tau·명령·mode·tilt·qp·estop).
+_EXP_LOGDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exp_logs')
+
+class ExpLog:
+    def __init__(self):
+        self._stop = threading.Event(); self._thr = None; self.active = None; self.path = None
+    def start(self, name):
+        self.stop()
+        self.active = name; self._stop.clear()
+        self._thr = threading.Thread(target=self._loop, args=(name,), daemon=True); self._thr.start()
+    def _loop(self, name):
+        import csv as _csv
+        def arr(st, k):
+            v = st.get(k) or []
+            return [float(v[i]) if i < len(v) else 0.0 for i in range(NJ)]
+        try:
+            os.makedirs(_EXP_LOGDIR, exist_ok=True)
+            self.path = os.path.join(_EXP_LOGDIR, '%s_%s.csv' % (name, time.strftime('%Y%m%d_%H%M%S')))
+            f = open(self.path, 'w', newline=''); w = _csv.writer(f)
+        except Exception as e:
+            print('[gui] exp 로그 열기 실패: %s' % e, flush=True); return
+        w.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
+                   + ['tau_%s'%n for n in JOG_NAMES] + ['qcmd_%s'%n for n in JOG_NAMES]
+                   + ['taucmd_%s'%n for n in JOG_NAMES] + ['mode','tilt_deg','est_z','qp_fail_pct','estop'])
+        t0 = time.monotonic(); nrow = 0
+        while not self._stop.is_set():
+            try:
+                st = json.load(open(STATE))
+                w.writerow([round(time.monotonic()-t0, 4)] + arr(st,'q_leg_deg') + arr(st,'dq_leg_dps')
+                           + arr(st,'tau_leg_nm') + arr(st,'q_cmd_deg') + arr(st,'tau_cmd_nm')
+                           + [st.get('mode',''), st.get('tilt_deg',0.0), st.get('est_z',0.0),
+                              st.get('qp_fail_pct',0.0), st.get('estop',False)])
+                nrow += 1
+            except Exception:
+                pass
+            time.sleep(1.0/_CHIRP_FS)
+        try: f.close()
+        except Exception: pass
+        msg = '실험 로그 저장: %s (%d행)' % (os.path.basename(self.path or '-'), nrow)
+        print('[gui] ' + msg, flush=True)
+        try: dpg.set_value('exp_stat', msg)
+        except Exception: pass
+    def stop(self):
+        self._stop.set()
+        if self._thr is not None:
+            self._thr.join(timeout=1.5); self._thr = None
+        self.active = None
+
+explog = ExpLog()
+
+def exp_run(name):
+    """실험 시작 — 데이터저장 켜고 궤적/모드 실행. (swing 은 자체 CSV 라 ExpLog 제외)"""
+    try: dpg.set_value('exp_stat', '실험 실행: %s (기록 중…)' % name)
+    except Exception: pass
+    if name == 'swing':
+        swing_start(dpg.get_value('swing_j'), dpg.get_value('swing_amp'),
+                    dpg.get_value('swing_fk'), dpg.get_value('swing_T'))
+        return
+    explog.start(name)
+    if name == 'stand':   set_mode('stand')
+    elif name == 'squat': walk_start('스쿼트(1점)', 1.0, True)     # 1점 스쿼트 위치 replay
+    elif name == 'walk':  set_mode('walk')
+
+def exp_stop(name):
+    """안전종료 — 모션 정지 + reset + 저장 종료(순서 중요)."""
+    walk_stop(); swing_stop()                # 리플레이·스윙 스레드 정지(무해)
+    set_mode('reset')                        # 명령 안전화
+    explog.stop()                            # CSV 마감
+    try: dpg.set_value('exp_stat', '안전종료: %s' % name)
+    except Exception: pass
+
+
 left  = JoyPad('joyL', 190, on_left, cross_only=True)   # ★십자만(전후 XOR 측방, 대각 금지)
 right = JoyPad('joyR', 190, on_right, x_only=True)
 
@@ -1172,9 +1348,9 @@ with dpg.window(tag='main'):
         dpg.bind_item_theme(_wb, _walk)
     dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 2점 평발 stand'
                  '   · Off=명령토크 0 (Kp=Kd=τ=0)', color=(150, 155, 175))
-    with dpg.group(horizontal=True):   # ★궤적 위치재생 (스쿼트/walk replay) — 2026-09-16
-        dpg.add_text('궤적 재생(위치):')
-        dpg.add_combo(list(_WALK_FILES.keys()), default_value='스쿼트(1점)', width=110, tag='walk_sel')
+    with dpg.group(horizontal=True):   # ★궤적 위치재생 프리뷰(무기록) — 실험 기록판은 아래 '기록 실험'
+        dpg.add_text('궤적 프리뷰(위치):')
+        dpg.add_combo(list(_WALK_FILES.keys()), default_value='제자리(vx0)', width=110, tag='walk_sel')
         dpg.add_text('속도×')
         dpg.add_slider_float(default_value=1.0, min_value=0.1, max_value=1.0, width=100,
                              tag='walk_spd', format='%.1f')
@@ -1204,6 +1380,36 @@ with dpg.window(tag='main'):
                  color=(200, 150, 120))
     dpg.add_text('⚠처프=jog 20dps 클램프 안 소진동(진폭 자동축소·고주파일수록↓). 홈/매달림에서만. 결과 CSV=chirp_logs/.',
                  color=(200, 150, 120))
+    dpg.add_separator()
+    dpg.add_text('■ 기록 실험 (버튼→저장→실행→안전종료) — ▶실행 시 exp_logs/ 에 상태 CSV 기록', color=(170, 205, 150))
+    with dpg.group(horizontal=True):
+        dpg.add_text('stand(2점정적) ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
+        dpg.add_text('⚠접지·GRF 필요 (매달림 금지)', color=(210, 150, 90))
+    with dpg.group(horizontal=True):
+        dpg.add_text('standup-down  ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('squat'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('squat'))
+        dpg.add_text('1점 스쿼트(위치·접촉고정) · 크레인 OK', color=(150, 160, 180))
+    with dpg.group(horizontal=True):
+        dpg.add_text('스윙처프(M·C) ')
+        dpg.add_combo(list(_SWING_JOINTS.keys()), default_value='HL_thigh', width=86, tag='swing_j')
+        dpg.add_slider_float(default_value=8.0, min_value=1.0, max_value=15.0, width=66, tag='swing_amp', format='%.0f°')
+        dpg.add_combo(list(_SWING_FREQ.keys()), default_value='0.15–0.4Hz', width=94, tag='swing_fk')
+        dpg.add_slider_int(default_value=20, min_value=8, max_value=40, width=54, tag='swing_T', format='%ds')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('swing'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('swing'))
+    with dpg.group(horizontal=True):
+        dpg.add_text('walk(동적)     ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('walk'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('walk'))
+        dpg.add_text('⚠수리·M·C검증 전 금지 · 접지·GRF', color=(215, 110, 100))
+    dpg.add_text('실험 대기', tag='exp_stat', color=(150, 200, 150))
+    dpg.add_text('⚠스윙처프=발 공중(접촉0)·한 다리·크레인. jog 20dps라 저주파=저대역 관성 프로브'
+                 '(완전 M·C는 deploy 슬루완화 필요). 결과 swing_logs/ → biped_swing_mc_fit.py 오프라인 적합.',
+                 color=(200, 150, 120))
+    dpg.add_separator()
     dpg.add_text('⚠매달린 채로 stand/보행을 켜지 말 것 — GRF 를 전제한 QP 라 해가 안 나오고 '
                  '중력보상 폴백으로 떨어진다(겉보기엔 안정돼 보인다). 매달려서 되는 건 off/jog/home 뿐.',
                  color=(210, 150, 90))
