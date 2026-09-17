@@ -1164,17 +1164,21 @@ class ExpLog:
             f = open(self.path, 'w', newline=''); w = _csv.writer(f)
         except Exception as e:
             print('[gui] exp 로그 열기 실패: %s' % e, flush=True); return
-        w.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
+        w.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['qch_%s'%n for n in JOG_NAMES]
+                   + ['aux_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
                    + ['tau_%s'%n for n in JOG_NAMES] + ['qcmd_%s'%n for n in JOG_NAMES]
-                   + ['taucmd_%s'%n for n in JOG_NAMES] + ['mode','tilt_deg','est_z','qp_fail_pct','estop'])
+                   + ['taucmd_%s'%n for n in JOG_NAMES]
+                   + ['mode','tilt_deg','est_z','qp_fail_pct','loop_hz','estop'])
         t0 = time.monotonic(); nrow = 0
         while not self._stop.is_set():
             try:
                 st = json.load(open(STATE))
-                w.writerow([round(time.monotonic()-t0, 4)] + arr(st,'q_leg_deg') + arr(st,'dq_leg_dps')
-                           + arr(st,'tau_leg_nm') + arr(st,'q_cmd_deg') + arr(st,'tau_cmd_nm')
+                w.writerow([round(time.monotonic()-t0, 4)]
+                           + arr(st,'q_leg_deg') + arr(st,'q_ch_deg') + arr(st,'aux_deg')
+                           + arr(st,'dq_leg_dps') + arr(st,'tau_leg_nm')
+                           + arr(st,'q_cmd_deg') + arr(st,'tau_cmd_nm')
                            + [st.get('mode',''), st.get('tilt_deg',0.0), st.get('est_z',0.0),
-                              st.get('qp_fail_pct',0.0), st.get('estop',False)])
+                              st.get('qp_fail_pct',0.0), st.get('loop_hz',0.0), st.get('estop',False)])
                 nrow += 1
                 if nrow % 25 == 0: f.flush()          # ★~0.5s 마다 flush — 크래시 손실 최소화
             except Exception:
@@ -1291,6 +1295,28 @@ with dpg.theme() as _kp_off:                # 강성 배율 — 나머지(어둡
         dpg.add_theme_color(dpg.mvThemeCol_Button, (44, 48, 62))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (70, 76, 96))
 
+def build_joint_sliders():
+    # ── ★각축(JOG) 패널: 8관절 슬라이더(모터 1:1) + 실측 + 통신 상태 LED ──
+    #   ★2026-09-17 상단 우측으로 이동(첫 줄 2단: 좌 biped jog · 우 조인트 슬라이더).
+    dpg.add_text('● 각축 JOG 검증 (슬라이더=목표각° · 실측° · ●=상태LED)', color=(255, 205, 120))
+    with dpg.group(horizontal=True):
+        dpg.add_button(label='슬라이더 모두 0', width=130, callback=jog_zero)
+        dpg.add_text('LED 초록=정상·노랑=에러·빨강=두절·어두움=미장착', color=(120, 130, 150))
+    _LED_R = 7
+    for i, nm in enumerate(JOG_NAMES):
+        with dpg.group(horizontal=True):
+            with dpg.drawlist(width=2 * _LED_R + 6, height=2 * _LED_R + 6, tag=f'leddl_{i}'):
+                dpg.draw_circle([_LED_R + 3, _LED_R + 3], _LED_R, fill=(70, 70, 78),
+                                color=(30, 30, 36), tag=f'led_{i}')
+            dpg.add_text(f'{nm:9s}', color=(190, 195, 210))
+            dpg.add_text(f'{JOG_LIM[i][0]:>6.1f}', color=(120, 130, 150))
+            dpg.add_slider_float(tag=f'jog_{i}', default_value=0.0,
+                                 min_value=JOG_LIM[i][0], max_value=JOG_LIM[i][1],
+                                 width=240, format='%.1f', user_data=i,
+                                 callback=lambda s, v, u: on_jog(s, v, u))
+            dpg.add_text(f'{JOG_LIM[i][1]:<6.1f}', color=(120, 130, 150))
+            dpg.add_text('--.-', tag=f'meas_{i}', color=(150, 220, 150))
+
 with dpg.window(tag='main'):
     with dpg.group(horizontal=True):
         dpg.add_text('biped teleop  —  MPC + WBIC (event-DCM)', color=(150, 200, 255))
@@ -1298,22 +1324,28 @@ with dpg.window(tag='main'):
         dpg.add_checkbox(label='로그창', default_value=False, tag='show_calib',
                          callback=lambda s, a: dpg.configure_item('calib_win', show=a))
     dpg.add_separator()
-    with dpg.group(horizontal=True):
-        with dpg.group():
-            left.build('전후/측방')
-            dpg.add_text('좌: 위아래=전후 · 좌우=측방 (십자=하나씩)', color=(120, 130, 150))
-        with dpg.group():
-            right.build('선회')
-            dpg.add_text('우: 좌우=선회 (★점발 한계로 매우 약함 ~1-2°/s·측방도 60%)', color=(120, 130, 150))
-        with dpg.group():
-            dpg.add_text('vx [m/s]')
-            dpg.add_slider_float(tag='spd_sl', default_value=0.0, min_value=-VMAX, max_value=VMAX, width=180, callback=on_vx)
-            dpg.add_text('vy [m/s] (측방)')
-            dpg.add_slider_float(tag='vy_sl', default_value=0.0, min_value=-VY_MAX, max_value=VY_MAX, width=180, callback=on_vy)
-            dpg.add_text('wz [rad/s] (선회)')
-            dpg.add_slider_float(tag='turn_sl', default_value=0.0, min_value=-WZ_MAX, max_value=WZ_MAX, width=180, callback=on_turn)
-            dpg.add_text('몸통 높이 [m]')
-            dpg.add_slider_float(tag='h_sl', default_value=H_DEF, min_value=H_MIN, max_value=H_MAX, width=180, callback=on_height)
+    with dpg.group(horizontal=True):   # ★첫 줄 2단(2026-09-17): 좌=biped jog(텔레옵) · 우=조인트 슬라이더
+        with dpg.group():              # ── 좌: biped jog ──
+            dpg.add_text('biped jog (텔레옵)', color=(150, 200, 255))
+            with dpg.group(horizontal=True):
+                with dpg.group():
+                    left.build('전후/측방')
+                    dpg.add_text('좌: 위아래=전후 · 좌우=측방 (십자=하나씩)', color=(120, 130, 150))
+                with dpg.group():
+                    right.build('선회')
+                    dpg.add_text('우: 좌우=선회 (★점발 한계로 매우 약함 ~1-2°/s·측방도 60%)', color=(120, 130, 150))
+                with dpg.group():
+                    dpg.add_text('vx [m/s]')
+                    dpg.add_slider_float(tag='spd_sl', default_value=0.0, min_value=-VMAX, max_value=VMAX, width=180, callback=on_vx)
+                    dpg.add_text('vy [m/s] (측방)')
+                    dpg.add_slider_float(tag='vy_sl', default_value=0.0, min_value=-VY_MAX, max_value=VY_MAX, width=180, callback=on_vy)
+                    dpg.add_text('wz [rad/s] (선회)')
+                    dpg.add_slider_float(tag='turn_sl', default_value=0.0, min_value=-WZ_MAX, max_value=WZ_MAX, width=180, callback=on_turn)
+                    dpg.add_text('몸통 높이 [m]')
+                    dpg.add_slider_float(tag='h_sl', default_value=H_DEF, min_value=H_MIN, max_value=H_MAX, width=180, callback=on_height)
+        dpg.add_spacer(width=24)
+        with dpg.group():              # ── 우: 조인트 슬라이더 (각축 JOG) ──
+            build_joint_sliders()
     dpg.add_spacer(height=8)
     dpg.add_text('모션', color=(170, 175, 195))
     # ★2026-08-14 라벨 정리 — 이름이 동작을 오해시키고 있었다.
@@ -1561,33 +1593,6 @@ with dpg.window(tag='main'):
     dpg.add_text('(영점세팅 제거 — 하드웨어영점 ZeroSet_RobotEmbedded 사용. 위 표는 config↔제어기 영점 대조 진단용)',
                  color=(120, 130, 150))
     dpg.add_separator()
-    # ── ★각축(JOG) 패널: 8관절 슬라이더(모터 1:1) + 실측 + 통신 상태 LED ──
-    dpg.add_text('● 각축 JOG 검증 (슬라이더=목표각° · 실측° · ●=상태LED)', color=(255, 205, 120))
-    with dpg.group(horizontal=True):
-        # ★라벨에서 'home' 을 뺐다 — 위 [Home 복귀] 버튼과 전혀 다른 동작이다.
-        #   이건 JOG 슬라이더를 0 으로 놓는 것(등속 램프, 축마다 도착시각 제각각)이고,
-        #   [Home 복귀] 는 home 모드의 S-curve 동시도착 궤적이다.
-        dpg.add_button(label='슬라이더 모두 0', width=130, callback=jog_zero)
-        dpg.add_text('LED 초록=정상·노랑=에러·빨강=두절(배선O)·어두움=미장착 · 실기(app/biped_emb.py)서 각 모터 확인',
-                     color=(120, 130, 150))
-    _LED_R = 7
-    for i, nm in enumerate(JOG_NAMES):
-        with dpg.group(horizontal=True):
-            with dpg.drawlist(width=2 * _LED_R + 6, height=2 * _LED_R + 6, tag=f'leddl_{i}'):
-                dpg.draw_circle([_LED_R + 3, _LED_R + 3], _LED_R, fill=(70, 70, 78),
-                                color=(30, 30, 36), tag=f'led_{i}')
-            dpg.add_text(f'{nm:9s}', color=(190, 195, 210))
-            # ★슬라이더 양끝에 jog 한계를 숫자로 박아 둔다. 이 한계는 축마다 다르고
-            #   (config 의 jog_min_deg/jog_max_deg 예외), 관절한계와도 다르다 —
-            #   화면에 안 쓰여 있으면 "왜 여기서 안 넘어가지" 를 매번 config 를 열어 확인해야 한다.
-            dpg.add_text(f'{JOG_LIM[i][0]:>6.1f}', color=(120, 130, 150))
-            dpg.add_slider_float(tag=f'jog_{i}', default_value=0.0,
-                                 min_value=JOG_LIM[i][0], max_value=JOG_LIM[i][1],
-                                 width=240, format='%.1f', user_data=i,
-                                 callback=lambda s, v, u: on_jog(s, v, u))
-            dpg.add_text(f'{JOG_LIM[i][1]:<6.1f}', color=(120, 130, 150))
-            dpg.add_text('--.-', tag=f'meas_{i}', color=(150, 220, 150))
-    dpg.add_separator()
     dpg.add_text('-', tag='state', color=(150, 220, 150))
     dpg.add_text('-', tag='sysload', color=(150, 220, 150))   # ★CPU·온도(500Hz 루프가 여기 물려 있다)
 
@@ -1615,8 +1620,10 @@ with dpg.window(label='드라이버 알람 로그', tag='calib_win',
 dpg.bind_theme(_dark)
 if _kf is not None:
     dpg.bind_font(_kf)
-dpg.create_viewport(title='biped teleop', width=700, height=800)
+dpg.create_viewport(title='biped teleop', width=1400, height=900)
 dpg.setup_dearpygui(); dpg.show_viewport(); dpg.set_primary_window('main', True)
+try: dpg.maximize_viewport()          # ★기동 시 전체화면(최대화)
+except Exception: pass
 set_kp_scale(1.0)      # ★강성 버튼 초기 선택 표시(×1). Pub 기본값과 반드시 일치시킬 것.
 set_push_leg(0)        # ★발밀기 다리 초기 선택 표시(HL)
 
