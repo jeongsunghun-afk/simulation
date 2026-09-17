@@ -1361,6 +1361,8 @@ with dpg.window(tag='main'):
         with dpg.group():              # ── 우: 조인트 슬라이더 (각축 JOG) ──
             build_joint_sliders()
     dpg.add_spacer(height=8)
+    dpg.add_text('-', tag='sysload', color=(150, 220, 150))   # ★CPU·온도 (jog 아래·모션 위) 2026-09-17
+    dpg.add_separator()
     dpg.add_text('모션', color=(170, 175, 195))
     # ★2026-08-14 라벨 정리 — 이름이 동작을 오해시키고 있었다.
     #   · 'RESET' → **'정지·현자세'**: 프로세스와 아무 상관이 없다. 하는 일은
@@ -1430,7 +1432,10 @@ with dpg.window(tag='main'):
         dpg.bind_item_theme(_wb, _walk)
     dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 2점 평발 stand'
                  '   · Off=명령토크 0 (Kp=Kd=τ=0)', color=(150, 155, 175))
-    with dpg.group(horizontal=True):   # ★궤적 위치재생 (기록됨: exp_logs/ — 모델오차 분석용) 2026-09-17
+    # ── ★미접지 실험 (매달림·발 공중) — 궤적재생 + 스윙처프 ──────────── 2026-09-17
+    dpg.add_separator()
+    dpg.add_text('■ 미접지 실험 (매달림·발 공중) — 궤적재생·스윙처프. exp_logs/·swing_logs/ 기록', color=(150, 200, 220))
+    with dpg.group(horizontal=True):   # 궤적 재생(기록) — 위치제어 프리뷰. auto anti-ring 게인
         dpg.add_text('궤적 재생(기록):')
         dpg.add_combo(list(_WALK_FILES.keys()), default_value='제자리(vx0)', width=110, tag='walk_sel')
         dpg.add_text('속도×')
@@ -1444,39 +1449,7 @@ with dpg.window(tag='main'):
                                                     dpg.get_value('walk_spd'), dpg.get_value('walk_loop'))))
         dpg.add_button(label='■정지', width=64,
                        callback=lambda: (walk_stop(), set_mode('reset')))   # set_mode('reset')=explog.stop 포함
-    with dpg.group(horizontal=True):   # ★다축 처프 + fCurrent(측정토크) 모니터 — 2026-09-16
-        dpg.add_text('처프+fCurrent:')
-        dpg.add_combo(list(_CHIRP_AXES.keys()), default_value='calf 양쪽', width=92, tag='chirp_ax')
-        dpg.add_text('진폭°')
-        dpg.add_slider_float(default_value=3.0, min_value=0.5, max_value=6.0, width=80,
-                             tag='chirp_amp', format='%.1f')
-        dpg.add_combo(list(_CHIRP_FREQ.keys()), default_value='저속 0.2–0.6Hz', width=124, tag='chirp_fk')
-        dpg.add_text('초')
-        dpg.add_slider_int(default_value=15, min_value=5, max_value=30, width=64, tag='chirp_T')
-        dpg.add_button(label='▶처프', width=64,
-                       callback=lambda: chirp_start(dpg.get_value('chirp_ax'), dpg.get_value('chirp_amp'),
-                                                     dpg.get_value('chirp_fk'), dpg.get_value('chirp_T')))
-        dpg.add_button(label='■정지', width=64,
-                       callback=lambda: (chirp_stop(), set_mode('reset')))
-    dpg.add_text('처프 대기 — 명령(q_cmd·tau_cmd) 대비 측정 tau_leg(=fCurrent) 상관·추종을 로깅', tag='chirp_stat',
-                 color=(150, 200, 220))
-    dpg.add_text('⚠위치제어 미리보기 — 케이블/벨트 수리 후·크레인 매달림. 동적 walk 아님. jog 한계 초과축은 클램프.',
-                 color=(200, 150, 120))
-    dpg.add_text('⚠처프=jog 20dps 클램프 안 소진동(진폭 자동축소·고주파일수록↓). 홈/매달림에서만. 결과 CSV=chirp_logs/.',
-                 color=(200, 150, 120))
-    dpg.add_separator()
-    dpg.add_text('■ 기록 실험 (버튼→저장→실행→안전종료) — ▶실행 시 exp_logs/ 에 상태 CSV 기록', color=(170, 205, 150))
-    with dpg.group(horizontal=True):
-        dpg.add_text('stand(2점정적) ')
-        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
-        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
-        dpg.add_text('⚠접지·GRF 필요 (매달림 금지)', color=(210, 150, 90))
-    with dpg.group(horizontal=True):
-        dpg.add_text('standup-down  ')
-        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('squat'))
-        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('squat'))
-        dpg.add_text('1점 스쿼트(위치·접촉고정) · 크레인 OK', color=(150, 160, 180))
-    with dpg.group(horizontal=True):
+    with dpg.group(horizontal=True):   # 스윙처프(M·C) — 단일관절 자유공간
         dpg.add_text('스윙처프(M·C) ')
         dpg.add_combo(list(_SWING_JOINTS.keys()), default_value='HL_thigh', width=86, tag='swing_j')
         dpg.add_slider_float(default_value=8.0, min_value=1.0, max_value=15.0, width=62, tag='swing_amp', format='%.0f°')
@@ -1487,17 +1460,31 @@ with dpg.window(tag='main'):
         dpg.add_slider_int(default_value=20, min_value=8, max_value=40, width=52, tag='swing_T', format='%ds')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('swing'))
         dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('swing'))
+    dpg.add_text('미접지 대기 — 발 공중·크레인. 궤적재생=위치 프리뷰(동적 walk 아님)·auto kp2/kd3', tag='swing_stat',
+                 color=(180, 200, 220))
+    dpg.add_text('⚠스윙 M 자극: deploy 를 JOG_SPEED_DPS=<X>(예 80,[5,150])로 재실행 후 peak≤X. calf 관절 peak≤120.',
+                 color=(200, 150, 120))
+    dpg.add_text('   결과: 궤적→exp_logs/(biped_model_resid) · 스윙→swing_logs/(biped_swing_mc_fit)',
+                 color=(150, 160, 180))
+    # ── ★접지 실험 (GRF 필요·크레인 안전) — 기록실험 ─────────────────────
+    dpg.add_separator()
+    dpg.add_text('■ 접지 실험 (GRF 필요·크레인 안전) — exp_logs/ 기록', color=(170, 205, 150))
+    with dpg.group(horizontal=True):
+        dpg.add_text('stand(2점정적) ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
+        dpg.add_text('⚠접지·GRF 필요 (매달림 금지)', color=(210, 150, 90))
+    with dpg.group(horizontal=True):
+        dpg.add_text('standup-down  ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('squat'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('squat'))
+        dpg.add_text('1점 스쿼트 접지 · 크레인 안전줄', color=(150, 160, 180))
     with dpg.group(horizontal=True):
         dpg.add_text('walk(동적)     ')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('walk'))
         dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('walk'))
         dpg.add_text('⚠수리·M·C검증 전 금지 · 접지·GRF', color=(215, 110, 100))
     dpg.add_text('실험 대기', tag='exp_stat', color=(150, 200, 150))
-    dpg.add_text('⚠스윙처프=발 공중(접촉0)·한 다리·크레인. M 자극하려면 deploy 를 JOG_SPEED_DPS=<X>(예 80,[5,150])로 '
-                 '재실행 후 peak≤X. 안 올리면 20dps=저대역. calf 관절 peak≤120(채널 vel_trip 200).',
-                 color=(200, 150, 120))
-    dpg.add_text('   결과 swing_logs/*.csv → biped_swing_mc_fit.py 오프라인 M·C 적합(고정베이스·armature·SCALE 반영).',
-                 color=(150, 160, 180))
     dpg.add_separator()
     dpg.add_text('⚠매달린 채로 stand/보행을 켜지 말 것 — GRF 를 전제한 QP 라 해가 안 나오고 '
                  '중력보상 폴백으로 떨어진다(겉보기엔 안정돼 보인다). 매달려서 되는 건 off/jog/home 뿐.',
@@ -1610,7 +1597,6 @@ with dpg.window(tag='main'):
                  color=(120, 130, 150))
     dpg.add_separator()
     dpg.add_text('-', tag='state', color=(150, 220, 150))
-    dpg.add_text('-', tag='sysload', color=(150, 220, 150))   # ★CPU·온도(500Hz 루프가 여기 물려 있다)
 
 with dpg.handler_registry():
     dpg.add_mouse_down_handler(callback=lambda: (left.press(), right.press()))
