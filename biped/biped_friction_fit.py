@@ -26,6 +26,11 @@ SCALE = float(sys.argv[2]) if len(sys.argv)>2 else (
 
 rows = list(csv.DictReader(open(CSVP)))
 if len(rows) < 40: print("표본 부족(%d)"%len(rows)); sys.exit(1)
+if ('cur_%s'%NM[0]) not in rows[0]:
+    print("✗ 이 CSV 에 cur_(실측전류) 열이 없음 — **구버전 GUI**로 찍은 로그입니다.")
+    print("  → 최신 GUI(스윙 로거 cur_a 추가분)로 **재기동** 후 calf 스윙을 다시 찍으세요.")
+    print("     ./run_all.sh gui 로 재기동 → 스윙처프 HL_calf/HR_calf ▶실행 → 새 CSV")
+    sys.exit(1)
 def col(k): return np.array([[float(r['%s_%s'%(k,n)]) for n in NM] for r in rows], float)
 t = np.array([float(r['t']) for r in rows])
 q = np.deg2rad(col('q')); dq = np.deg2rad(col('dq')); cur = col('cur')
