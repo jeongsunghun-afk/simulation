@@ -62,6 +62,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 
 MJCF="$HERE/biped_from_quad.mjcf"                  # 1점 점발
 [ "${1:-}" = "flat" ] && MJCF="$HERE/biped_flatfoot.mjcf"
+[ "${1:-}" = "point" ] && MJCF="$HERE/biped_pointfoot_payload.mjcf"  # 1점 점발 + 실물 payload(16.25kg)
 [ -f "${1:-}" ] && MJCF="$(realpath "$1")"         # ★임의 MJCF 경로 (무게추 변형 등)
                                                    #   절대경로화 필수 — 아래에서 cpp/ 로 cd 한다
 
@@ -72,11 +73,11 @@ MJCF="$HERE/biped_from_quad.mjcf"                  # 1점 점발
 #   원인: g*(1.20…)가 이미 α 보상하는데 ff_comp(2026-09-12 신설)가 α 를 또 보상 → float 이
 #     realized ~1.5×중력으로 과보상, 다리가 떠서 고정지그와 충돌.
 #   해법: ACT_ALPHA=1 로 ff_comp 끔(옛 g* 가 α 담당) + g* 를 float 브래킷값으로 재튜닝.
-#     실기 브래킷(다리 놓아 안 뜨는 값): hip 만 약간 높음(HL 0.97 / HR 0.95), 나머지 0.90.
+#     실기 브래킷(다리 놓아 안 뜨는 값): hip 만 약간 높음(HL 1.00[09-18 0.97→상향] / HR 0.95), 나머지 0.90.
 #   둘 다 env 로 덮어쓰기 가능. 옛 방식 복원:
 #     ACT_ALPHA=0.834 GRAV_SCALE_JOINT="1.20,1.10,1.22,1.00,1.18,1.10,1.22,1.00" ./run_all.sh ctrl
 export ACT_ALPHA="${ACT_ALPHA:-1.0}"                 # ff_comp(1/α) 끔 — g* 가 α 담당(이중계상 방지)
-export GRAV_SCALE_JOINT="${GRAV_SCALE_JOINT:-0.97,0.90,0.90,0.90,0.95,0.90,0.90,0.90}"
+export GRAV_SCALE_JOINT="${GRAV_SCALE_JOINT:-1.00,0.90,0.90,0.90,0.95,0.90,0.90,0.90}"  # 2026-09-18 HL_hip 0.97→1.00 (놓으면 미끌려처져 약간 상향)
 # ★foot 상수결손 보상 (2026-08-27 무게추 캠페인 → 실기 검증: E4 blend 0.66→0.77)
 #   r_foot(G)=α−k/G 의 상수항 k 를 토크부호 기반 k·tanh(τ_ch/τ0) 로 전방보상.
 #   끄려면 FOOT_COMP_NM=0. 근거: data/push/PLAN_0826.md 최종표.
@@ -89,6 +90,9 @@ export FOOT_COMP_NM="${FOOT_COMP_NM:-0.36}"
 #     저울 r_foot(G) 포화 0.77 + hold 자립(발끝적용·1.30 등가)이 하중 대역에서 실증.
 #     stand-lite 1차에서 foot 만 1.00 이라 ±7.5° 처짐 — hold 초기와 같은 병리였다.
 export STAND_TAU_SCALE_JOINT="${STAND_TAU_SCALE_JOINT:-1.20,1.10,1.22,1.30,1.18,1.10,1.22,1.30}"
+# ★2026-09-18 hold FF 클램프 해제 — HL_thigh/HL_calf 가 기본 14Nm 에 포화해 왼다리 지지토크
+#   부족(몸 못 듦). 전축 50Nm 로 상향(유저 요청). ⚠접지 안전망 약화 — 매달림/브링업 한정.
+export HOLD_FF_TAU_MAX="${HOLD_FF_TAU_MAX:-50}"
 
 # ── ③walk 묶음 (2026-08-27 · sim 정량화 tools/walk_demand_check.py) ─────────
 #   walk 모드 **한정** 트립 상향(실측 플랜트 스윙 요구 calf 673dps·kd제동 41Nm — 고정

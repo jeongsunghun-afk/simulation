@@ -1045,7 +1045,14 @@ _SWING_FREQ   = {'0.2–0.6Hz':(0.2,0.6), '0.3–1.2Hz':(0.3,1.2), '0.5–2.0Hz'
 #     한다 — 기본 20dps 면 저대역(M 자극 약함). M·C 자극하려면 deploy 를 JOG_SPEED_DPS=<X>
 #     (예 80, [5,150]) 로 **재실행**하고 여기 peak 를 X 이하로. 그래야 sin 이 안 뭉개진다.
 #     ⚠calf 채널속도 = 관절×1.5 → 관절 133dps 에서 채널 200=vel_trip. 관절 peak≤120 권장.
-_SWING_MAXDPS = 18.0                        # peak dps 슬라이더 기본(=배포 기본 20dps 아래)
+_SWING_MAXDPS = 18.0                        # (구 UI) 단일관절 peak dps 기본
+# ── ★한쪽 다리 4축 자동순차 (HL/HR 선택) — 진폭·Hz·dps 자동 (2026-09-18) ──
+#   suffix → (amp_req°, f0, f1, peak_dps, T[s]). amp 은 요청값(실효는 _swing_loop 의 vlim·room 캡).
+#   ⚠peak dps 는 deploy 의 JOG_SPEED_DPS 이하여야 sin 이 안 뭉개짐 → JOG_SPEED_DPS≥60 로 재실행 권장.
+_SWING_AUTO = {'hip':(8.0,0.3,1.0,50,16), 'thigh':(12.0,0.3,1.0,50,16),
+               'calf':(12.0,0.3,1.2,55,16), 'foot':(8.0,0.3,1.0,45,16)}
+_SWING_SIDE_JOINTS = {'HL':['HL_hip','HL_thigh','HL_calf','HL_foot'],
+                      'HR':['HR_hip','HR_thigh','HR_calf','HR_foot']}
 _SWING_LOGDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'swing_logs')
 _swing_stop   = threading.Event()
 _swing_thr    = None
@@ -1151,6 +1158,38 @@ def swing_stop():
     _swing_stop.set()
     if _swing_thr is not None:
         _swing_thr.join(timeout=1.5); _swing_thr = None
+
+def _swing_side_loop(side):
+    """한쪽 다리 4축(hip→thigh→calf→foot)을 자동 파라미터로 순차 스윙. 각 축 개별 CSV."""
+    joints = _SWING_SIDE_JOINTS.get(side, [])
+    print('[gui] 스윙 순차 시작: %s (%d축 · 진폭/Hz/dps 자동)' % (side, len(joints)), flush=True)
+    for idx, jkey in enumerate(joints):
+        if _swing_stop.is_set(): break
+        suf = jkey.rsplit('_', 1)[1]                       # hip/thigh/calf/foot
+        amp, f0, f1, peak, T = _SWING_AUTO[suf]
+        try:
+            center = _chirp_seed()                         # 축마다 현재자세 재시드(fail-closed)
+        except Exception as e:
+            print('[gui] %s 시드 실패, 건너뜀: %s' % (jkey, e), flush=True); continue
+        try: dpg.set_value('swing_stat', '순차 %d/%d: %s 스윙 중…' % (idx+1, len(joints), jkey))
+        except Exception: pass
+        _swing_loop(center, _SWING_JOINTS[jkey], amp, f0, f1, T, peak)   # ~T+3s 블록(_swing_stop 공유)
+        for _ in range(int(1.5*_CHIRP_FS)):                # 축간 정착
+            if _swing_stop.is_set(): break
+            time.sleep(1.0/_CHIRP_FS)
+    if not _swing_stop.is_set():
+        try: dpg.set_value('swing_stat', '스윙 순차 완료: %s — swing_logs/ 4개 CSV 확인' % side)
+        except Exception: pass
+    print('[gui] 스윙 순차 종료: %s' % side, flush=True)
+
+def swing_side_start(side):
+    global _swing_thr
+    swing_stop()
+    if side not in _SWING_SIDE_JOINTS:
+        print('[gui] 스윙 side 오류: %s' % side, flush=True); return
+    _swing_stop.clear()
+    _swing_thr = threading.Thread(target=_swing_side_loop, args=(side,), daemon=True)
+    _swing_thr.start()
 
 
 # ── WBIC 밸런스 스쿼트 (접지·토크제어) — stand 모드 body_h 오실레이션 (2026-09-17) ──
@@ -1264,12 +1303,11 @@ def exp_run(name):
     try: dpg.set_value('exp_stat', '실험 실행: %s (기록 중…)' % name)
     except Exception: pass
     if name == 'swing':
-        swing_start(dpg.get_value('swing_j'), dpg.get_value('swing_amp'),
-                    dpg.get_value('swing_fk'), dpg.get_value('swing_T'), dpg.get_value('swing_dps'))
+        swing_side_start(dpg.get_value('swing_side'))     # HL/HR 4축 자동순차
         return
     explog.start(name)
     if name == 'stand':   set_mode('stand')
-    elif name == 'squat': set_mode('stand'); wsq_start()          # ★WBIC 밸런스 스쿼트(body_h 오실·토크제어)
+    elif name == 'squat': walk_start('스쿼트(1점)', 1.0, True)      # ★2026-09-18 무-WBIC 토크스쿼트: 스쿼트궤적(biped_ref_squat.npz) 재생(jog·PD+중력FF·밸런스QP 없음). set_mode('stand')+wsq 제거(WBIC 발산·freeze 회피·좌우는 사람/가이드로 고정). wsq_* 함수는 유지.
     elif name == 'walk':  set_mode('walk')
 
 def exp_stop(name):
@@ -1470,14 +1508,16 @@ with dpg.window(tag='main'):
         #     reset→hold · 접지거부→hold · 자세거부→hold · --start-mode hold.
         #     지우면 갈 곳이 off(=limp=낙하)나 home(하중 실린 채 큰 이동)뿐이라 더 위험하다.
         #   ⇒ 조작 표면에서만 뺀다. 필요하면 '정지·현자세'(reset)가 hold 로 들어간다.
-        with dpg.group():              # ★2점 평발 = 정적 자세유지(보행 안 함)
-            dpg.add_button(label='2점 평발 stand', width=130, tag='mbtn_stand', callback=lambda: set_mode('stand'))
-            dpg.add_text('(밑창 접지·정적)', color=(120, 130, 150))
-        with dpg.group():              # ★1점 점발 = stepping 보행
-            _wb = dpg.add_button(label='점발 보행', width=110, tag='mbtn_walk', callback=lambda: set_mode('walk'))
-            dpg.add_text('(발끝 1점·동적)', color=(120, 130, 150))
-        dpg.bind_item_theme(_wb, _walk)
-    dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 2점 평발 stand'
+        # ── ★2026-09-18 주석처리: 2점 평발 stand(2점 평발 모드 폐기) + 점발 보행(접지실험 walk 와 중복→접지실험만 유지).
+        #   set_mode('stand')·set_mode('walk') 기능/모드는 그대로 살아 있음(버튼만 숨김).
+        # with dpg.group():              # ★2점 평발 = 정적 자세유지(보행 안 함)
+        #     dpg.add_button(label='2점 평발 stand', width=130, tag='mbtn_stand', callback=lambda: set_mode('stand'))
+        #     dpg.add_text('(밑창 접지·정적)', color=(120, 130, 150))
+        # with dpg.group():              # ★1점 점발 = stepping 보행
+        #     _wb = dpg.add_button(label='점발 보행', width=110, tag='mbtn_walk', callback=lambda: set_mode('walk'))
+        #     dpg.add_text('(발끝 1점·동적)', color=(120, 130, 150))
+        # dpg.bind_item_theme(_wb, _walk)
+    dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 접지실험 squat(점발)'
                  '   · Off=명령토크 0 (Kp=Kd=τ=0)', color=(150, 155, 175))
     # ── ★미접지 실험 (매달림·발 공중) — 궤적재생 + 스윙처프 ──────────── 2026-09-17
     dpg.add_separator()
@@ -1496,15 +1536,10 @@ with dpg.window(tag='main'):
                                                     dpg.get_value('walk_spd'), dpg.get_value('walk_loop'))))
         dpg.add_button(label='■정지', width=64,
                        callback=lambda: (walk_stop(), set_mode('reset')))   # set_mode('reset')=explog.stop 포함
-    with dpg.group(horizontal=True):   # 스윙처프(M·C) — 단일관절 자유공간
+    with dpg.group(horizontal=True):   # 스윙처프(M·C) — 한쪽 다리 4축 자동순차
         dpg.add_text('스윙처프(M·C) ')
-        dpg.add_combo(list(_SWING_JOINTS.keys()), default_value='HL_thigh', width=86, tag='swing_j')
-        dpg.add_slider_float(default_value=8.0, min_value=1.0, max_value=15.0, width=62, tag='swing_amp', format='%.0f°')
-        dpg.add_combo(list(_SWING_FREQ.keys()), default_value='0.3–1.2Hz', width=92, tag='swing_fk')
-        dpg.add_text('peak')
-        dpg.add_slider_int(default_value=int(_SWING_MAXDPS), min_value=10, max_value=120, width=70,
-                           tag='swing_dps', format='%ddps')
-        dpg.add_slider_int(default_value=20, min_value=8, max_value=40, width=52, tag='swing_T', format='%ds')
+        dpg.add_combo(['HL', 'HR'], default_value='HL', width=60, tag='swing_side')
+        dpg.add_text('→ hip·thigh·calf·foot 자동순차 (진폭·Hz·dps 자동)')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('swing'))
         dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('swing'))
     dpg.add_text('미접지 대기 — 발 공중·크레인. 궤적재생=위치 프리뷰(동적 walk 아님)·auto kp2/kd3', tag='swing_stat',
@@ -1516,16 +1551,18 @@ with dpg.window(tag='main'):
     # ── ★접지 실험 (GRF 필요·크레인 안전) — 기록실험 ─────────────────────
     dpg.add_separator()
     dpg.add_text('■ 접지 실험 (GRF 필요·크레인 안전) — exp_logs/ 기록', color=(170, 205, 150))
-    with dpg.group(horizontal=True):
-        dpg.add_text('stand(2점정적) ')
-        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
-        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
-        dpg.add_text('⚠접지·GRF 필요 (매달림 금지)', color=(210, 150, 90))
+    # ── ★2026-09-18 주석처리: stand(2점정적) — 2점 평발 모드 폐기. exp_run('stand') 기능은 유지(버튼만 숨김).
+    #   점발 stand 은 squat 이 내부에서 set_mode('stand') 로 잡는다.
+    # with dpg.group(horizontal=True):
+    #     dpg.add_text('stand(2점정적) ')
+    #     dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
+    #     dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
+    #     dpg.add_text('⚠접지·GRF 필요 (매달림 금지)', color=(210, 150, 90))
     with dpg.group(horizontal=True):
         dpg.add_text('squat        ')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('squat'))
         dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('squat'))
-        dpg.add_text('⚠WBIC 밸런스(body_h 0.42↔0.36 오실·토크제어)·접지·GRF·크레인 · 매달림 금지', color=(210, 150, 90))
+        dpg.add_text('무-WBIC 토크스쿼트(스쿼트궤적 재생·PD+중력FF·밸런스QP 없음) · 좌우는 사람/가이드로 고정 · 접지·크레인', color=(210, 150, 90))
     with dpg.group(horizontal=True):
         dpg.add_text('walk(동적)     ')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('walk'))

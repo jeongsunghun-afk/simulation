@@ -16,7 +16,7 @@ export QUAD_CMD="${QUAD_CMD:-/dev/shm/biped_cmd.json}"
 export QUAD_STATE="${QUAD_STATE:-/dev/shm/biped_state.json}"
 # ── 실험 토글 (기본값) ──
 export AUX_MODE="${AUX_MODE:-1}"      # 2차엔코더 로깅(매달림). 떨림/0x5A 의심 시 AUX_MODE=0 으로.
-MJCF="${MJCF:-flat}"                  # flat=2점평발 · point=1점점발
+MJCF="${MJCF:-point}"                 # ★기본 point=1점점발(payload 16.25kg) · flat=2점평발 (MJCF=flat 로 오버라이드)
 # JOG_SPEED_DPS 는 **설정된 경우에만** deploy 로 넘어감(스윙 고대역 전용, [5,150]). 평시 미설정.
 
 _emb_up(){ pgrep -x RobotEmbedded >/dev/null 2>&1 || pgrep -f "app/biped_emb" >/dev/null 2>&1; }
