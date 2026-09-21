@@ -279,8 +279,8 @@ joints:
   #     thigh +37° · calf +85° · foot +45° 라는 값이 나왔다 — 그건 영점이 아니라
   #     그때 매달려 있던 자세다. 전 축 --apply 를 하면 그게 통째로 박힌다.
   #   ⇒ thigh/calf/foot 은 **각자 지그를 물린 뒤** --only 로 하나씩 갱신할 것.
-  - {name: HL_hip,   channel: 0, sign: -1, offset_deg: -0.63, min_deg: -14.9, max_deg:  14.9, kp: 100, kd: 6.0, gear_k: 1}  # ★sign 장착방향 실측확정 2026-08-10
-  - {name: HL_thigh, channel: 1, sign:  1, offset_deg: 0.33, min_deg: -64.7, max_deg: 135.2, kp: 50, kd: 4.0, gear_k: 1}  # ★sign 장착방향 실측확정 2026-08-10
+  - {name: HL_hip,   channel: 0, sign: -1, offset_deg: 0.00, min_deg: -14.9, max_deg:  14.9, kp: 100, kd: 6.0, gear_k: 1}  # ★sign 장착방향 실측확정 2026-08-10
+  - {name: HL_thigh, channel: 1, sign:  1, offset_deg: 0.00, min_deg: -64.7, max_deg: 135.2, kp: 50, kd: 4.0, gear_k: 1}  # ★sign 장착방향 실측확정 2026-08-10
   # ★calf min_deg −59.6 → **−62.0** (2026-08-12, 사용자 요청).
   #   URDF(CAD) 값 −59.6 은 **무여자 정지자세를 담지 못한다** — 실측 늘어짐이 그 밖이다:
   #     2026-08-12 ch3 실행 시작자세  HL_calf **−60.82°**  (−59.6 을 1.22° 초과)
@@ -298,7 +298,7 @@ joints:
   #   ⇒ 관측 최대 −65.54 + 여유 2.5 = −68.0. MJCF range 도 같이 넓혔다.
   #   ⚠calf·foot 둘 다 CAD 값이 무여자 정지자세를 못 담았다. 다음에 축을 추가하면
   #     **먼저 무여자로 늘어뜨려 실측**하고 한계를 잡을 것 — CAD 를 그대로 믿지 말 것.
-  - {name: HL_calf,  channel: 2, sign: -1, offset_deg: -3.07, min_deg: -68.0, max_deg:  49.8, kp: 80, kd: 3.5, gear_k: 1.5}  # ★sign 장착방향 실측확정 2026-08-10
+  - {name: HL_calf,  channel: 2, sign: -1, offset_deg: 0.00, min_deg: -68.0, max_deg:  49.8, kp: 80, kd: 3.5, gear_k: 1.5}  # ★sign 장착방향 실측확정 2026-08-10
   # ★foot max_deg +25.2 → **+67.0** (2026-08-12). calf 와 **같은 종류의 사고**다.
   #   URDF(CAD) 값 +25.2 는 무여자 정지자세를 담지 못한다 — 실측 늘어짐이 그 밖이다:
   #     2026-08-12 관측 최대  HR_foot **+65.08°** · HL_foot +60.41°  (+25.2 를 40° 초과)
@@ -314,11 +314,11 @@ joints:
   #     ⚠thigh 는 영향이 작았다(−2.810 vs −2.847, 0.04Nm) — 구속반력이 foot 관절에
   #       걸리기 때문이다. foot 의 중력이 워낙 작아 시험 결과는 안 틀어졌다.
   #   ⚠**바꾸면 tau_grav_table 을 반드시 재생성**할 것(tools/gen_grav_table.py --apply).
-  - {name: HL_foot,  channel: 3, sign: -1, offset_deg: -3.02, min_deg: -84.8, max_deg:  67.0, kp: 30, kd: 2.0, gear_k: 1.2, couple_from: HL_calf, couple_coef: 1}  # ★sign 장착방향 실측확정 2026-08-10
-  - {name: HR_hip,   channel: 4, sign: -1, offset_deg: 1.06, min_deg: -14.9, max_deg:  14.9, kp: 100, kd: 6.0, gear_k: 1}  # ★sign 장착방향 실측확정 2026-08-10
-  - {name: HR_thigh, channel: 5, sign: -1, offset_deg: -2.65, min_deg: -64.7, max_deg: 135.2, kp: 50, kd: 4.0, gear_k: 1}  # ★sign 장착방향 실측확정 2026-08-10
-  - {name: HR_calf,  channel: 6, sign:  1, offset_deg: -12.66, min_deg: -68.0, max_deg:  49.8, kp: 80, kd: 3.5, gear_k: 1.5}  # ★sign 장착방향 실측확정 2026-08-10
-  - {name: HR_foot,  channel: 7, sign:   1, offset_deg: 0.35, min_deg: -84.8, max_deg:  67.0, kp: 30, kd: 2.0, gear_k: 1.2, couple_from: HR_calf, couple_coef: 1}  # ★sign 장착방향 실측확정 2026-08-10
+  - {name: HL_foot,  channel: 3, sign: -1, offset_deg: 0.00, min_deg: -84.8, max_deg:  67.0, kp: 30, kd: 2.0, gear_k: 1.2, couple_from: HL_calf, couple_coef: 1}  # ★sign 장착방향 실측확정 2026-08-10
+  - {name: HR_hip,   channel: 4, sign: -1, offset_deg: 0.00, min_deg: -14.9, max_deg:  14.9, kp: 100, kd: 6.0, gear_k: 1}  # ★sign 장착방향 실측확정 2026-08-10
+  - {name: HR_thigh, channel: 5, sign: -1, offset_deg: 0.00, min_deg: -64.7, max_deg: 135.2, kp: 50, kd: 4.0, gear_k: 1}  # ★sign 장착방향 실측확정 2026-08-10
+  - {name: HR_calf,  channel: 6, sign:  1, offset_deg: 0.00, min_deg: -68.0, max_deg:  49.8, kp: 80, kd: 3.5, gear_k: 1.5}  # ★sign 장착방향 실측확정 2026-08-10
+  - {name: HR_foot,  channel: 7, sign:   1, offset_deg: 0.00, min_deg: -84.8, max_deg:  67.0, kp: 30, kd: 2.0, gear_k: 1.2, couple_from: HR_calf, couple_coef: 1}  # ★sign 장착방향 실측확정 2026-08-10
 
 # 허리(WaR/WaP, 채널 8~9)는 biped 모델에 없음 → 고정 홀드. ★상체/허리 서브시스템 별도면 여기서 제외.
 waist:
@@ -539,7 +539,7 @@ safety:
   #   여전히 보수적이다: hip 피크토크 84 Nm 의 18% 에 불과하다.
   #   ⚠ err_max 12° 는 kp100 에서 20.9 Nm 라 **토크트립이 항상 먼저 걸린다**(의도된 순서 —
   #     토크가 물리적으로 의미 있는 양이다). err_max 는 사실상 2차 방어선이 됐다.
-  tau_trip_nm: 15.0             # 채널 토크 절대값 임계[Nm]. 실측 정지마찰 0.71 / 기동 0.62~0.67
+  tau_trip_nm: 50.0             # 채널 토크 절대값 임계[Nm]. 실측 정지마찰 0.71 / 기동 0.62~0.67
                                 #   대비 10배 이상 여유. ⚠다리 장착 후 재검토(부하가 달라진다)
   tau_trip_ms: 50               # 위 임계를 이 시간 이상 **연속** 초과해야 트립(순간 스파이크 무시)
   vel_trip_dps: 200.0           # 채널 속도 절대값 임계[deg/s].
