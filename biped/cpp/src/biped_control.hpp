@@ -821,6 +821,9 @@ struct BipedControl {
     static double FLAT_LEAN=getenv("FLAT_LEAN")?atof(getenv("FLAT_LEAN")):0.0;   // ★본체 forward lean(rad)
     in.lean=(in_zmp_walk2&&has_heel)?FLAT_LEAN:0.0;   // 평발 보행만 전방 기울임(뒤로 발라당 상쇄)
     in.W_LAM=(cmode==1&&has_heel)?FLAT_WLAM:W_LAM; in.STANCE_KD=STANCE_KD; in.MU_EFF=MU_EFF; in.LAMZ_MIN=LAMZ_MIN;   // 평발=MPC추종↓, WBIC task 지배
+    static double ANK_KP=getenv("ANK_KP")?atof(getenv("ANK_KP")):60.0;   // ★점발 발목 posture PD(env)·기본 60/5(=종전). 점발 stand whip 억제(sim 최적 ~100/20, ζ≈1). deploy 는 16.25kg라 재튜닝.
+    static double ANK_KD=getenv("ANK_KD")?atof(getenv("ANK_KD")):5.0;
+    in.ANK_KP=ANK_KP; in.ANK_KD=ANK_KD;
     set_ctrl_from_tau(wbic_track(in));   // ★전단(관절토크→드라이브)은 한 곳에서만
   }
 
