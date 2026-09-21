@@ -1306,7 +1306,15 @@ def exp_run(name):
         swing_side_start(dpg.get_value('swing_side'))     # HL/HR 4축 자동순차
         return
     explog.start(name)
-    if name == 'stand':   set_mode('stand')
+    if name == 'stand':
+        # ★2026-09-21 점발(1점) 정적 WBIC stand — squat(궤적재생) 밑 버튼.
+        #   set_mode('stand')(2점 평발 자동전환)와 달리 point-foot(contact='1pt')로 세워
+        #   런치 MJCF(pointfoot_payload=cmode0)와 접촉가정을 맞춘다.
+        #   시상균형=WBIC(도립진자)·좌우=가이드·수직fall=크레인. ⚠토크모드(고전류)=하드웨어 수리 후.
+        stop_all_traj(); left.clear(); right.clear()
+        pub.set(contact='1pt', body_h=H_DEF_1PT, mode='stand', v=0.0, vy=0.0, w=0.0)
+        dpg.set_value('h_sl', H_DEF_1PT)
+        dpg.set_value('spd_sl', 0); dpg.set_value('vy_sl', 0); dpg.set_value('turn_sl', 0)
     elif name == 'squat': walk_start('스쿼트(1점)', 1.0, True)      # ★2026-09-18 무-WBIC 토크스쿼트: 스쿼트궤적(biped_ref_squat.npz) 재생(jog·PD+중력FF·밸런스QP 없음). set_mode('stand')+wsq 제거(WBIC 발산·freeze 회피·좌우는 사람/가이드로 고정). wsq_* 함수는 유지.
     elif name == 'walk':  set_mode('walk')
 
@@ -1551,8 +1559,8 @@ with dpg.window(tag='main'):
     # ── ★접지 실험 (GRF 필요·크레인 안전) — 기록실험 ─────────────────────
     dpg.add_separator()
     dpg.add_text('■ 접지 실험 (GRF 필요·크레인 안전) — exp_logs/ 기록', color=(170, 205, 150))
-    # ── ★2026-09-18 주석처리: stand(2점정적) — 2점 평발 모드 폐기. exp_run('stand') 기능은 유지(버튼만 숨김).
-    #   점발 stand 은 squat 이 내부에서 set_mode('stand') 로 잡는다.
+    # ── ★2026-09-18 주석처리: stand(2점정적) — 2점 평발 모드 폐기(버튼만 숨김·set_mode('stand') 기능은 살아있음).
+    #   ★2026-09-21: 점발(1점) 정적 stand 은 아래 'stand(정적)' 버튼 = exp_run('stand')(contact='1pt') 로 잡는다.
     # with dpg.group(horizontal=True):
     #     dpg.add_text('stand(2점정적) ')
     #     dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
@@ -1563,6 +1571,11 @@ with dpg.window(tag='main'):
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('squat'))
         dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('squat'))
         dpg.add_text('무-WBIC 토크스쿼트(스쿼트궤적 재생·PD+중력FF·밸런스QP 없음) · 좌우는 사람/가이드로 고정 · 접지·크레인', color=(210, 150, 90))
+    with dpg.group(horizontal=True):     # ★2026-09-21 점발 정적 WBIC stand (squat 밑)
+        dpg.add_text('stand(정적)   ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
+        dpg.add_text('점발(1점) 정적 WBIC stand — 시상균형=WBIC·좌우=가이드·크레인 · ⚠토크모드(하드웨어 수리 후)', color=(215, 130, 90))
     with dpg.group(horizontal=True):
         dpg.add_text('walk(동적)     ')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('walk'))
