@@ -460,11 +460,25 @@ struct BipedControl {
       P(6+j,6+j)+=w; g[6+j]-=w*a; }
     P.topLeftCorner(nv,nv)+=1e-4*MatrixXd::Identity(nv,nv);
     for(int k=0;k<K;k++) P.block(nv+3*k,nv+3*k,3,3)+=1e-2*Matrix3d::Identity();   // ★λ 정칙화↑(rank-deficient 안정)
-    // 등식: base6 + 접촉3K
-    int neq=6+3*K; MatrixXd A=MatrixXd::Zero(neq,nz); VectorXd bb=VectorXd::Zero(neq);
+    // 등식: base6 (+ 접촉3K, soft 아니면). ★2026-09-22 접촉 가속 등식을 soft 고가중 목적항으로
+    //   옮기는 옵션(WBIC_SOFT_CONTACT=1). 2점 강체발의 종속행(code4=rank축퇴)을 프루닝처럼 버리지
+    //   않고 penalty 로 남긴다 → base6 만 등식(full-rank)이라 eiquadprog 항상 풀고, 접촉은 고가중
+    //   강제라 프루닝처럼 다리가 처지지 않는다. λ→base 결합(6행)은 항상 등식 유지.
+    static const bool   SOFT_CT = getenv("WBIC_SOFT_CONTACT") && atoi(getenv("WBIC_SOFT_CONTACT"));
+    static const double W_CT    = getenv("WBIC_W_CONTACT") ? atof(getenv("WBIC_W_CONTACT")) : 5e3;
+    int neq = SOFT_CT ? 6 : 6+3*K;
+    MatrixXd A=MatrixXd::Zero(neq,nz); VectorXd bb=VectorXd::Zero(neq);
     A.block(0,0,6,nv)=M.topRows(6); bb.head(6)=-h.head(6);
-    for(int k=0;k<K;k++){ A.block(0,nv+3*k,6,3)=-Js[k].leftCols(6).transpose();
-      A.block(6+3*k,0,3,nv)=Js[k]; bb.segment(6+3*k,3)=-STANCE_KD*(Js[k]*qv); }
+    for(int k=0;k<K;k++){
+      A.block(0,nv+3*k,6,3)=-Js[k].leftCols(6).transpose();       // λ→base 결합(항상 등식)
+      Vector3d bct=-STANCE_KD*(Js[k]*qv);
+      if(SOFT_CT){                                                // 접촉 가속 = soft penalty(고가중)
+        P.topLeftCorner(nv,nv) += W_CT*(Js[k].transpose()*Js[k]);
+        g.head(nv)             -= W_CT*(Js[k].transpose()*bct);
+      } else {                                                    // 종전: 하드 등식(+ EQ_PRUNE 필요)
+        A.block(6+3*k,0,3,nv)=Js[k]; bb.segment(6+3*k,3)=bct;
+      }
+    }
     // 부등식: 마찰추 + λz≥min (토크한계 없음, Python wbic_stance 동일)
     std::vector<VectorXd> Gr; std::vector<double> hv; int sgn[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
     for(int k=0;k<K;k++){ int o=nv+3*k;
