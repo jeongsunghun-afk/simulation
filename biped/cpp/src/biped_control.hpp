@@ -66,6 +66,9 @@ struct BipedControl {
   double czwalk=0;                    // ★평발 보행 CoM 높이(0=reset값). 튜닝용
   double FLAT_WORI=5;                 // ★평발 보행 base pitch/roll 레벨링 가중
   double FLAT_WLEG=0.05;              // ★평발 정적 thigh/calf posture 가중(낮음=CoM 높이 조절 가능)
+  double WLEG_L_SCALE=1, WANKLE_L_SCALE=1;  // ★2026-09-22 왼다리(HL) 전용 posture 배율(좌우 비대칭 보정).
+                                     //   왼발/왼thigh 가 오른쪽보다 무름(벨트 백래시)→hold 에서 왼발 +9°(오른 +1°)
+                                     //   ·stand 에서 HL_thigh 폭주. 대칭 가중으론 못 잡아 왼쪽만 독립으로 올린다.
   double STANCE_KD=20, W_ORI=5, W_POST=1, W_ANKLE=20, MU_EFF=0.8*0.707, LAMZ_MIN=1;
   // ★★2026-08-21 **CoM 적분항 — 기본 꺼짐(STAND_KI=0).**
   //   왜 필요한가: WBIC 는 τ = h − Jᵀλ 인데 `h` 는 **모델의** 중력항이다. 모델이 실제보다
@@ -262,6 +265,8 @@ struct BipedControl {
     if(getenv("FLAT_WORI")) FLAT_WORI=atof(getenv("FLAT_WORI"));
     if(getenv("FLAT_WLEG")) FLAT_WLEG=atof(getenv("FLAT_WLEG"));   // ★2026-09-22 thigh/calf posture 가중(기본 0.05=약함). 정적 stand 에서 다리가 드룹하면 ↑(예 2~10)해서 다리를 자세로 붙잡는다. 정적이라 CoM 높이조절 약해져도 무관.
     if(getenv("STAND_WANKLE")) W_ANKLE=atof(getenv("STAND_WANKLE"));   // ★2026-09-22 발목(foot) posture 가중(기본 20). 정적 stand 에서 발이 드리프트(HR_foot 30°)하면 ↑(예 100~300)해서 발목을 자세로 pin. FLAT_WLEG 의 발목판.
+    if(getenv("WLEG_L_SCALE"))   WLEG_L_SCALE=atof(getenv("WLEG_L_SCALE"));      // ★2026-09-22 왼 thigh/calf 배율(기본 1=대칭). 왼 thigh 가 stand 에서 먼저 폭주하면 ↑(예 2~4)해서 왼쪽만 더 세게 pin. 진단: 올려서 잡히면 백래시(소프트 커버 가능)·안 잡히면 벨트 슬립(재텐션 필수).
+    if(getenv("WANKLE_L_SCALE")) WANKLE_L_SCALE=atof(getenv("WANKLE_L_SCALE"));  // ★2026-09-22 왼 발목 배율(기본 1=대칭). hold 에서 왼발만 +9°(오른 +1°) 뜨면 ↑. 위와 같은 진단.
     if(getenv("T_TRANS")) T_TRANS=atof(getenv("T_TRANS"));
     // ★발디딤 게인 env — leg-odom 야코비안 편향(구중심 vs 접촉점)을 제거하면
     //   K_RETURN 이 보던 오차의 성격이 바뀐다. 편향 위에 얹혀 튜닝돼 있던 값이므로
@@ -459,6 +464,7 @@ struct BipedControl {
     const double* Qh=Qcur();
     for(int j=0;j<nu;j++){ double a=POST_KP*(Qh[j]-d->qpos[7+j])-POST_KD*qv[6+j];
       int lj=j%4; double w=(lj==3)?W_ANKLE : (lj==1||lj==2)?FLAT_WLEG : W_POST;
+      if(j<4){ if(lj==3) w*=WANKLE_L_SCALE; else if(lj==1||lj==2) w*=WLEG_L_SCALE; }  // ★2026-09-22 왼다리(j<4)만 비대칭 배율
       P(6+j,6+j)+=w; g[6+j]-=w*a; }
     P.topLeftCorner(nv,nv)+=1e-4*MatrixXd::Identity(nv,nv);
     for(int k=0;k<K;k++) P.block(nv+3*k,nv+3*k,3,3)+=1e-2*Matrix3d::Identity();   // ★λ 정칙화↑(rank-deficient 안정)
