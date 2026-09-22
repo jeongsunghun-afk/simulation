@@ -260,6 +260,7 @@ struct BipedControl {
     if(getenv("FLAT_WLAM")) FLAT_WLAM=atof(getenv("FLAT_WLAM"));
     if(getenv("FLAT_CZ")) czwalk=atof(getenv("FLAT_CZ"));
     if(getenv("FLAT_WORI")) FLAT_WORI=atof(getenv("FLAT_WORI"));
+    if(getenv("FLAT_WLEG")) FLAT_WLEG=atof(getenv("FLAT_WLEG"));   // ★2026-09-22 thigh/calf posture 가중(기본 0.05=약함). 정적 stand 에서 다리가 드룹하면 ↑(예 2~10)해서 다리를 자세로 붙잡는다. 정적이라 CoM 높이조절 약해져도 무관.
     if(getenv("T_TRANS")) T_TRANS=atof(getenv("T_TRANS"));
     // ★발디딤 게인 env — leg-odom 야코비안 편향(구중심 vs 접촉점)을 제거하면
     //   K_RETURN 이 보던 오차의 성격이 바뀐다. 편향 위에 얹혀 튜닝돼 있던 값이므로
