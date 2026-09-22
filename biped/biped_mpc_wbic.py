@@ -23,6 +23,8 @@ MPC_DECIM = int(round(MPC_DT / 0.002))   # 10 (500Hz sim, 50Hz MPC)
 ANK_KP = float(os.environ.get('ANK_KP', 60.0))
 ANK_KD = float(os.environ.get('ANK_KD', 5.0))
 ANK_W  = float(os.environ.get('ANK_W',  20.0))   # = W_ANKLE 기본
+ANK_HARD = os.environ.get('ANK_HARD','0') != '0'  # ★B: 1=발목을 QP 균형에서 빼고 qddot 을 PD 등식으로 hard 고정(위치서보)
+ANK_DAMP = float(os.environ.get('ANK_DAMP', 0.0))  # ★C: 발목 토크에 직접 속도감쇠[Nm·s/rad](post-QP, QP 가중 우회). 0=끔
 
 
 def euler_to_R(r, p, y):
@@ -230,6 +232,12 @@ class BipedMPCWBIC(BS.BipedStep):
         for k in range(Kc):
             A[:6, sl(k):sl(k)+3] = -cjac[k][:,:6].T
             A[6+3*k:6+3*k+3,:nv] = cjac[k]; bb[6+3*k:6+3*k+3] = -STANCE_KD*(cjac[k]@qv)
+        if ANK_HARD:                                   # ★B: 발목 qddot 을 PD 등식으로 고정 → WBIC 균형에서 제외(점발 발목=지면모멘트 못 냄)
+            ar=[]; ab=[]
+            for j in ANKLE_IDX:
+                a_ank = ANK_KP*(self.q_home[j]-d.qpos[7+j]) - ANK_KD*qv[6+j]
+                row=np.zeros(nz); row[6+j]=1.0; ar.append(row); ab.append(a_ank)
+            A=np.vstack([A,np.array(ar)]); bb=np.concatenate([bb,np.array(ab)])
         rows=[]; hh=[]; mu=MU*MU_MARGIN
         for k in range(Kc):
             o=sl(k)
@@ -254,6 +262,8 @@ class BipedMPCWBIC(BS.BipedStep):
         if x is None: return self.wbic_stance()
         qdd=x[:nv]; tau=M[6:,:]@qdd + h[6:]
         for k in range(Kc): tau -= cjac[k][:,6:].T @ x[sl(k):sl(k)+3]
+        if ANK_DAMP>0:                                 # ★C: 발목 직접 속도감쇠(post-QP, QP 가중 우회)
+            for j in ANKLE_IDX: tau[j] -= ANK_DAMP*qv[6+j]
         d.ctrl[:]=np.clip(self._foot_comp(tau_to_drive(tau)),-self.drv_peak,self.drv_peak); return True   # ★ctrl=드라이브 토크
 
     # ★★스윙 위치제어 하이브리드 (2026-08-28 · 기본 꺼짐 SWING_KP=0)
