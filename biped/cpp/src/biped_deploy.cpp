@@ -1605,6 +1605,20 @@ int main(int argc, char** argv){
               jm.q_ctrl_to_ch(qt.data(), stand_to.data());
               jm.clamp_ch_via_joint(stand_to.data());
             }
+            // ★2026-09-22 STAND_POSTURE_HOLD — posture 목표를 무부하 Qflat8 이 아니라 **진입 시
+            //   부하평형(측정)자세**로 래치한다. Qflat8 은 무부하 기하라 부하평형(~15°)과 상시
+            //   싸워 sag·헛폭주를 낳는다. 도달 가능한 자세를 참조하면 posture 가 중력과 일치하고
+            //   균형은 CoM task 가 잡는 **정석** 구성이 된다(정적 stand 검증 전용, 2점 평발 한정).
+            //   ⚠상수 setpoint 다(라이브 추종 아님) → 센서지연 음의감쇠 함정 회피(2232행 주석).
+            //   ⚠자세를 그대로 얼린다(crouch·왼발 비평평 포함). 똑바로 세우려면 이후 posture 목표를
+            //     hold→Qflat8 로 **천천히 램프**할 것(점프 금지). walk·점발(cmode≠1)에는 미적용.
+            if(getenv("STAND_POSTURE_HOLD") && atoi(getenv("STAND_POSTURE_HOLD"))
+               && mode=="stand" && c.cmode==1){
+              c.set_posture_hold(q_ctrl.data());   // WBIC posture 목표 = 부하평형 관절자세(rad)
+              stand_to = stand_hold;                // PD 블렌드·폭주 기준도 같은 자세(중력과 안 싸움)
+              std::printf("[deploy] ★STAND_POSTURE_HOLD — posture 목표 = 진입 부하평형자세(Qflat8 아님).\n"
+                          "         sag·헛폭주 제거. 똑바로 세우려면 목표를 hold→Qflat8 로 천천히 램프.\n");
+            } else c.clear_posture_hold();
             // ★2.5초 (2026-08-20). 1.0초로는 ch7 이 202dps 로 임계를 1% 넘겼다.
             //   ⚠발목 채널은 구조상 제일 잘 걸린다 — raw각이 (foot+calf) 라
             //     채널속도 = (q̇_foot + q̇_calf)×1.2 로 **두 관절의 합**이 잡힌다.
@@ -1657,6 +1671,7 @@ int main(int argc, char** argv){
     // ★stand 폭주 래치 해제 — off 재무장 규약. 전이 분기가 아니라 **매 틱** 본다
     //   (전이 분기 안에 두면 off 처리 경로에 따라 안 타는 수가 있다 — sim 검증에서 발각).
     if(mode=="off" && stand_runaway) stand_runaway = false;
+    if(mode=="off") c.clear_posture_hold();   // ★2026-09-22 off 재무장 시 posture-hold 래치 해제
 
     // ③ 워치독 — 명령 두절이면 limp. 전이를 반드시 출력한다(데드코드 방지).
     // ★★단 **하중 실린 hold 는 면제** (2026-09-03 실기 사고).

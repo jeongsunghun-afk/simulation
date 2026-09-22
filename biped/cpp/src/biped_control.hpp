@@ -226,6 +226,14 @@ struct BipedControl {
   // ── 오프라인 1점/2점 전환(toe-pivot 굴림 궤적) ──
   bool trans_on=false; double trans_t=0, T_TRANS=1.4; int trans_to=0;      // 전환중·타이머·목표모드
   double q_from[8], q_to[8], q_live[8], cz_from=0, cz_to=0;                // 자세·높이 보간
+  // ★2026-09-22 posture-hold: stand 진입 순간 **부하평형(hold) 자세를 한 번 래치**해 WBIC
+  //   posture 목표로 쓴다(무부하 Qflat8 대신). 무부하 Qflat8 은 부하평형(~15°)과 상시 싸워
+  //   sag·헛폭주를 낳는다 — 도달 가능한 자세를 참조하면 posture 가 중력과 일치, CoM task 가
+  //   균형을 잡는 정석 구성이 된다. deploy 가 STAND_POSTURE_HOLD=1 이면 진입 시 set 한다.
+  //   **라이브 추종 아님**(상수 setpoint) — 센서지연 음의감쇠 함정 회피.
+  bool posture_hold=false; double q_phold[8]={0};
+  void set_posture_hold(const double* q8){ for(int j=0;j<8;j++) q_phold[j]=q8[j]; posture_hold=true; }
+  void clear_posture_hold(){ posture_hold=false; }
   Matrix<double,2,3> lam; bool have_liftoff[2]={false,false}; Vector3d liftoff[2];
   Matrix<double,4,3> lam4=Matrix<double,4,3>::Zero();   // ★평발 MPC: [HL_heel,HL_toe,HR_heel,HR_toe] 점별 GRF(CoP)
   Matrix3d I_body; double mass;
@@ -372,7 +380,7 @@ struct BipedControl {
     return std::atan2(2*(q[0]*q[3]+q[1]*q[2]),1-2*(q[2]*q[2]+q[3]*q[3])); }
 
   // ── 평발(2점) 헬퍼 ──
-  const double* Qcur(){ if(trans_on) return q_live; return (has_heel&&cmode==1)?Qflat8:Qhome8; }   // 전환중=보간자세
+  const double* Qcur(){ if(trans_on) return q_live; if(posture_hold) return q_phold; return (has_heel&&cmode==1)?Qflat8:Qhome8; }   // 전환중=보간자세 · posture_hold=진입시 래치한 부하평형자세
   Vector3d gpos(int geom){ return Vector3d(d->geom_xpos[geom*3],d->geom_xpos[geom*3+1],d->geom_xpos[geom*3+2]); }
   Vector3d foot_center(int leg){ if(cmode==1&&has_heel) return 0.5*(gpos(sph[leg])+gpos(sph2[leg])); return gpos(sph[leg]); }
   MatrixXd foot_jac_at(int geom,int body){ std::vector<double> jp(3*nv);
