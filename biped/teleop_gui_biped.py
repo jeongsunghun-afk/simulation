@@ -1428,6 +1428,7 @@ def build_joint_sliders():
                                  callback=lambda s, v, u: on_jog(s, v, u))
             dpg.add_text(f'{JOG_LIM[i][1]:<6.1f}', color=(120, 130, 150))
             dpg.add_text('--.-', tag=f'meas_{i}', color=(150, 220, 150))
+            dpg.add_text('  --.- Nm', tag=f'tau_{i}', color=(220, 180, 120))   # ★각축 토크(tau_leg_nm)
 
 with dpg.window(tag='main'):
     with dpg.group(horizontal=True):
@@ -1755,6 +1756,10 @@ while dpg.is_dearpygui_running():
             health = st.get('health', ['dead'] * NJ)
             for i in range(min(NJ, len(q))):
                 dpg.set_value(f'meas_{i}', f'{q[i]:+6.1f}')
+            tau = st.get('tau_leg_nm') or []            # ★각축 토크(관절 Nm) — 조그행 우측 표시
+            for i in range(min(NJ, len(tau))):
+                try: dpg.set_value(f'tau_{i}', f'{float(tau[i]):+6.2f} Nm')
+                except Exception: pass
             for i in range(min(NJ, len(health))):
                 dpg.configure_item(f'led_{i}', fill=_LED.get(health[i], (70, 70, 78)))
             # ★분모는 **실장축 수**. 미장착을 분모에 넣으면 정상인데도 "8중 2" 로 보인다.
