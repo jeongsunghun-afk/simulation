@@ -46,6 +46,11 @@ try:
 except Exception:
     pass
 NJ = len(JOG_NAMES)
+# ★실측 토크 표시용 상수 (2026-09-22): τ_real = SIGN·cur_a·KT·GEAR/SCALE. cur_a=fCurrent(실측전류·에코아님).
+_TAU_SIGN = [-1, 1, -1, -1, -1, -1, 1, 1]
+_TAU_GEAR = [7.0, 7.0, 10.5, 8.4, 7.0, 7.0, 10.5, 8.4]   # gear_k 포함(calf 7×1.5·foot 7×1.2)
+_TAU_KT   = 0.2
+_TAU_SCALE = float(os.environ.get('CUR_SCALE', '7.5'))   # fCurrent→토크 스케일(≈7.5·절대치 ±15%)
 
 # ── ★위치모드 강성 배율 (2026-08-21) ────────────────────────────────────────
 #   home/hold/jog 의 kp 에 곱하는 배율. **stand/walk 는 안 쓴다**(WBIC 와 싸우면 안 된다).
@@ -1756,9 +1761,11 @@ while dpg.is_dearpygui_running():
             health = st.get('health', ['dead'] * NJ)
             for i in range(min(NJ, len(q))):
                 dpg.set_value(f'meas_{i}', f'{q[i]:+6.1f}')
-            tau = st.get('tau_leg_nm') or []            # ★각축 토크(관절 Nm) — 조그행 우측 표시
-            for i in range(min(NJ, len(tau))):
-                try: dpg.set_value(f'tau_{i}', f'{float(tau[i]):+6.2f} Nm')
+            cur = st.get('cur_a') or []                 # ★실측 전류(fCurrent) → 실측 토크 = SIGN·cur·KT·GEAR/SCALE
+            for i in range(min(NJ, len(cur))):
+                try:
+                    _tr = _TAU_SIGN[i]*float(cur[i])*_TAU_KT*_TAU_GEAR[i]/_TAU_SCALE
+                    dpg.set_value(f'tau_{i}', f'{_tr:+6.2f} Nm')
                 except Exception: pass
             for i in range(min(NJ, len(health))):
                 dpg.configure_item(f'led_{i}', fill=_LED.get(health[i], (70, 70, 78)))
