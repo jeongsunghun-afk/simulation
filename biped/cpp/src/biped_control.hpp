@@ -25,7 +25,13 @@ struct BipedControl {
   //   ⚠밑창 기울기는 구값도 0 이었다 — 눈으로는 멀쩡해 보인다. 깨진 건 **전후 정렬**뿐이다.
   //   재산출: cpp/src/flat_home.cpp (밑창수평 · CoM=밑창중심 · CoM높이 유지 3조건 Newton).
   //   결과 CoM−밑창중심 0.00000 m(여유 100%) · CoM z 0.3649 유지 · base z 0.4451.
-  double Qflat8[8]={0,0.064256,-0.416657,-1.043858, 0,0.064256,-0.416657,-1.043858};
+  // ★★2026-09-22 flat home = **웅크림 자세(CoM z0.34)** — sim 검증 자립.
+  //   근본원인: 16.25kg payload 가 높아(z0.49) CoM 이 높으면(z0.383) top-heavy 도립진자라
+  //   WBIC 이 앞으로 넘어감(sim 재현·2.0s 낙상). CoM 정렬만으론 부족 → ~4cm 웅크려 CoM z0.34
+  //   로 낮추면 자립(sim tilt 6.5°). flat_home --comz 0.34 재산출(발평평+CoM중심 유지).
+  //   대안: 더 웅크림 z0.32(tilt4.7·더안정) / 덜 z0.36(tilt8.5). payload 를 낮게 재장착하면 근본해결.
+  //   thigh -13.7° calf -1.8° foot -64.5° (좌우 대칭). 파리티: biped_wbic.py Q_HOME_FLAT 도 같이.
+  double Qflat8[8]={0,-0.238973,-0.030968,-1.126319, 0,-0.238973,-0.030968,-1.126319};
   // ── 파라미터 (Python 동일) ──
   // ★T_STEP 0.24 → 0.32 (2026-08-05). 실측 ROTOR_I(7.4e-4, 구 placeholder 의 7.4배)를
   //   넣으면 반사관성이 7.4배가 되어 0.24s 스텝의 스윙 가속에 필요한 토크가 드라이브 한계(drv_peak)를
@@ -260,6 +266,8 @@ struct BipedControl {
     if(getenv("FLAT_WLAM")) FLAT_WLAM=atof(getenv("FLAT_WLAM"));
     if(getenv("FLAT_CZ")) czwalk=atof(getenv("FLAT_CZ"));
     if(getenv("FLAT_WORI")) FLAT_WORI=atof(getenv("FLAT_WORI"));
+    if(getenv("FLAT_WLEG")) FLAT_WLEG=atof(getenv("FLAT_WLEG"));   // ★2026-09-22 thigh/calf posture 가중(기본 0.05=약함). 정적 stand 에서 다리가 드룹하면 ↑(예 2~10)해서 다리를 자세로 붙잡는다. 정적이라 CoM 높이조절 약해져도 무관.
+    if(getenv("STAND_WANKLE")) W_ANKLE=atof(getenv("STAND_WANKLE"));   // ★2026-09-22 발목(foot) posture 가중(기본 20). 정적 stand 에서 발이 드리프트(HR_foot 30°)하면 ↑(예 100~300)해서 발목을 자세로 pin. FLAT_WLEG 의 발목판.
     if(getenv("T_TRANS")) T_TRANS=atof(getenv("T_TRANS"));
     // ★발디딤 게인 env — leg-odom 야코비안 편향(구중심 vs 접촉점)을 제거하면
     //   K_RETURN 이 보던 오차의 성격이 바뀐다. 편향 위에 얹혀 튜닝돼 있던 값이므로
@@ -460,11 +468,25 @@ struct BipedControl {
       P(6+j,6+j)+=w; g[6+j]-=w*a; }
     P.topLeftCorner(nv,nv)+=1e-4*MatrixXd::Identity(nv,nv);
     for(int k=0;k<K;k++) P.block(nv+3*k,nv+3*k,3,3)+=1e-2*Matrix3d::Identity();   // ★λ 정칙화↑(rank-deficient 안정)
-    // 등식: base6 + 접촉3K
-    int neq=6+3*K; MatrixXd A=MatrixXd::Zero(neq,nz); VectorXd bb=VectorXd::Zero(neq);
+    // 등식: base6 (+ 접촉3K, soft 아니면). ★2026-09-22 접촉 가속 등식을 soft 고가중 목적항으로
+    //   옮기는 옵션(WBIC_SOFT_CONTACT=1). 2점 강체발의 종속행(code4=rank축퇴)을 프루닝처럼 버리지
+    //   않고 penalty 로 남긴다 → base6 만 등식(full-rank)이라 eiquadprog 항상 풀고, 접촉은 고가중
+    //   강제라 프루닝처럼 다리가 처지지 않는다. λ→base 결합(6행)은 항상 등식 유지.
+    static const bool   SOFT_CT = getenv("WBIC_SOFT_CONTACT") && atoi(getenv("WBIC_SOFT_CONTACT"));
+    static const double W_CT    = getenv("WBIC_W_CONTACT") ? atof(getenv("WBIC_W_CONTACT")) : 5e3;
+    int neq = SOFT_CT ? 6 : 6+3*K;
+    MatrixXd A=MatrixXd::Zero(neq,nz); VectorXd bb=VectorXd::Zero(neq);
     A.block(0,0,6,nv)=M.topRows(6); bb.head(6)=-h.head(6);
-    for(int k=0;k<K;k++){ A.block(0,nv+3*k,6,3)=-Js[k].leftCols(6).transpose();
-      A.block(6+3*k,0,3,nv)=Js[k]; bb.segment(6+3*k,3)=-STANCE_KD*(Js[k]*qv); }
+    for(int k=0;k<K;k++){
+      A.block(0,nv+3*k,6,3)=-Js[k].leftCols(6).transpose();       // λ→base 결합(항상 등식)
+      Vector3d bct=-STANCE_KD*(Js[k]*qv);
+      if(SOFT_CT){                                                // 접촉 가속 = soft penalty(고가중)
+        P.topLeftCorner(nv,nv) += W_CT*(Js[k].transpose()*Js[k]);
+        g.head(nv)             -= W_CT*(Js[k].transpose()*bct);
+      } else {                                                    // 종전: 하드 등식(+ EQ_PRUNE 필요)
+        A.block(6+3*k,0,3,nv)=Js[k]; bb.segment(6+3*k,3)=bct;
+      }
+    }
     // 부등식: 마찰추 + λz≥min (토크한계 없음, Python wbic_stance 동일)
     std::vector<VectorXd> Gr; std::vector<double> hv; int sgn[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
     for(int k=0;k<K;k++){ int o=nv+3*k;
@@ -821,6 +843,10 @@ struct BipedControl {
     static double FLAT_LEAN=getenv("FLAT_LEAN")?atof(getenv("FLAT_LEAN")):0.0;   // ★본체 forward lean(rad)
     in.lean=(in_zmp_walk2&&has_heel)?FLAT_LEAN:0.0;   // 평발 보행만 전방 기울임(뒤로 발라당 상쇄)
     in.W_LAM=(cmode==1&&has_heel)?FLAT_WLAM:W_LAM; in.STANCE_KD=STANCE_KD; in.MU_EFF=MU_EFF; in.LAMZ_MIN=LAMZ_MIN;   // 평발=MPC추종↓, WBIC task 지배
+    static double ANK_KP=getenv("ANK_KP")?atof(getenv("ANK_KP")):60.0;   // ★점발 발목 posture PD(env)·기본 60/5(=종전). 점발 stand whip 억제(sim 최적 ~100/20, ζ≈1). deploy 는 16.25kg라 재튜닝.
+    static double ANK_KD=getenv("ANK_KD")?atof(getenv("ANK_KD")):5.0;
+    static bool _ankp=[&]{ std::printf("[deploy] 발목 posture PD kp=%.0f kd=%.0f%s\n",ANK_KP,ANK_KD,(ANK_KP!=60||ANK_KD!=5)?"  ★튜닝(env)":"  (기본)"); return true; }(); (void)_ankp;
+    in.ANK_KP=ANK_KP; in.ANK_KD=ANK_KD;
     set_ctrl_from_tau(wbic_track(in));   // ★전단(관절토크→드라이브)은 한 곳에서만
   }
 

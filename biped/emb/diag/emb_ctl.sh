@@ -103,7 +103,10 @@ start)
     #   이 로그의 존재 이유가 동결 진단이므로 그 경우에 유리한 쪽을 택한다.
     #   패턴별이면 각 패턴이 **독립적으로** 1/n 로 남는다.
     _every=${EMB_LOG_EVERY:-500}
-    ( cd "$EMB_DIR" && stdbuf -oL -eL "$EMB_BIN" 2>&1 \
+    # ★2026-09-22 Emb 를 코어 0,1 에 고정 기동(런치타임 affinity=자기 자식이라 sudo 불필요).
+    #   deploy RT(코어 2,3)와 분리 → 제어루프 스톨/속도 글리치 방지. Emb 90% CPU 가 떠다니며
+    #   deploy 코어를 흔드는 것이 원인이었다. taskset 이 막히면 아래 sudo 폴백으로 떨어진다(비고정).
+    ( cd "$EMB_DIR" && taskset -c 0,1 stdbuf -oL -eL "$EMB_BIN" 2>&1 \
         | awk -v n="$_every" '
             /^\[STT\]RxCnt/    { if (++a % n) next }
             /^\[SET\]RxCnt/    { if (++b % n) next }

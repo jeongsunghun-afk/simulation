@@ -883,8 +883,15 @@ int main(int argc, char** argv){
     const double f0=(fl.size()>=3?fl[0]:1.0), f1=(fl.size()>=3?fl[1]:-1.0), f2=(fl.size()>=3?fl[2]:-1.0);
     double rpy[3] = { hs.rpy[0]*f0*u, hs.rpy[1]*f1*u, hs.rpy[2]*f2*u };
     double gyro[3]= { hs.gyr[0]*u, hs.gyr[1]*u, hs.gyr[2]*u };
-    double quat[4]; rpy_to_quat(rpy[0],rpy[1],rpy[2],quat);
-    double tilt = std::hypot(rpy[0],rpy[1]) * JointMap::R2D;
+    // ★2026-09-22 IMU 상보필터 — IMU 자체융합(hs.rpy)이 tilt 를 늦게 따라와서,
+    //   base 정렬 gyro(즉각·879행)로 예측 + IMU rpy 로 드리프트 보정. 표시·tilt E-stop 즉각반응.
+    //   K 작을수록 gyro 지배(빠름·TC≈dt/K)·K>=1 이면 순수 IMU(원본). estimator(quat)는 원본 유지.
+    static double rpy_f[3]={0,0,0}; static bool rpy_f_on=false;
+    { const double K_IMU = getenv("IMU_COMP_K") ? atof(getenv("IMU_COMP_K")) : 0.02;
+      if(!rpy_f_on || K_IMU>=1.0){ rpy_f[0]=rpy[0]; rpy_f[1]=rpy[1]; rpy_f[2]=rpy[2]; rpy_f_on=true; }
+      else for(int i=0;i<3;i++) rpy_f[i]=(1.0-K_IMU)*(rpy_f[i]+gyro[i]*dt)+K_IMU*rpy[i]; }
+    double quat[4]; rpy_to_quat(rpy[0],rpy[1],rpy[2],quat);   // estimator=IMU 원본
+    double tilt = std::hypot(rpy_f[0],rpy_f[1]) * JointMap::R2D;   // ★E-stop·표시=필터(빠름)
 
     // ★★**센서가 채워지기 전에는 명령을 받지 않는다** (2026-08-20, 트립 5회의 진짜 원인).
     //   기동 직후 첫 틱에 SHM 읽기가 아직 0 이었는데, 명령파일에 이전 hold/home 이
@@ -2407,7 +2414,7 @@ int main(int argc, char** argv){
     // ⑥ 상태 발행(~20Hz)
     double period = lt - prev_loop; prev_loop = lt;
     if(period > 0) hz_ema = 0.98*hz_ema + 0.02*(1.0/period);
-    if(lt - last_pub > 0.05){
+    if(lt - last_pub > 0.05){    // ★2026-09-22 발행 20Hz(0.05). 토크표시용. IMU pitch 지연은 발행율 아님(값지연)이라 별도 진단.
       last_pub = lt;
       int n_ok=0, n_fault=0, n_dead=0, n_absent=0;
       // ★ucStatus(=ERROR VECTOR 하위 8비트)를 **원값 그대로** 낸다 (2026-08-20).
@@ -2520,7 +2527,7 @@ int main(int argc, char** argv){
       const std::string tstand= tau_snap(tau_stand, have_tau_stand);
       const long ts_n_pub = ts_n;
       ts_reset();                       // 창을 비운다 — 다음 발행까지 다시 쌓는다
-      char buf[6144];   // ★5120 → 6144 (2026-09-01): aux/ack 4배열 추가(최대 ~600B)
+      char buf[7168];   // ★6144 → 7168 (2026-09-17): cur_a(실측전류 채널배열) 추가 여유
       // 런타임에 안 변하므로 한 번만 만든다.
       static std::string offs_json;
       if(offs_json.empty()){
@@ -2531,13 +2538,19 @@ int main(int argc, char** argv){
         }
         offs_json += "]";
       }
+      // ★실측 전류[A] (채널, fCurrent) — tau_leg_nm(=fTorque=명령에코)과 달리 **모터 실측**이다.
+      //   2026-09-17 추가: 토크 리플레이 검증·독립 τ 측정용(grf_verify 와 같은 fCurrent). NCH 채널순.
+      //   실 관절토크 = SIGN·cur_a·KT·GEAR/SCALE (소비자가 변환). MockHw(sim)에선 0.
+      std::string curas="[";
+      for(int i=0;i<NCH;i++){ char b[32]; std::snprintf(b,sizeof b,"%s%.4f", i?",":"", (double)hs.cur_a[i]); curas+=b; }
+      curas+="]";
       std::snprintf(buf,sizeof buf,
         "{\"mode\":\"%s\",\"backend\":\"%s\",\"q_leg_deg\":%s,\"q_ch_deg\":%s,"
-        "\"dq_leg_dps\":%s,\"tau_leg_nm\":%s,\"tau_cmd_nm\":%s,\"kp_raw\":%s,\"kd_raw\":%s,"
+        "\"dq_leg_dps\":%s,\"tau_leg_nm\":%s,\"tau_cmd_nm\":%s,\"cur_a\":%s,\"kp_raw\":%s,\"kd_raw\":%s,"
         // ★창 통계 — **500Hz 로 계산**한 값이다(발행 20Hz 표본이 아니라). tau_win_n 은
         //   그 창에 들어간 표본 수 = 통계의 신뢰도. 0 이면 통계를 읽지 말 것.
         "\"tau_std_nm\":%s,\"tau_min_nm\":%s,\"tau_max_nm\":%s,\"tau_win_n\":%ld,"
-        "\"rpy_deg\":[%.2f,%.2f,%.2f],\"tilt_deg\":%.2f,\"loop_hz\":%.1f,"
+        "\"rpy_deg\":[%.2f,%.2f,%.2f],\"gyro_dps\":[%.2f,%.2f,%.2f],\"rpy_raw_deg\":[%.2f,%.2f,%.2f],\"tilt_deg\":%.2f,\"loop_hz\":%.1f,"
         "\"motors_on\":%s,\"health\":%s,\"installed\":%s,"
         "\"n_ok\":%d,\"n_fault\":%d,\"n_dead\":%d,\"n_absent\":%d,\"n_installed\":%d,"
         "\"est_x\":%.3f,\"est_z\":%.3f,\"estop\":%s,\"tilt_estop_ok\":%s,"
@@ -2568,10 +2581,10 @@ int main(int argc, char** argv){
         "%s\"offset_deg\":%s}",
         mode.c_str(), hw->name(), qs.c_str(), qchs.c_str(),
         /* dq/tau/tau_cmd/kp/kd 는 다음 줄에서 이어진다 — 아래 5개 뒤에 창통계 4개 */
-        dqs.c_str(), taus.c_str(), taucs.c_str(), kps.c_str(), kds.c_str(),
+        dqs.c_str(), taus.c_str(), taucs.c_str(), curas.c_str(), kps.c_str(), kds.c_str(),
         tsd.c_str(), tmn.c_str(), tmx.c_str(), ts_n_pub,
-        rpy[0]*JointMap::R2D, rpy[1]*JointMap::R2D,
-        rpy[2]*JointMap::R2D, tilt, hz_ema, (mode!="off"&&!wd)?"true":"false",
+        rpy_f[0]*JointMap::R2D, rpy_f[1]*JointMap::R2D,
+        rpy_f[2]*JointMap::R2D, gyro[0]*JointMap::R2D, gyro[1]*JointMap::R2D, gyro[2]*JointMap::R2D, rpy[0]*JointMap::R2D, rpy[1]*JointMap::R2D, rpy[2]*JointMap::R2D, tilt, hz_ema, (mode!="off"&&!wd)?"true":"false",
         health.c_str(), inst.c_str(), n_ok, n_fault, n_dead, n_absent,
         (int)(jm.n_leg-n_absent), est.p[0], est.p[2], estop?"true":"false",
         imu_dead?"false":"true",

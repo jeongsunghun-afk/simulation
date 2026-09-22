@@ -46,6 +46,13 @@ try:
 except Exception:
     pass
 NJ = len(JOG_NAMES)
+# ★실측 토크 표시용 상수 (2026-09-22): τ_real = SIGN·cur_a·KT·GEAR/SCALE. cur_a=fCurrent(실측전류·에코아님).
+_TAU_SIGN = [-1, 1, -1, -1, -1, -1, 1, 1]
+_TAU_EMA_A = float(os.environ.get('TAU_EMA_A', '0.4'))   # ★2026-09-22 토크 표시 EMA(작을수록 부드러움·1=평활없음)
+_tau_ema = [None]*8; _taucmd_ema = [None]*8
+_TAU_GEAR = [7.0, 7.0, 10.5, 8.4, 7.0, 7.0, 10.5, 8.4]   # gear_k 포함(calf 7×1.5·foot 7×1.2)
+_TAU_KT   = 0.2
+_TAU_SCALE = float(os.environ.get('CUR_SCALE', '7.5'))   # fCurrent→토크 스케일(≈7.5·절대치 ±15%)
 
 # ── ★위치모드 강성 배율 (2026-08-21) ────────────────────────────────────────
 #   home/hold/jog 의 kp 에 곱하는 배율. **stand/walk 는 안 쓴다**(WBIC 와 싸우면 안 된다).
@@ -71,7 +78,7 @@ KD_STEPS = [None, 1.0, 1.5, 2.0, 3.0]
 #   ★쓰는 법 — **중립점을 브래킷한다**: 올리며 다리가 뜨기 시작하는 g⁺,
 #     내리며 지기 시작하는 g⁻ 를 잡으면 마찰이 소거된다. g* = (g⁺+g⁻)/2.
 #     그 g* 가 곧 "지금 중력보상이 몇 % 모자라나" 다 — stand 처짐의 크기와 같다.
-GRAV_STEPS = [0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.15, 1.20, 1.30]
+GRAV_STEPS = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00, 1.05, 1.10, 1.20, 1.30]  # ★0.70~0.80 추가(재조립 후 과보상 완화)
 try:
     _tt = float(_cfg.get('safety', {}).get('tau_trip_nm', 15.0))
     # ★★트립은 **채널토크**로 걸린다(biped_deploy 가 hs.tau_nm 을 그대로 비교한다).
@@ -734,7 +741,20 @@ def _check_driver_alarms(st):
 #     threading.Thread(target=_restart_worker, daemon=True).start()
 #
 #
+def stop_all_traj():
+    """실행 중인 모든 궤적/처프/스윙 스레드를 즉시 정지 — rogue 명령 방지. 안전최우선 → 예외무시.
+       (walk/squat 재생·처프·스윙. 각 stopper 는 stop 이벤트 set + join.)"""
+    for fn in (walk_stop, swing_stop, chirp_stop, wsq_stop):
+        try: fn()
+        except Exception: pass
+
 def set_mode(mode):
+    # ★안전 가드(2026-09-17): 어느 모드로 바꾸든 **실행 중 궤적 스레드부터 즉시 정지**한다.
+    #   안 그러면 재생/스윙 루프가 매 틱 jog_deg 를 계속 써서 새 모드(off 포함)를 덮는다.
+    stop_all_traj()
+    if mode in ('off', 'reset'):
+        try: explog.stop()              # ★off/reset = 기록도 중지(안전종료 계약)
+        except Exception: pass
     if mode == 'reset':
         left.clear(); right.clear()
         pub.set(mode='reset', v=0.0, vy=0.0, w=0.0)
@@ -778,6 +798,546 @@ def set_mode(mode):
     pub.set(mode=mode)          # off/jog/hold 등
     left.clear(); right.clear(); pub.set(v=0.0, vy=0.0, w=0.0)
     dpg.set_value('spd_sl', 0); dpg.set_value('vy_sl', 0); dpg.set_value('turn_sl', 0)
+
+
+# ── Walk 위치재생 (2026-09-16) ──────────────────────────────────────────────
+#   ref_lib/*.npz(MPC+WBIC 시뮬 q(t), 8관절·rad·50Hz·JOG_NAMES 순서)를 jog 목표각으로 순차발행
+#   = 위치제어 재생. deploy jog 20dps 클램프+관절한계 → max관절속도<15dps 로 자동 슬로우.
+#   ⚠실제 재생은 EtherCAT 케이블·왼무릎 벨트 수리 후, 크레인 매달림 전제. 동적 walk(MPC+WBIC) 아님.
+_WALK_DIR    = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ref_lib')
+_WALK_FILES  = {'스쿼트(1점)': 'biped_ref_squat.npz', '제자리(vx0)': 'biped_ref_inplace.npz',
+                'walk 0.2': 'biped_ref_walk02.npz', 'walk 0.3': 'biped_ref_walk03.npz'}
+#   ★스쿼트(1점): 앉았다-일어서기. 1점 점발 위에서 접촉점(발 sphere x·y) 고정한 채 몸통을
+#     수직으로 Δz(0.08m) 내렸다 올린다 — 비행 위상 없음(준정적) → 위치제어 재생 OK.
+#     biped_ref_squat_export.py 로 IK 생성. 재생 loop 켜면 홈→홈 매끈해 이음매 없이 반복.
+_WALK_MAXDPS = 15.0                 # jog 20dps 한계 아래 여유
+#   ★재생 자동 anti-ring 게인 (2026-09-17): 저감쇠 PD 6Hz 공진(calf/foot belt) 억제.
+#     ζ ∝ kd/√kp — 자동kd(√kp)는 ζ 고정(~0.3, 저감쇠)이라 링잉. 재생 땐 kp↓+kd명시↑ 로 ζ↑.
+_REPLAY_KP = 2.0    # 재생 kp 배율(낮게 — belt 공진 자극↓)
+_REPLAY_KD = 3.0    # 재생 kd 배율(자동 아닌 고정 — 감쇠↑, ζ≈0.6 near-critical)
+_saved_gains = [None]   # ★재생 전 kp/kd 저장 → 정지 시 원복(전역 누수 방지)
+_walk_stop   = threading.Event()
+_walk_thr    = None
+
+def _walk_loop(qdeg, dt, speed, loop):
+    try:
+        N = len(qdeg); nj = len(qdeg[0])
+        vmax = max((abs(qdeg[i + 1][j] - qdeg[i][j]) / dt
+                    for i in range(N - 1) for j in range(nj)), default=0.0)
+        S = max(1.0, vmax / _WALK_MAXDPS) / max(speed, 0.05)   # 최대 관절속도 <= MAXDPS
+        pub.set(mode='jog', jog_deg=list(qdeg[0]))             # 첫 자세로 진입
+        for _ in range(30):                                    # ~3s 서행 램프 여유(20dps)
+            if _walk_stop.is_set(): return
+            time.sleep(0.1)
+        i = 0
+        while not _walk_stop.is_set():
+            pub.set(jog_deg=list(qdeg[i])); i += 1
+            if i >= N:
+                if loop: i = 0
+                else: break
+            time.sleep(dt * S)
+    except Exception as e:
+        print('[gui] walk 재생 오류: %s' % e, flush=True)
+    finally:
+        try: pub.set(mode='reset')
+        except Exception: pass
+
+def walk_start(key, speed, loop):
+    global _walk_thr
+    walk_stop()
+    try:
+        import numpy as _np
+        d = _np.load(os.path.join(_WALK_DIR, _WALK_FILES[key]))
+        qdeg = _np.rad2deg(d['q']).tolist(); dt = float(d['dt'])
+    except Exception as e:
+        print('[gui] walk 로드 실패(%s): %s' % (key, e), flush=True)
+        try: dpg.set_value('state', 'walk 로드 실패: %s' % e)
+        except Exception: pass
+        return
+    _saved_gains[0] = (pub.cmd.get('pos_kp_scale', 1.0), pub.cmd.get('pos_kd_scale', -1.0))  # 원복용 저장
+    try: set_kp_scale(_REPLAY_KP); set_kd_scale(_REPLAY_KD)   # ★재생 anti-ring 게인(정지 시 원복)
+    except Exception: pass
+    _walk_stop.clear()
+    _walk_thr = threading.Thread(target=_walk_loop, args=(qdeg, dt, speed, loop), daemon=True)
+    _walk_thr.start()
+    print('[gui] walk 재생: %s (%d프레임 · 속도×%.1f · 반복=%s)' % (key, len(qdeg), speed, loop), flush=True)
+
+def walk_stop():
+    global _walk_thr
+    _walk_stop.set()
+    if _walk_thr is not None:
+        _walk_thr.join(timeout=1.0); _walk_thr = None
+    if _saved_gains[0] is not None:                 # ★재생 anti-ring 게인 원복(전역 누수 방지)
+        _kp, _kd = _saved_gains[0]; _saved_gains[0] = None
+        try: set_kp_scale(_kp); set_kd_scale(None if _kd < 0 else _kd)
+        except Exception: pass
+
+
+# ── 다축 처프 + fCurrent(측정토크) 모니터 (2026-09-16) ────────────────────────────
+#   walk 재생과 같은 jog 발행 경로에 얹는다: 선택 축을 현재자세(center) 주변으로 선형
+#   처프(주파수 스윕)시키며, 매 틱 deploy state 의 **명령**(q_cmd_deg·tau_cmd_nm)과
+#   **측정**(q_leg_deg·tau_leg_nm = SIGN·fCurrent·KT·GEAR, 관절Nm)을 쌍으로 수집 →
+#   "제어명령 대비 fCurrent 가 살아서 따라오나" 를 상관·표준편차·추종오차로 판정 + CSV.
+#   ⚠jog 20dps 클램프 안에서만 논다 — 진폭은 peak vel<15dps 로 **자동 축소**(고주파일수록 작아짐).
+#   ⚠jog 호환 자세(홈·매달림)에서만. 평발 stand(발목 100°)면 진입 거부(set_mode('jog') 규약과 동일).
+#   측정 토크(fCurrent)는 hold q̇≈0 이 아니라 처프로 움직일 때라야 관측된다 → calf 마찰/추종 진단에 직결.
+_CHIRP_AXES  = {'calf 양쪽': [2, 6], 'HL_calf': [2], 'HR_calf': [6], 'thigh 양쪽': [1, 5],
+                'hip 양쪽': [0, 4], 'HL(4)': [0, 1, 2, 3], 'HR(4)': [4, 5, 6, 7],
+                '전축(8)': list(range(NJ))}
+_CHIRP_FREQ  = {'저속 0.2–0.6Hz': (0.2, 0.6), '중속 0.3–1.0Hz': (0.3, 1.0),
+                '광대역 0.2–1.5Hz': (0.2, 1.5)}
+_CHIRP_MAXDPS = 15.0                       # jog 20dps 클램프 아래 여유 → 진폭 상한 근거
+_CHIRP_FS     = 50.0                       # 발행/표본 주파수 [Hz]
+_CHIRP_LOGDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'chirp_logs')
+_chirp_stop  = threading.Event()
+_chirp_thr   = None
+
+def _chirp_seed():
+    """실측각을 center 로 시드 + jog 진입. 모든 축을 검증해 한계 밖이면 거부(명령점프 방지)
+       — set_mode('jog') 과 같은 fail-closed 규약. **메인스레드에서 호출**(dpg 조작). center[deg] 반환."""
+    q = json.load(open(STATE))['q_leg_deg']            # 실패 시 예외 → 호출부가 처리(진입 취소)
+    if len(q) < NJ:
+        raise ValueError('q_leg_deg 길이 %d < %d' % (len(q), NJ))
+    center = []
+    for i in range(NJ):
+        v = float(max(JOG_LIM[i][0], min(JOG_LIM[i][1], q[i])))
+        if abs(v - float(q[i])) > 0.5:
+            raise ValueError('%s 실측 %+.1f° 가 jog 한계 [%+.1f,%+.1f] 밖 — 홈/매달림에서 할 것'
+                             % (JOG_NAMES[i], q[i], JOG_LIM[i][0], JOG_LIM[i][1]))
+        center.append(v)
+    for i in range(NJ):
+        try: dpg.set_value('jog_%d' % i, center[i])
+        except Exception: pass
+        pub.cmd['jog_deg'][i] = center[i]
+    pub.set(mode='jog', jog_deg=list(center))
+    return center
+
+def _chirp_effamp(center, axes, amp_req, f1):
+    """축별 유효 진폭[deg] = min(요청, 속도한계 15dps, 관절한계 여유 90%). {i: amp} 반환."""
+    import math
+    vlim = _CHIRP_MAXDPS / (2.0 * math.pi * max(f1, 1e-3))     # peak vel<MAXDPS → 진폭 상한
+    eff = {}
+    for i in axes:
+        room = 0.9 * min(center[i] - JOG_LIM[i][0], JOG_LIM[i][1] - center[i])
+        eff[i] = max(0.0, min(float(amp_req), vlim, room))
+    return eff
+
+def _chirp_loop(center, axes, amp_req, f0, f1, T):
+    import math
+    dt = 1.0 / _CHIRP_FS; nsteps = int(T * _CHIRP_FS)
+    rows = []                                          # [t, qcmd×NJ, qmeas×NJ, taucmd×NJ, taumeas×NJ]
+    eff = _chirp_effamp(center, axes, amp_req, f1)
+    ph  = {i: 2.0 * math.pi * k / max(len(axes), 1) for k, i in enumerate(axes)}   # 축별 위상분산=다축
+    print('[gui] 처프 시작: 축=%s · 유효진폭=%s° · %.2f→%.2fHz · %.0fs @%.0fHz'
+          % (axes, {i: round(eff[i], 2) for i in axes}, f0, f1, T, _CHIRP_FS), flush=True)
+    for _ in range(int(3 * _CHIRP_FS)):                # ~3s 진입 램프(center 로 서행 도달)
+        if _chirp_stop.is_set(): return
+        time.sleep(dt)
+    t0 = time.monotonic(); last_ui = -1.0
+    for k in range(nsteps):
+        if _chirp_stop.is_set(): break
+        t = k * dt
+        finst = f0 + (f1 - f0) * t / T                             # 순시주파수(로그용)
+        phase = 2.0 * math.pi * (f0 * t + 0.5 * (f1 - f0) * t * t / T)   # 선형처프 위상적분
+        tgt = list(center)
+        for i in axes:
+            v = center[i] + eff[i] * math.sin(phase + ph[i])
+            tgt[i] = max(JOG_LIM[i][0], min(JOG_LIM[i][1], v))
+        pub.set(jog_deg=tgt)
+        try:                                                       # 명령·측정 쌍 수집
+            st = json.load(open(STATE))
+            qc = st.get('q_cmd_deg'); qm = st.get('q_leg_deg')
+            tc = st.get('tau_cmd_nm'); tm = st.get('tau_leg_nm')
+            if qc and qm and tc and tm and min(len(qc), len(qm), len(tc), len(tm)) >= NJ:
+                rows.append([t] + [float(qc[i]) for i in range(NJ)]
+                                 + [float(qm[i]) for i in range(NJ)]
+                                 + [float(tc[i]) for i in range(NJ)]
+                                 + [float(tm[i]) for i in range(NJ)])
+        except Exception:
+            pass
+        if t - last_ui > 0.5:                                      # 저빈도 상태갱신(스레드→dpg best-effort)
+            last_ui = t; pa = axes[0]; base = 1 + 3 * NJ + pa
+            tmv = [r[base] for r in rows[-25:]] or [0.0]
+            msg = '처프 %.0f/%.0fs · f≈%.2fHz · %s 측정τ %.2f~%.2f Nm (표본%d)' % (
+                t, T, finst, JOG_NAMES[pa], min(tmv), max(tmv), len(rows))
+            print('[gui] %s' % msg, flush=True)
+            try: dpg.set_value('chirp_stat', msg)
+            except Exception: pass
+        nt = t0 + (k + 1) * dt; sl = nt - time.monotonic()
+        if sl > 0: time.sleep(sl)
+    if not _chirp_stop.is_set():                                   # 자연종료: center 로 복귀(정지는 ■버튼이 reset)
+        try: pub.set(jog_deg=list(center))
+        except Exception: pass
+    _chirp_report(rows, axes, eff)
+
+def _chirp_report(rows, axes, eff):
+    import numpy as _np, math, csv as _csv
+    if len(rows) < 10:
+        msg = '처프 종료 — 표본 부족(%d). state 를 못 읽었을 수 있음(deploy·QUAD_STATE 확인)' % len(rows)
+        print('[gui] %s' % msg, flush=True)
+        try: dpg.set_value('chirp_stat', msg)
+        except Exception: pass
+        return
+    A = _np.array(rows, float)
+    qc = A[:, 1:1 + NJ]; qm = A[:, 1 + NJ:1 + 2 * NJ]
+    tc = A[:, 1 + 2 * NJ:1 + 3 * NJ]; tm = A[:, 1 + 3 * NJ:1 + 4 * NJ]
+    try:                                                           # CSV 저장(RAM 아님·홍수아님: 수백KB)
+        os.makedirs(_CHIRP_LOGDIR, exist_ok=True)
+        fn = os.path.join(_CHIRP_LOGDIR, 'chirp_%s.csv' % time.strftime('%Y%m%d_%H%M%S'))
+        with open(fn, 'w', newline='') as f:
+            w = _csv.writer(f)
+            w.writerow(['t'] + ['qcmd_%s' % n for n in JOG_NAMES] + ['qmeas_%s' % n for n in JOG_NAMES]
+                       + ['taucmd_%s' % n for n in JOG_NAMES] + ['taumeas_%s' % n for n in JOG_NAMES])
+            w.writerows(rows)
+        fnb = os.path.basename(fn)
+    except Exception as e:
+        fnb = '(저장실패:%s)' % e
+    lines = []; verdict_ok = True
+    for i in axes:                                                 # 축별 판정
+        sd = float(_np.std(tm[:, i]))                              # 측정토크(fCurrent) 살아있음
+        cc = tc[:, i]; mm = tm[:, i]
+        corr = float(_np.corrcoef(cc, mm)[0, 1]) if (_np.std(cc) > 1e-6 and _np.std(mm) > 1e-6) else float('nan')
+        rmse = float(_np.sqrt(_np.mean((qm[:, i] - qc[:, i]) ** 2)))   # 위치 추종오차
+        ok = (sd > 0.05) and (not math.isnan(corr)) and (corr > 0.4)
+        verdict_ok = verdict_ok and ok
+        lines.append('%-9s 측정τσ=%.3f Nm · corr(명령,측정)=%s · 추종RMS=%.2f° %s'
+                     % (JOG_NAMES[i], sd, ('%+.2f' % corr if not math.isnan(corr) else ' n/a'),
+                        rmse, '✓' if ok else '⚠'))
+    head = '처프 완료 · %d표본 · fCurrent 응답 %s · CSV=%s' % (
+        len(rows), 'OK' if verdict_ok else '의심(약함)', fnb)
+    print('[gui] ' + head, flush=True)
+    for ln in lines: print('   ' + ln, flush=True)
+    try:
+        brief = ' / '.join('%s:%s' % (JOG_NAMES[i].split('_')[-1], 'OK' if _np.std(tm[:, i]) > 0.05 else '약')
+                           for i in axes)
+        dpg.set_value('chirp_stat', head + '  |  ' + brief)
+    except Exception: pass
+
+def chirp_start(axkey, amp, freqkey, T):
+    global _chirp_thr
+    chirp_stop()
+    axes = _CHIRP_AXES.get(axkey, list(range(NJ))); f0, f1 = _CHIRP_FREQ.get(freqkey, (0.2, 0.6))
+    try:
+        center = _chirp_seed()                         # 메인스레드에서 시드+jog 진입(fail-closed)
+    except Exception as e:
+        msg = '처프 진입 취소 — %s' % e
+        print('[gui] %s' % msg, flush=True)
+        try: dpg.set_value('chirp_stat', msg)
+        except Exception: pass
+        return
+    _chirp_stop.clear()
+    _chirp_thr = threading.Thread(target=_chirp_loop,
+                                  args=(center, axes, float(amp), f0, f1, float(T)), daemon=True)
+    _chirp_thr.start()
+
+def chirp_stop():
+    global _chirp_thr
+    _chirp_stop.set()
+    if _chirp_thr is not None:
+        _chirp_thr.join(timeout=1.5); _chirp_thr = None
+
+
+# ── 자유공간 스윙 처프 (M·C 프로브, 2026-09-17) ──────────────────────────────────
+#   목적: 한 관절을 자유공간(발 공중·접촉0)에서 처프로 흔들어 **전 관절 τ·q·q̇** 를 로깅
+#     → 오프라인 biped_swing_mc_fit.py 가 MuJoCo 로 M(q)q̈+Cq̇+g+마찰 재구성해 M·C 검증.
+#   ★대역: deploy 를 JOG_SPEED_DPS=<X>([5,150]) 로 재실행하면 peak dps 슬라이더로 X 까지
+#     = 고대역 M 자극. 기본 20dps 면 저대역(관성 자극 약함). deploy 병행(단일 writer) —
+#     collect_multichirp(자체 Hardware=deploy와 dual) 와 달리 deploy 내릴 필요 없음.
+#   ⚠발이 **지면에 닿으면 안 됨**(접촉력 섞임) — 크레인 자유스윙·한 다리만. 나머지 축은 hold.
+_SWING_JOINTS = {'HL_thigh':1,'HL_calf':2,'HL_foot':3,'HR_thigh':5,'HR_calf':6,'HR_foot':7,
+                 'HL_hip':0,'HR_hip':4}
+_SWING_FREQ   = {'0.2–0.6Hz':(0.2,0.6), '0.3–1.2Hz':(0.3,1.2), '0.5–2.0Hz':(0.5,2.0),
+                 '0.5–3.0Hz':(0.5,3.0)}
+#   ★peak dps 슬라이더로 진폭상한(=자극 대역)을 정한다. **deploy 의 jog 슬루 한계 이하**여야
+#     한다 — 기본 20dps 면 저대역(M 자극 약함). M·C 자극하려면 deploy 를 JOG_SPEED_DPS=<X>
+#     (예 80, [5,150]) 로 **재실행**하고 여기 peak 를 X 이하로. 그래야 sin 이 안 뭉개진다.
+#     ⚠calf 채널속도 = 관절×1.5 → 관절 133dps 에서 채널 200=vel_trip. 관절 peak≤120 권장.
+_SWING_MAXDPS = 18.0                        # (구 UI) 단일관절 peak dps 기본
+# ── ★한쪽 다리 4축 자동순차 (HL/HR 선택) — 진폭·Hz·dps 자동 (2026-09-18) ──
+#   suffix → (amp_req°, f0, f1, peak_dps, T[s]). amp 은 요청값(실효는 _swing_loop 의 vlim·room 캡).
+#   ⚠peak dps 는 deploy 의 JOG_SPEED_DPS 이하여야 sin 이 안 뭉개짐 → JOG_SPEED_DPS≥60 로 재실행 권장.
+_SWING_AUTO = {'hip':(8.0,0.3,1.0,50,16), 'thigh':(12.0,0.3,1.0,50,16),
+               'calf':(12.0,0.3,1.2,55,16), 'foot':(8.0,0.3,1.0,45,16)}
+_SWING_SIDE_JOINTS = {'HL':['HL_hip','HL_thigh','HL_calf','HL_foot'],
+                      'HR':['HR_hip','HR_thigh','HR_calf','HR_foot']}
+_SWING_LOGDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'swing_logs')
+_swing_stop   = threading.Event()
+_swing_thr    = None
+
+def _swing_loop(center, j, amp_req, f0, f1, T, maxdps):
+    import math, csv as _csv
+    dt = 1.0/_CHIRP_FS; nsteps = int(T*_CHIRP_FS); rows = []
+    vlim = float(maxdps)/(2.0*math.pi*max(f1,1e-3))                       # peak dps 유지 진폭상한
+    room = 0.9*min(center[j]-JOG_LIM[j][0], JOG_LIM[j][1]-center[j])
+    amp  = max(0.0, min(float(amp_req), vlim, room))
+    print('[gui] 스윙 시작: %s · 유효진폭=%.2f° · %.2f→%.2fHz · peak≤%.0fdps · %.0fs '
+          '(발 공중! deploy JOG_SPEED_DPS≥%.0f 확인)'
+          % (JOG_NAMES[j], amp, f0, f1, maxdps, T, maxdps), flush=True)
+    # ★로그 파일을 **시작 시 열어 증분 기록 + 주기 flush** — 도중 크래시에도 수집분 보존.
+    fh = None; wtr = None; fn = None
+    try:
+        os.makedirs(_SWING_LOGDIR, exist_ok=True)
+        fn = os.path.join(_SWING_LOGDIR, 'swing_%s_%s.csv' % (JOG_NAMES[j], time.strftime('%Y%m%d_%H%M%S')))
+        fh = open(fn, 'w', newline=''); wtr = _csv.writer(fh)
+        wtr.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['dq_%s'%n for n in JOG_NAMES]
+                     + ['tau_%s'%n for n in JOG_NAMES] + ['cur_%s'%n for n in JOG_NAMES] + ['swung'])
+        fh.flush()
+    except Exception as e:
+        print('[gui] 스윙 로그 열기 실패: %s' % e, flush=True); fh = None
+    for _ in range(int(3*_CHIRP_FS)):                                    # 진입 램프
+        if _swing_stop.is_set():
+            if fh:
+                try: fh.close()
+                except Exception: pass
+            return
+        time.sleep(dt)
+    t0 = time.monotonic()
+    for k in range(nsteps):
+        if _swing_stop.is_set(): break
+        t = k*dt
+        phase = 2.0*math.pi*(f0*t + 0.5*(f1-f0)*t*t/T)
+        tgt = list(center)
+        tgt[j] = max(JOG_LIM[j][0], min(JOG_LIM[j][1], center[j] + amp*math.sin(phase)))
+        pub.set(jog_deg=tgt)
+        try:                                                             # 전 관절 τ·q·q̇ (M·C 재구성용)
+            st = json.load(open(STATE))
+            qm = st.get('q_leg_deg'); dq = st.get('dq_leg_dps'); tm = st.get('tau_leg_nm'); cu = st.get('cur_a')
+            if qm and dq and tm and cu and min(len(qm),len(dq),len(tm),len(cu)) >= NJ:
+                row = ([t] + [float(qm[i]) for i in range(NJ)]
+                            + [float(dq[i]) for i in range(NJ)]
+                            + [float(tm[i]) for i in range(NJ)]
+                            + [float(cu[i]) for i in range(NJ)])       # ★cur_a(실측전류) — 마찰/M·C 실측용
+                rows.append(row)
+                if wtr:                                                  # 증분 기록 + ~0.5s 마다 flush
+                    try:
+                        wtr.writerow(row + [JOG_NAMES[j]])
+                        if len(rows) % 25 == 0: fh.flush()
+                    except Exception: pass
+        except Exception:
+            pass
+        nt = t0 + (k+1)*dt; sl = nt - time.monotonic()
+        if sl > 0: time.sleep(sl)
+    if not _swing_stop.is_set():
+        try: pub.set(jog_deg=list(center))
+        except Exception: pass
+    if fh:
+        try: fh.close()                                                  # ★남은 버퍼 flush + 마감
+        except Exception: pass
+    _swing_report(rows, j, fn)
+
+def _swing_report(rows, j, fn):
+    import numpy as _np
+    fnb = os.path.basename(fn) if fn else '(미저장)'
+    if len(rows) < 20:
+        msg = '스윙 종료 — 표본 부족(%d) · CSV=%s' % (len(rows), fnb)
+        try: dpg.set_value('swing_stat', msg)
+        except Exception: pass
+        print('[gui] ' + msg, flush=True); return
+    A = _np.array(rows, float); t = A[:,0]
+    dq_j = A[:, 1+NJ+j]; tm_j = A[:, 1+2*NJ+j]
+    qdd_j = _np.gradient(dq_j, t)                                        # q̈ [deg/s²] (라이브 표시용)
+    head = ('스윙 완료 · %s · %d표본 · |q̇|max=%.1f dps · |q̈|max=%.0f°/s² · |τ|max=%.2f Nm · CSV=%s'
+            % (JOG_NAMES[j], len(rows), _np.abs(dq_j).max(), _np.abs(qdd_j).max(), _np.abs(tm_j).max(), fnb))
+    print('[gui] ' + head, flush=True)
+    print('   → 오프라인 M·C 적합:  python3 biped_swing_mc_fit.py swing_logs/%s' % fnb, flush=True)
+    try: dpg.set_value('swing_stat', head)
+    except Exception: pass
+
+def swing_start(jkey, amp, fkey, T, maxdps):
+    global _swing_thr
+    swing_stop()
+    j = _SWING_JOINTS.get(jkey, 1); f0, f1 = _SWING_FREQ.get(fkey, (0.2, 0.6))
+    try:
+        center = _chirp_seed()                             # 재사용: fail-closed 시드 + jog 진입
+    except Exception as e:
+        msg = '스윙 진입 취소 — %s' % e
+        print('[gui] %s' % msg, flush=True)
+        try: dpg.set_value('swing_stat', msg)
+        except Exception: pass
+        return
+    _swing_stop.clear()
+    _swing_thr = threading.Thread(target=_swing_loop,
+                                  args=(center, j, float(amp), f0, f1, float(T), float(maxdps)), daemon=True)
+    _swing_thr.start()
+
+def swing_stop():
+    global _swing_thr
+    _swing_stop.set()
+    if _swing_thr is not None:
+        _swing_thr.join(timeout=1.5); _swing_thr = None
+
+def _swing_side_loop(side):
+    """한쪽 다리 4축(hip→thigh→calf→foot)을 자동 파라미터로 순차 스윙. 각 축 개별 CSV."""
+    joints = _SWING_SIDE_JOINTS.get(side, [])
+    print('[gui] 스윙 순차 시작: %s (%d축 · 진폭/Hz/dps 자동)' % (side, len(joints)), flush=True)
+    for idx, jkey in enumerate(joints):
+        if _swing_stop.is_set(): break
+        suf = jkey.rsplit('_', 1)[1]                       # hip/thigh/calf/foot
+        amp, f0, f1, peak, T = _SWING_AUTO[suf]
+        try:
+            center = _chirp_seed()                         # 축마다 현재자세 재시드(fail-closed)
+        except Exception as e:
+            print('[gui] %s 시드 실패, 건너뜀: %s' % (jkey, e), flush=True); continue
+        try: dpg.set_value('swing_stat', '순차 %d/%d: %s 스윙 중…' % (idx+1, len(joints), jkey))
+        except Exception: pass
+        _swing_loop(center, _SWING_JOINTS[jkey], amp, f0, f1, T, peak)   # ~T+3s 블록(_swing_stop 공유)
+        for _ in range(int(1.5*_CHIRP_FS)):                # 축간 정착
+            if _swing_stop.is_set(): break
+            time.sleep(1.0/_CHIRP_FS)
+    if not _swing_stop.is_set():
+        try: dpg.set_value('swing_stat', '스윙 순차 완료: %s — swing_logs/ 4개 CSV 확인' % side)
+        except Exception: pass
+    print('[gui] 스윙 순차 종료: %s' % side, flush=True)
+
+def swing_side_start(side):
+    global _swing_thr
+    swing_stop()
+    if side not in _SWING_SIDE_JOINTS:
+        print('[gui] 스윙 side 오류: %s' % side, flush=True); return
+    _swing_stop.clear()
+    _swing_thr = threading.Thread(target=_swing_side_loop, args=(side,), daemon=True)
+    _swing_thr.start()
+
+
+# ── WBIC 밸런스 스쿼트 (접지·토크제어) — stand 모드 body_h 오실레이션 (2026-09-17) ──
+#   위치리플레이 스쿼트(궤적재생)와 달리 **WBIC 가 밸런스+토크**로 CoM 높이를 내렸다 올린다.
+#   ⚠접지·GRF 필수(stand=WBIC QP) — **매달림 금지**(해 안 나옴, 중력보상 폴백으로 처짐).
+#   ⚠평발 CoM 실현범위 [0.36,0.42] 클램프라 얕은 스쿼트(~6cm). 더 깊게는 점발(별도).
+_WSQ_LO, _WSQ_HI = 0.36, 0.42      # body_h[m] 범위(평발 기하 실현범위)
+_WSQ_PERIOD = 5.0                  # 한 사이클[s] (준정적)
+_wsq_stop = threading.Event()
+_wsq_thr  = None
+
+def _wsq_loop(period):
+    import math
+    dt = 0.05                      # 20Hz body_h 발행(WBIC 가 매끈히 추종)
+    amp = (_WSQ_HI - _WSQ_LO)/2
+    for _ in range(int(3/dt)):     # stand 안정화 ~3s
+        if _wsq_stop.is_set(): return
+        time.sleep(dt)
+    t0 = time.monotonic()
+    while not _wsq_stop.is_set():
+        t = time.monotonic() - t0
+        h = _WSQ_HI - amp*(1 - math.cos(2*math.pi*t/max(period,0.5)))   # HI→LO→HI raised-cosine
+        try: pub.set(body_h=float(h))
+        except Exception: pass
+        time.sleep(dt)
+
+def wsq_start(period=_WSQ_PERIOD):
+    global _wsq_thr
+    wsq_stop()
+    _wsq_stop.clear()
+    _wsq_thr = threading.Thread(target=_wsq_loop, args=(float(period),), daemon=True)
+    _wsq_thr.start()
+    print('[gui] WBIC 스쿼트 시작 (body_h %.2f~%.2fm · 주기 %.0fs · stand+GRF)'
+          % (_WSQ_LO, _WSQ_HI, period), flush=True)
+
+def wsq_stop():
+    global _wsq_thr
+    _wsq_stop.set()
+    if _wsq_thr is not None:
+        _wsq_thr.join(timeout=1.0); _wsq_thr = None
+
+
+# ── 실험 공용: 데이터저장(ExpLog) + 통일 실행/안전종료 래퍼 (2026-09-17) ──────────
+#   ★모든 실험을 같은 시퀀스로: [버튼] → exp_run(데이터저장 시작 + 궤적/모드 실행)
+#     → exp_stop(모션 정지 + reset + 저장 종료). 실험별 특수 로거(swing 자체 CSV)는 유지.
+#   ExpLog = state 를 50Hz 로 exp_logs/*.csv 에 적재(q·dq·tau·명령·mode·tilt·qp·estop).
+_EXP_LOGDIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exp_logs')
+
+class ExpLog:
+    def __init__(self):
+        self._stop = threading.Event(); self._thr = None; self.active = None; self.path = None
+    def start(self, name):
+        self.stop()
+        self.active = name; self._stop.clear()
+        self._thr = threading.Thread(target=self._loop, args=(name,), daemon=True); self._thr.start()
+    def _loop(self, name):
+        import csv as _csv
+        def arr(st, k):
+            v = st.get(k) or []
+            return [float(v[i]) if i < len(v) else 0.0 for i in range(NJ)]
+        try:
+            os.makedirs(_EXP_LOGDIR, exist_ok=True)
+            self.path = os.path.join(_EXP_LOGDIR, '%s_%s.csv' % (name, time.strftime('%Y%m%d_%H%M%S')))
+            f = open(self.path, 'w', newline=''); w = _csv.writer(f)
+        except Exception as e:
+            print('[gui] exp 로그 열기 실패: %s' % e, flush=True); return
+        w.writerow(['t'] + ['q_%s'%n for n in JOG_NAMES] + ['qch_%s'%n for n in JOG_NAMES]
+                   + ['aux_%s'%n for n in JOG_NAMES] + ['cur_%s'%n for n in JOG_NAMES]
+                   + ['dq_%s'%n for n in JOG_NAMES] + ['tau_%s'%n for n in JOG_NAMES]
+                   + ['qcmd_%s'%n for n in JOG_NAMES] + ['dqcmd_%s'%n for n in JOG_NAMES]
+                   + ['taucmd_%s'%n for n in JOG_NAMES]
+                   + ['kpraw_%s'%n for n in JOG_NAMES] + ['kdraw_%s'%n for n in JOG_NAMES]
+                   + ['mode','roll_deg','pitch_deg','yaw_deg','est_x','est_z','tilt_deg',
+                      'qp_fail_pct','loop_hz','estop'])
+        t0 = time.monotonic(); nrow = 0
+        while not self._stop.is_set():
+            try:
+                st = json.load(open(STATE))
+                rpy = st.get('rpy_deg') or [0.0, 0.0, 0.0]              # ★estimator 몸통자세(추정)
+                rpy = [float(rpy[k]) if k < len(rpy) else 0.0 for k in range(3)]
+                w.writerow([round(time.monotonic()-t0, 4)]
+                           + arr(st,'q_leg_deg') + arr(st,'q_ch_deg') + arr(st,'aux_deg')
+                           + arr(st,'cur_a')                          # ★실측 전류[A](fCurrent) — 실 τ=SIGN·cur·KT·GEAR/SCALE
+                           + arr(st,'dq_leg_dps') + arr(st,'tau_leg_nm')
+                           + arr(st,'q_cmd_deg') + arr(st,'dq_cmd_dps') + arr(st,'tau_cmd_nm')
+                           + arr(st,'kp_raw') + arr(st,'kd_raw')      # ★게인 — 명령τ=kp·err+kd·derr+τ_ff 분해용
+                           + [st.get('mode','')] + rpy
+                           + [st.get('est_x',0.0), st.get('est_z',0.0), st.get('tilt_deg',0.0),
+                              st.get('qp_fail_pct',0.0), st.get('loop_hz',0.0), st.get('estop',False)])
+                nrow += 1
+                if nrow % 25 == 0: f.flush()          # ★~0.5s 마다 flush — 크래시 손실 최소화
+            except Exception:
+                pass
+            time.sleep(1.0/_CHIRP_FS)
+        try: f.close()
+        except Exception: pass
+        msg = '실험 로그 저장: %s (%d행)' % (os.path.basename(self.path or '-'), nrow)
+        print('[gui] ' + msg, flush=True)
+        try: dpg.set_value('exp_stat', msg)
+        except Exception: pass
+    def stop(self):
+        self._stop.set()
+        if self._thr is not None:
+            self._thr.join(timeout=1.5); self._thr = None
+        self.active = None
+
+explog = ExpLog()
+
+def exp_run(name):
+    """실험 시작 — 데이터저장 켜고 궤적/모드 실행. (swing 은 자체 CSV 라 ExpLog 제외)"""
+    try: dpg.set_value('exp_stat', '실험 실행: %s (기록 중…)' % name)
+    except Exception: pass
+    if name == 'swing':
+        swing_side_start(dpg.get_value('swing_side'))     # HL/HR 4축 자동순차
+        return
+    explog.start(name)
+    if name == 'stand':
+        # ★2026-09-21 점발(1점) 정적 WBIC stand — squat(궤적재생) 밑 버튼.
+        #   set_mode('stand')(2점 평발 자동전환)와 달리 point-foot(contact='1pt')로 세워
+        #   런치 MJCF(pointfoot_payload=cmode0)와 접촉가정을 맞춘다.
+        #   시상균형=WBIC(도립진자)·좌우=가이드·수직fall=크레인. ⚠토크모드(고전류)=하드웨어 수리 후.
+        stop_all_traj(); left.clear(); right.clear()
+        pub.set(contact='1pt', body_h=H_DEF_1PT, mode='stand', v=0.0, vy=0.0, w=0.0)
+        dpg.set_value('h_sl', H_DEF_1PT)
+        dpg.set_value('spd_sl', 0); dpg.set_value('vy_sl', 0); dpg.set_value('turn_sl', 0)
+    elif name == 'stand_flat':
+        # ★2026-09-22 평발(2점 heel+toe) 정적 WBIC stand — WBIC 균형 검증용.
+        #   set_mode('stand') 이 contact='2pt'·body_h=H_DEF_2PT·mode='stand' 로 전환(Qflat8 밑창수평).
+        #   점발 발목 whip 이 없어(발목 지지면 有) "WBIC QP/균형 자체가 되는가"를 깨끗이 본다. MJCF=flat 로 기동할 것.
+        set_mode('stand')
+    elif name == 'squat': walk_start('스쿼트(1점)', 1.0, True)      # ★2026-09-18 무-WBIC 토크스쿼트: 스쿼트궤적(biped_ref_squat.npz) 재생(jog·PD+중력FF·밸런스QP 없음). set_mode('stand')+wsq 제거(WBIC 발산·freeze 회피·좌우는 사람/가이드로 고정). wsq_* 함수는 유지.
+    elif name == 'walk':  set_mode('walk')
+
+def exp_stop(name):
+    """안전종료 — 전 궤적(walk/squat/처프/스윙) 정지 + reset + 저장 종료(순서 중요)."""
+    stop_all_traj()                          # ★walk·squat·chirp·swing 스레드 모두 정지
+    set_mode('reset')                        # 명령 안전화(+ 기록 중지 내장)
+    try: explog.stop()                       # CSV 마감(중복 무해)
+    except Exception: pass
+    try: dpg.set_value('exp_stat', '안전종료: %s' % name)
+    except Exception: pass
 
 
 left  = JoyPad('joyL', 190, on_left, cross_only=True)   # ★십자만(전후 XOR 측방, 대각 금지)
@@ -854,26 +1414,63 @@ with dpg.theme() as _kp_off:                # 강성 배율 — 나머지(어둡
         dpg.add_theme_color(dpg.mvThemeCol_Button, (44, 48, 62))
         dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (70, 76, 96))
 
-with dpg.window(tag='main'):
-    dpg.add_text('biped teleop  —  MPC + WBIC (event-DCM)', color=(150, 200, 255))
-    dpg.add_separator()
+def build_joint_sliders():
+    # ── ★각축(JOG) 패널: 8관절 슬라이더(모터 1:1) + 실측 + 통신 상태 LED ──
+    #   ★2026-09-17 상단 우측으로 이동(첫 줄 2단: 좌 biped jog · 우 조인트 슬라이더).
+    dpg.add_text('● 각축 JOG 검증 (슬라이더=목표각° · 실측° · ●=상태LED)', color=(255, 205, 120))
     with dpg.group(horizontal=True):
-        with dpg.group():
-            left.build('전후/측방')
-            dpg.add_text('좌: 위아래=전후 · 좌우=측방 (십자=하나씩)', color=(120, 130, 150))
-        with dpg.group():
-            right.build('선회')
-            dpg.add_text('우: 좌우=선회 (★점발 한계로 매우 약함 ~1-2°/s·측방도 60%)', color=(120, 130, 150))
-        with dpg.group():
-            dpg.add_text('vx [m/s]')
-            dpg.add_slider_float(tag='spd_sl', default_value=0.0, min_value=-VMAX, max_value=VMAX, width=180, callback=on_vx)
-            dpg.add_text('vy [m/s] (측방)')
-            dpg.add_slider_float(tag='vy_sl', default_value=0.0, min_value=-VY_MAX, max_value=VY_MAX, width=180, callback=on_vy)
-            dpg.add_text('wz [rad/s] (선회)')
-            dpg.add_slider_float(tag='turn_sl', default_value=0.0, min_value=-WZ_MAX, max_value=WZ_MAX, width=180, callback=on_turn)
-            dpg.add_text('몸통 높이 [m]')
-            dpg.add_slider_float(tag='h_sl', default_value=H_DEF, min_value=H_MIN, max_value=H_MAX, width=180, callback=on_height)
+        dpg.add_button(label='슬라이더 모두 0', width=130, callback=jog_zero)
+        dpg.add_text('LED 초록=정상·노랑=에러·빨강=두절·어두움=미장착', color=(120, 130, 150))
+    _LED_R = 7
+    for i, nm in enumerate(JOG_NAMES):
+        with dpg.group(horizontal=True):
+            with dpg.drawlist(width=2 * _LED_R + 6, height=2 * _LED_R + 6, tag=f'leddl_{i}'):
+                dpg.draw_circle([_LED_R + 3, _LED_R + 3], _LED_R, fill=(70, 70, 78),
+                                color=(30, 30, 36), tag=f'led_{i}')
+            dpg.add_text(f'{nm:9s}', color=(190, 195, 210))
+            dpg.add_text(f'{JOG_LIM[i][0]:>6.1f}', color=(120, 130, 150))
+            dpg.add_slider_float(tag=f'jog_{i}', default_value=0.0,
+                                 min_value=JOG_LIM[i][0], max_value=JOG_LIM[i][1],
+                                 width=240, format='%.1f', user_data=i,
+                                 callback=lambda s, v, u: on_jog(s, v, u))
+            dpg.add_text(f'{JOG_LIM[i][1]:<6.1f}', color=(120, 130, 150))
+            dpg.add_text('--.-', tag=f'meas_{i}', color=(150, 220, 150))
+            dpg.add_text('  --.- Nm', tag=f'tau_{i}', color=(220, 180, 120))   # ★각축 토크(tau_leg_nm)
+            dpg.add_text('cmd --.-', tag=f'taucmd_{i}', color=(130, 190, 235))   # ★명령토크(tau_cmd_nm) — cmd vs 실측 비교(벨트슬립=cmd≫실측)
+
+with dpg.window(tag='main'):
+    with dpg.group(horizontal=True):
+        dpg.add_text('biped teleop  —  MPC + WBIC (event-DCM)', color=(150, 200, 255))
+        # ★드라이버 알람 로그창 토글 — 기본 숨김. 체크하면 뜬다(감시는 숨겨도 계속 쌓임).
+        dpg.add_checkbox(label='로그창', default_value=False, tag='show_calib',
+                         callback=lambda s, a: dpg.configure_item('calib_win', show=a))
+    dpg.add_separator()
+    with dpg.group(horizontal=True):   # ★첫 줄 2단(2026-09-17): 좌=biped jog(텔레옵) · 우=조인트 슬라이더
+        with dpg.group():              # ── 좌: biped jog ──
+            dpg.add_text('biped jog (텔레옵)', color=(150, 200, 255))
+            with dpg.group(horizontal=True):
+                with dpg.group():
+                    left.build('전후/측방')
+                    dpg.add_text('좌: 위아래=전후 · 좌우=측방 (십자=하나씩)', color=(120, 130, 150))
+                with dpg.group():
+                    right.build('선회')
+                    dpg.add_text('우: 좌우=선회 (★점발 한계로 매우 약함 ~1-2°/s·측방도 60%)', color=(120, 130, 150))
+                with dpg.group():
+                    dpg.add_text('vx [m/s]')
+                    dpg.add_slider_float(tag='spd_sl', default_value=0.0, min_value=-VMAX, max_value=VMAX, width=180, callback=on_vx)
+                    dpg.add_text('vy [m/s] (측방)')
+                    dpg.add_slider_float(tag='vy_sl', default_value=0.0, min_value=-VY_MAX, max_value=VY_MAX, width=180, callback=on_vy)
+                    dpg.add_text('wz [rad/s] (선회)')
+                    dpg.add_slider_float(tag='turn_sl', default_value=0.0, min_value=-WZ_MAX, max_value=WZ_MAX, width=180, callback=on_turn)
+                    dpg.add_text('몸통 높이 [m]')
+                    dpg.add_slider_float(tag='h_sl', default_value=H_DEF, min_value=H_MIN, max_value=H_MAX, width=180, callback=on_height)
+        dpg.add_spacer(width=24)
+        with dpg.group():              # ── 우: 조인트 슬라이더 (각축 JOG) ──
+            build_joint_sliders()
     dpg.add_spacer(height=8)
+    dpg.add_text('-', tag='sysload', color=(150, 220, 150))   # ★CPU·온도 (jog 아래·모션 위) 2026-09-17
+    dpg.add_text('-', tag='imu_state', color=(160, 200, 235))   # ★IMU 추정 몸통자세·위치 (CPU 아래) 2026-09-22
+    dpg.add_separator()
     dpg.add_text('모션', color=(170, 175, 195))
     # ★2026-08-14 라벨 정리 — 이름이 동작을 오해시키고 있었다.
     #   · 'RESET' → **'정지·현자세'**: 프로세스와 아무 상관이 없다. 하는 일은
@@ -934,15 +1531,78 @@ with dpg.window(tag='main'):
         #     reset→hold · 접지거부→hold · 자세거부→hold · --start-mode hold.
         #     지우면 갈 곳이 off(=limp=낙하)나 home(하중 실린 채 큰 이동)뿐이라 더 위험하다.
         #   ⇒ 조작 표면에서만 뺀다. 필요하면 '정지·현자세'(reset)가 hold 로 들어간다.
-        with dpg.group():              # ★2점 평발 = 정적 자세유지(보행 안 함)
-            dpg.add_button(label='2점 평발 stand', width=130, tag='mbtn_stand', callback=lambda: set_mode('stand'))
-            dpg.add_text('(밑창 접지·정적)', color=(120, 130, 150))
-        with dpg.group():              # ★1점 점발 = stepping 보행
-            _wb = dpg.add_button(label='점발 보행', width=110, tag='mbtn_walk', callback=lambda: set_mode('walk'))
-            dpg.add_text('(발끝 1점·동적)', color=(120, 130, 150))
-        dpg.bind_item_theme(_wb, _walk)
-    dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 2점 평발 stand'
+        # ── ★2026-09-18 주석처리: 2점 평발 stand(2점 평발 모드 폐기) + 점발 보행(접지실험 walk 와 중복→접지실험만 유지).
+        #   set_mode('stand')·set_mode('walk') 기능/모드는 그대로 살아 있음(버튼만 숨김).
+        # with dpg.group():              # ★2점 평발 = 정적 자세유지(보행 안 함)
+        #     dpg.add_button(label='2점 평발 stand', width=130, tag='mbtn_stand', callback=lambda: set_mode('stand'))
+        #     dpg.add_text('(밑창 접지·정적)', color=(120, 130, 150))
+        # with dpg.group():              # ★1점 점발 = stepping 보행
+        #     _wb = dpg.add_button(label='점발 보행', width=110, tag='mbtn_walk', callback=lambda: set_mode('walk'))
+        #     dpg.add_text('(발끝 1점·동적)', color=(120, 130, 150))
+        # dpg.bind_item_theme(_wb, _walk)
+    dpg.add_text('복구 순서: Off 전원 → Home 복귀 → (접지·하중전달) → 접지실험 squat(점발)'
                  '   · Off=명령토크 0 (Kp=Kd=τ=0)', color=(150, 155, 175))
+    # ── ★미접지 실험 (매달림·발 공중) — 궤적재생 + 스윙처프 ──────────── 2026-09-17
+    dpg.add_separator()
+    dpg.add_text('■ 미접지 실험 (매달림·발 공중) — 궤적재생·스윙처프. exp_logs/·swing_logs/ 기록', color=(150, 200, 220))
+    with dpg.group(horizontal=True):   # 궤적 재생(기록) — 위치제어 프리뷰. auto anti-ring 게인
+        dpg.add_text('궤적 재생(기록):')
+        dpg.add_combo(list(_WALK_FILES.keys()), default_value='제자리(vx0)', width=110, tag='walk_sel')
+        dpg.add_text('속도×')
+        dpg.add_slider_float(default_value=1.0, min_value=0.1, max_value=1.0, width=100,
+                             tag='walk_spd', format='%.1f')
+        dpg.add_checkbox(label='반복', default_value=True, tag='walk_loop')
+        dpg.add_button(label='▶재생', width=64,
+                       callback=lambda: (explog.start(_WALK_FILES[dpg.get_value('walk_sel')]
+                                                      .replace('biped_ref_','').replace('.npz','')),
+                                         walk_start(dpg.get_value('walk_sel'),
+                                                    dpg.get_value('walk_spd'), dpg.get_value('walk_loop'))))
+        dpg.add_button(label='■정지', width=64,
+                       callback=lambda: (walk_stop(), set_mode('reset')))   # set_mode('reset')=explog.stop 포함
+    with dpg.group(horizontal=True):   # 스윙처프(M·C) — 한쪽 다리 4축 자동순차
+        dpg.add_text('스윙처프(M·C) ')
+        dpg.add_combo(['HL', 'HR'], default_value='HL', width=60, tag='swing_side')
+        dpg.add_text('→ hip·thigh·calf·foot 자동순차 (진폭·Hz·dps 자동)')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('swing'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('swing'))
+    dpg.add_text('미접지 대기 — 발 공중·크레인. 궤적재생=위치 프리뷰(동적 walk 아님)·auto kp2/kd3', tag='swing_stat',
+                 color=(180, 200, 220))
+    dpg.add_text('⚠스윙 M 자극: deploy 를 JOG_SPEED_DPS=<X>(예 80,[5,150])로 재실행 후 peak≤X. calf 관절 peak≤120.',
+                 color=(200, 150, 120))
+    dpg.add_text('   결과: 궤적→exp_logs/(biped_model_resid) · 스윙→swing_logs/(biped_swing_mc_fit)',
+                 color=(150, 160, 180))
+    # ── ★접지 실험 (GRF 필요·크레인 안전) — 기록실험 ─────────────────────
+    dpg.add_separator()
+    dpg.add_text('■ 접지 실험 (GRF 필요·크레인 안전) — exp_logs/ 기록', color=(170, 205, 150))
+    # ── ★2026-09-18 주석처리: stand(2점정적) — 2점 평발 모드 폐기(버튼만 숨김·set_mode('stand') 기능은 살아있음).
+    #   ★2026-09-21: 점발(1점) 정적 stand 은 아래 'stand(정적)' 버튼 = exp_run('stand')(contact='1pt') 로 잡는다.
+    # with dpg.group(horizontal=True):
+    #     dpg.add_text('stand(2점정적) ')
+    #     dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
+    #     dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
+    #     dpg.add_text('⚠접지·GRF 필요 (매달림 금지)', color=(210, 150, 90))
+    with dpg.group(horizontal=True):
+        dpg.add_text('squat        ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('squat'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('squat'))
+        dpg.add_text('무-WBIC 토크스쿼트(스쿼트궤적 재생·PD+중력FF·밸런스QP 없음) · 좌우는 사람/가이드로 고정 · 접지·크레인', color=(210, 150, 90))
+    with dpg.group(horizontal=True):     # ★2026-09-21 점발 정적 WBIC stand (squat 밑)
+        dpg.add_text('stand(정적)   ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
+        dpg.add_text('점발(1점) 정적 WBIC stand — 시상균형=WBIC·좌우=가이드·크레인 · ⚠토크모드(하드웨어 수리 후)', color=(215, 130, 90))
+    with dpg.group(horizontal=True):     # ★2026-09-22 평발(2점 heel+toe) WBIC 검증
+        dpg.add_text('stand(평발)   ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand_flat'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand_flat'))
+        dpg.add_text('평발(2점 heel+toe) 정적 WBIC stand — 발목 지지면 有(whip 없음)·WBIC 균형 검증 · ★MJCF=flat 로 기동 · 접지·크레인', color=(150, 200, 150))
+    with dpg.group(horizontal=True):
+        dpg.add_text('walk(동적)     ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('walk'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('walk'))
+        dpg.add_text('⚠수리·M·C검증 전 금지 · 접지·GRF', color=(215, 110, 100))
+    dpg.add_text('실험 대기', tag='exp_stat', color=(150, 200, 150))
+    dpg.add_separator()
     dpg.add_text('⚠매달린 채로 stand/보행을 켜지 말 것 — GRF 를 전제한 QP 라 해가 안 나오고 '
                  '중력보상 폴백으로 떨어진다(겉보기엔 안정돼 보인다). 매달려서 되는 건 off/jog/home 뿐.',
                  color=(210, 150, 90))
@@ -1053,35 +1713,7 @@ with dpg.window(tag='main'):
     dpg.add_text('(영점세팅 제거 — 하드웨어영점 ZeroSet_RobotEmbedded 사용. 위 표는 config↔제어기 영점 대조 진단용)',
                  color=(120, 130, 150))
     dpg.add_separator()
-    # ── ★각축(JOG) 패널: 8관절 슬라이더(모터 1:1) + 실측 + 통신 상태 LED ──
-    dpg.add_text('● 각축 JOG 검증 (슬라이더=목표각° · 실측° · ●=상태LED)', color=(255, 205, 120))
-    with dpg.group(horizontal=True):
-        # ★라벨에서 'home' 을 뺐다 — 위 [Home 복귀] 버튼과 전혀 다른 동작이다.
-        #   이건 JOG 슬라이더를 0 으로 놓는 것(등속 램프, 축마다 도착시각 제각각)이고,
-        #   [Home 복귀] 는 home 모드의 S-curve 동시도착 궤적이다.
-        dpg.add_button(label='슬라이더 모두 0', width=130, callback=jog_zero)
-        dpg.add_text('LED 초록=정상·노랑=에러·빨강=두절(배선O)·어두움=미장착 · 실기(app/biped_emb.py)서 각 모터 확인',
-                     color=(120, 130, 150))
-    _LED_R = 7
-    for i, nm in enumerate(JOG_NAMES):
-        with dpg.group(horizontal=True):
-            with dpg.drawlist(width=2 * _LED_R + 6, height=2 * _LED_R + 6, tag=f'leddl_{i}'):
-                dpg.draw_circle([_LED_R + 3, _LED_R + 3], _LED_R, fill=(70, 70, 78),
-                                color=(30, 30, 36), tag=f'led_{i}')
-            dpg.add_text(f'{nm:9s}', color=(190, 195, 210))
-            # ★슬라이더 양끝에 jog 한계를 숫자로 박아 둔다. 이 한계는 축마다 다르고
-            #   (config 의 jog_min_deg/jog_max_deg 예외), 관절한계와도 다르다 —
-            #   화면에 안 쓰여 있으면 "왜 여기서 안 넘어가지" 를 매번 config 를 열어 확인해야 한다.
-            dpg.add_text(f'{JOG_LIM[i][0]:>6.1f}', color=(120, 130, 150))
-            dpg.add_slider_float(tag=f'jog_{i}', default_value=0.0,
-                                 min_value=JOG_LIM[i][0], max_value=JOG_LIM[i][1],
-                                 width=240, format='%.1f', user_data=i,
-                                 callback=lambda s, v, u: on_jog(s, v, u))
-            dpg.add_text(f'{JOG_LIM[i][1]:<6.1f}', color=(120, 130, 150))
-            dpg.add_text('--.-', tag=f'meas_{i}', color=(150, 220, 150))
-    dpg.add_separator()
     dpg.add_text('-', tag='state', color=(150, 220, 150))
-    dpg.add_text('-', tag='sysload', color=(150, 220, 150))   # ★CPU·온도(500Hz 루프가 여기 물려 있다)
 
 with dpg.handler_registry():
     dpg.add_mouse_down_handler(callback=lambda: (left.press(), right.press()))
@@ -1090,9 +1722,11 @@ with dpg.handler_registry():
     dpg.add_mouse_click_handler(button=dpg.mvMouseButton_Right, callback=lambda: (left.toggle_latch(), right.toggle_latch()))
 
 # ★드라이버 알람 로그창 — 'main' **밖**에 만든다(안에 넣으면 자식 위젯이 돼 창이 안 뜬다).
-#   상시 표시. 모드/모터 LED 는 '지금'만 보여줘 순간 폴트를 놓치므로, 여기 시각별로 남긴다.
+#   모드/모터 LED 는 '지금'만 보여줘 순간 폴트를 놓치므로, 여기 시각별로 남긴다.
+#   ★2026-09-16 기본 숨김(show=False) — 메인창 상단 '로그창' 체크박스로 연다. 감시 자체는
+#     숨겨도 계속 돈다(_check_driver_alarms 는 창 표시와 무관하게 버퍼에 계속 쌓는다).
 with dpg.window(label='드라이버 알람 로그', tag='calib_win',
-                width=660, height=330, pos=(30, 430), show=True):
+                width=660, height=330, pos=(30, 430), show=False):
     with dpg.group(horizontal=True):
         dpg.add_text('드라이버 에러·두절·estop·모터OFF 를 시각별 기록 (state err=ucStatus 기반)',
                      color=(150, 155, 175))
@@ -1105,8 +1739,10 @@ with dpg.window(label='드라이버 알람 로그', tag='calib_win',
 dpg.bind_theme(_dark)
 if _kf is not None:
     dpg.bind_font(_kf)
-dpg.create_viewport(title='biped teleop', width=700, height=800)
+dpg.create_viewport(title='biped teleop', width=1400, height=900)
 dpg.setup_dearpygui(); dpg.show_viewport(); dpg.set_primary_window('main', True)
+try: dpg.maximize_viewport()          # ★기동 시 전체화면(최대화)
+except Exception: pass
 set_kp_scale(1.0)      # ★강성 버튼 초기 선택 표시(×1). Pub 기본값과 반드시 일치시킬 것.
 set_push_leg(0)        # ★발밀기 다리 초기 선택 표시(HL)
 
@@ -1124,11 +1760,33 @@ while dpg.is_dearpygui_running():
         except Exception: pass
         _off_live[0] = st.get('offset_deg')      # ★제어기가 **기동 시 읽은** 영점
         _refresh_mode_led(st)                    # ★모드/힘 LED — 실제 상태 기준
+        try:                                     # ★IMU 추정 몸통자세(RPY)·tilt·위치 표시 (2026-09-22)
+            _rpy = st.get('rpy_deg') or [0.0, 0.0, 0.0]
+            _rpy = [float(_rpy[k]) if k < len(_rpy) else 0.0 for k in range(3)]
+            _gy = st.get('gyro_dps') or [0.0, 0.0, 0.0]
+            _gy = [float(_gy[k]) if k < len(_gy) else 0.0 for k in range(3)]
+            dpg.set_value('imu_state', 'IMU 몸통  roll %+5.1f°  pitch %+5.1f°  yaw %+6.1f°    tilt %4.1f°    gyro[%+6.1f %+6.1f %+6.1f]°/s    추정 x%+.3f z%+.3f m'
+                          % (_rpy[0], _rpy[1], _rpy[2], float(st.get('tilt_deg', 0.0)), _gy[0], _gy[1], _gy[2], float(st.get('est_x', 0.0)), float(st.get('est_z', 0.0))))
+        except Exception: pass
         if 'health' in st or 'q_leg_deg' in st:          # ── emb(app/biped_emb) 상태: LED+실측 ──
             q = st.get('q_leg_deg', [0.0] * NJ)
             health = st.get('health', ['dead'] * NJ)
             for i in range(min(NJ, len(q))):
                 dpg.set_value(f'meas_{i}', f'{q[i]:+6.1f}')
+            cur = st.get('cur_a') or []                 # ★실측 전류(fCurrent) → 실측 토크 = SIGN·cur·KT·GEAR/SCALE
+            for i in range(min(NJ, len(cur))):
+                try:
+                    _tr = _TAU_SIGN[i]*float(cur[i])*_TAU_KT*_TAU_GEAR[i]/_TAU_SCALE
+                    _tau_ema[i] = _tr if _tau_ema[i] is None else (_TAU_EMA_A*_tr + (1-_TAU_EMA_A)*_tau_ema[i])
+                    dpg.set_value(f'tau_{i}', f'{_tau_ema[i]:+6.2f} Nm')
+                except Exception: pass
+            tcmd = st.get('tau_leg_nm') or []           # ★명령 토크(fTorque 에코=kp·err+kd·derr+τ_ff 전체) — cmd vs 실측(cur_a). tau_cmd_nm 은 FF만이라 hold 서 오해
+            for i in range(min(NJ, len(tcmd))):
+                try:
+                    _tc = float(tcmd[i])
+                    _taucmd_ema[i] = _tc if _taucmd_ema[i] is None else (_TAU_EMA_A*_tc + (1-_TAU_EMA_A)*_taucmd_ema[i])
+                    dpg.set_value(f'taucmd_{i}', f'cmd{_taucmd_ema[i]:+6.2f}')
+                except Exception: pass
             for i in range(min(NJ, len(health))):
                 dpg.configure_item(f'led_{i}', fill=_LED.get(health[i], (70, 70, 78)))
             # ★분모는 **실장축 수**. 미장착을 분모에 넣으면 정상인데도 "8중 2" 로 보인다.

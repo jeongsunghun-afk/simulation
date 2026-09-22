@@ -53,6 +53,7 @@ struct WbicIn {
   std::vector<int> ankle_idx;     // 발목 관절
   // 게인
   double SW_KP, SW_KD, W_ORI, W_ANKLE, W_POST, W_LAM, STANCE_KD, MU_EFF, LAMZ_MIN;
+  double ANK_KP=60, ANK_KD=5;     // ★점발 발목 posture PD (2026-09-21 whip 튜닝). 기본=종전 60/5(ζ0.32). 파리티/미설정 콜러는 이 기본값.
 };
 
 inline VectorXd wbic_track(const WbicIn& in){
@@ -111,8 +112,10 @@ inline VectorXd wbic_track(const WbicIn& in){
   // posture
   auto is_ankle=[&](int j){ for(int a:in.ankle_idx) if(a==j) return true; return false; };
   auto is_sw=[&](int vi){ for(int v:sw_vidx) if(v==vi) return true; return false; };
-  for(int j=0;j<nu;j++){ double a=60*(in.Qhome[j]-in.q[j])-5*in.qv[6+j];
-    double w = is_ankle(j)?in.W_ANKLE : (is_sw(6+j)?5.0:in.W_POST);
+  for(int j=0;j<nu;j++){ bool ank=is_ankle(j);
+    double kp_p=ank?in.ANK_KP:60.0, kd_p=ank?in.ANK_KD:5.0;   // ★발목만 튜닝(env)·나머지=종전 60/5
+    double a=kp_p*(in.Qhome[j]-in.q[j])-kd_p*in.qv[6+j];
+    double w = ank?in.W_ANKLE : (is_sw(6+j)?5.0:in.W_POST);
     P(6+j,6+j)+=w; g[6+j]-=w*a; }
   P.topLeftCorner(nv,nv)+=1e-3*MatrixXd::Identity(nv,nv);
   // MPC GRF 추종

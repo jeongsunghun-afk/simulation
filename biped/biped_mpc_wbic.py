@@ -18,6 +18,11 @@ Q_DIAG = np.array([200,200,100, 0,0,200, 0,0,1, 10,10,1, 0.0])   # TROT_Q
 R_DIAG = np.array([1e-6, 1e-6, 1e-6])
 W_LAM  = 10.0          # WBIC의 MPC GRF 추종 가중(mature 동일)
 MPC_DECIM = int(round(MPC_DT / 0.002))   # 10 (500Hz sim, 50Hz MPC)
+# ★점발 발목(ankle) posture 튜닝 노브 (2026-09-21). 기본값=종전 하드코딩값 보존(60/5/W_ANKLE).
+#   whip 원인 = kd 5·kp 60 → ζ=0.32 저감쇠. env 로 스윕해 임계감쇠(ζ≈1: kd≈2√kp) 찾는다.
+ANK_KP = float(os.environ.get('ANK_KP', 60.0))
+ANK_KD = float(os.environ.get('ANK_KD', 5.0))
+ANK_W  = float(os.environ.get('ANK_W',  20.0))   # = W_ANKLE 기본
 
 
 def euler_to_R(r, p, y):
@@ -210,8 +215,11 @@ class BipedMPCWBIC(BS.BipedStep):
         zref = self.com_ref[2]; a_z = 300*(zref - d.subtree_com[0][2]) - 30*(Jc @ qv)[2]
         P[:nv,:nv]+=400.0*np.outer(Jc[2],Jc[2]); g[:nv]-=400.0*a_z*Jc[2]   # ★단일지지 sink 억제(150→400·200→300)
         for j in range(nu):
-            a = 60*(self.q_home[j]-d.qpos[7+j]) - 5*qv[6+j]
-            w = W_ANKLE if j in ANKLE_IDX else (5.0 if (6+j) in sw_vidx else W_POST)
+            is_ank = j in ANKLE_IDX
+            kp_p = ANK_KP if is_ank else 60.0        # ★발목만 튜닝 노브(env). 나머지=종전 60/5
+            kd_p = ANK_KD if is_ank else 5.0
+            a = kp_p*(self.q_home[j]-d.qpos[7+j]) - kd_p*qv[6+j]
+            w = ANK_W if is_ank else (5.0 if (6+j) in sw_vidx else W_POST)
             P[6+j,6+j]+=w; g[6+j]-=w*a
         P[:nv,:nv]+=1e-3*np.eye(nv)
         for k in range(Kc):                        # ★MPC GRF 추종 (발 GRF를 접촉점 수로 분배)
