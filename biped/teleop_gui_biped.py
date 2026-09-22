@@ -1315,6 +1315,11 @@ def exp_run(name):
         pub.set(contact='1pt', body_h=H_DEF_1PT, mode='stand', v=0.0, vy=0.0, w=0.0)
         dpg.set_value('h_sl', H_DEF_1PT)
         dpg.set_value('spd_sl', 0); dpg.set_value('vy_sl', 0); dpg.set_value('turn_sl', 0)
+    elif name == 'stand_flat':
+        # ★2026-09-22 평발(2점 heel+toe) 정적 WBIC stand — WBIC 균형 검증용.
+        #   set_mode('stand') 이 contact='2pt'·body_h=H_DEF_2PT·mode='stand' 로 전환(Qflat8 밑창수평).
+        #   점발 발목 whip 이 없어(발목 지지면 有) "WBIC QP/균형 자체가 되는가"를 깨끗이 본다. MJCF=flat 로 기동할 것.
+        set_mode('stand')
     elif name == 'squat': walk_start('스쿼트(1점)', 1.0, True)      # ★2026-09-18 무-WBIC 토크스쿼트: 스쿼트궤적(biped_ref_squat.npz) 재생(jog·PD+중력FF·밸런스QP 없음). set_mode('stand')+wsq 제거(WBIC 발산·freeze 회피·좌우는 사람/가이드로 고정). wsq_* 함수는 유지.
     elif name == 'walk':  set_mode('walk')
 
@@ -1576,6 +1581,11 @@ with dpg.window(tag='main'):
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand'))
         dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand'))
         dpg.add_text('점발(1점) 정적 WBIC stand — 시상균형=WBIC·좌우=가이드·크레인 · ⚠토크모드(하드웨어 수리 후)', color=(215, 130, 90))
+    with dpg.group(horizontal=True):     # ★2026-09-22 평발(2점 heel+toe) WBIC 검증
+        dpg.add_text('stand(평발)   ')
+        dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('stand_flat'))
+        dpg.add_button(label='■안전종료', width=80, callback=lambda: exp_stop('stand_flat'))
+        dpg.add_text('평발(2점 heel+toe) 정적 WBIC stand — 발목 지지면 有(whip 없음)·WBIC 균형 검증 · ★MJCF=flat 로 기동 · 접지·크레인', color=(150, 200, 150))
     with dpg.group(horizontal=True):
         dpg.add_text('walk(동적)     ')
         dpg.add_button(label='▶실행', width=60, callback=lambda: exp_run('walk'))

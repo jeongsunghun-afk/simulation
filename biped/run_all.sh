@@ -16,7 +16,7 @@ export QUAD_CMD="${QUAD_CMD:-/dev/shm/biped_cmd.json}"
 export QUAD_STATE="${QUAD_STATE:-/dev/shm/biped_state.json}"
 # ── 실험 토글 (기본값) ──
 export AUX_MODE="${AUX_MODE:-1}"      # 2차엔코더 로깅(매달림). 떨림/0x5A 의심 시 AUX_MODE=0 으로.
-MJCF="${MJCF:-point}"                 # ★기본 point=1점점발(payload 16.25kg) · flat=2점평발 (MJCF=flat 로 오버라이드)
+MJCF="${MJCF:-flat}"                  # ★2026-09-22 기본 flat=2점평발(heel+toe·WBIC 검증). walk 갈땐 MJCF=point (1점점발 payload 16.25kg)
 # JOG_SPEED_DPS 는 **설정된 경우에만** deploy 로 넘어감(스윙 고대역 전용, [5,150]). 평시 미설정.
 
 _emb_up(){ pgrep -x RobotEmbedded >/dev/null 2>&1 || pgrep -f "app/biped_emb" >/dev/null 2>&1; }
@@ -27,6 +27,10 @@ start_emb(){
   if _emb_up; then echo "① Emb 이미 기동됨 — 재사용(중복 안 함)"; return 0; fi
   echo "① Emb 기동… (halGait 초기화 ≈5s)"
   ( cd "$HERE/emb" && diag/emb_ctl.sh start ) || { echo "✗ Emb 기동 실패 — tail /tmp/emb.log"; return 1; }
+  # ★2026-09-22 CPU 격리 — Emb(단일스레드 90% CPU)를 코어 0,1 에 고정. deploy RT(코어 2,3)와 분리해
+  #   제어루프 스톨(피드백 지터·SHM 대기)을 막는다. 자기 프로세스 affinity 축소라 sudo 불필요.
+  local _e; _e="$(pgrep -x RobotEmbedded | head -1)"
+  [ -n "$_e" ] && taskset -cp 0,1 "$_e" >/dev/null 2>&1 && echo "   Emb(pid $_e) → 코어 0,1 고정(루프 스톨 완화)"
 }
 start_deploy(){
   _emb_up || echo "⚠ Emb 안 떠 있음 — 먼저 ./run_all.sh emb (deploy 는 Emb SHM 을 읽는다)"

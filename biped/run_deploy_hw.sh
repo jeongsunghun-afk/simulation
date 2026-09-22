@@ -149,4 +149,6 @@ fi
 pkill -f "run_hw.sh __pub" 2>/dev/null; sleep 0.2
 echo '{"mode":"off","jog_deg":[0,0,0,0,0,0,0,0],"v":0,"vy":0,"w":0,"body_h":0.42}' > "${QUAD_CMD:-/tmp/biped_cmd.json}"
 cd "$HERE/cpp"
-exec ./build/biped_deploy --mjcf "$MJCF" --start-mode off
+# ★2026-09-22 deploy RT 루프를 코어 2,3 에 고정 — Emb(코어 0,1)와 분리해 루프 스톨 방지.
+#   taskset 이 biped_deploy 를 exec 하므로 파일 capability(cap_sys_nice=RT)는 그대로 적용된다.
+exec taskset -c 2,3 ./build/biped_deploy --mjcf "$MJCF" --start-mode off
