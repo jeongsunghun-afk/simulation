@@ -592,6 +592,10 @@ int main(int argc, char** argv){
                 getenv("TRK_KP")?atof(getenv("TRK_KP")):1.0, getenv("TRK_KD")?atof(getenv("TRK_KD")):1.0,
                 (wm && atoi(wm)==2) ? "" : "  ⚠WBIC_MIT=2 가 아니면 계획목표가 없어 추종 비활성(종전 동작)");
   }
+  if(getenv("IMU_PITCH_OFS_DEG") && atof(getenv("IMU_PITCH_OFS_DEG")) != 0)
+    std::printf("[deploy] ★IMU_PITCH_OFS_DEG=%+.2f — 제어기 pitch 에서 이만큼 뺀다(IMU↔기구학 불일치 보정)\n", atof(getenv("IMU_PITCH_OFS_DEG")));
+  if(getenv("WALK_FF_LPF_HZ") && atof(getenv("WALK_FF_LPF_HZ")) > 0)
+    std::printf("[deploy] ★WALK_FF_LPF_HZ=%.1f — walk WBIC FF 저역통과(점발 FF 널뛰기 억제)\n", atof(getenv("WALK_FF_LPF_HZ")));
   std::printf("[deploy] walk 한정: 트립 %.0fdps/%.1fNm · kd×%.2f (타 모드 %.0fdps/%.1fNm·kd 유지)\n",
               WALK_VEL_TRIP, WALK_TAU_TRIP, WALK_KD_FLOOR, cfg.vel_trip_dps, cfg.tau_trip_nm);
   const double FLOAT_KD = getenv("FLOAT_KD") ? atof(getenv("FLOAT_KD")) : 0.30;
@@ -793,6 +797,7 @@ int main(int argc, char** argv){
     for(int i=0;i<NCH;i++) fprintf(f,",q%d,dq%d,tau%d,cmd%d,kp%d,kd%d",i,i,i,i,i,i);
     if(TRACE_KEEP){ for(int i=0;i<NCH;i++) fprintf(f,",tff%d",i);
       for(int i=0;i<NCH;i++) fprintf(f,",vcmd%d",i);   // ★2026-09-30 WALK_TRACK q̇_des(채널 dps, 그 외 0)
+      for(int i=0;i<NCH;i++) fprintf(f,",stt%d",i);    // ★2026-09-30 모터 상태바이트(MD80 ERROR VECTOR 하위 8bit) — 드라이버 fault 순간 특정용
       for(int i=0;i<8;i++) fprintf(f,",auxp%d",i); for(int i=0;i<8;i++) fprintf(f,",auxv%d",i);
       fprintf(f,",gyr0,gyr1,gyr2,rpy0,rpy1,rpy2,acc0,acc1,acc2"); }   // acc=몸통 선가속(중력제거) — 수직 튐 판별
     fprintf(f,"\n"); };
@@ -908,6 +913,14 @@ int main(int argc, char** argv){
     const auto& fl = cfg.imu_euler_flip;
     const double f0=(fl.size()>=3?fl[0]:1.0), f1=(fl.size()>=3?fl[1]:-1.0), f2=(fl.size()>=3?fl[2]:-1.0);
     double rpy[3] = { hs.rpy[0]*f0*u, hs.rpy[1]*f1*u, hs.rpy[2]*f2*u };
+    // ★2026-09-30 IMU_PITCH_OFS_DEG — 제어기 pitch(모델 좌표, +=앞숙임)에서 뺄 오프셋(기본 0 = 끔).
+    //   2점 평발 정지 stand 에서 IMU pitch 가 관절 기구학(발바닥 평평)으로 계산한 몸통 pitch 보다
+    //   +12.7° 크게 나왔다(09-30 4런 12.7~13.2°·09-29 13.7° 일관, 09-22 최선 런은 +2°).
+    //   sim: 이 크기 오프셋이면 점발 제자리 walk 가 무너진다(±12.7° → 15s 에 3~11회 낙상, 6° → 0.5~0.7m 흐름).
+    //   ⚠원인(IMU 장착/장치 vs 관절 영점)은 수평계 실측으로 확정한 뒤에 켤 것. tilt E-stop·표시에도 같이 적용된다.
+    //   원복: 미지정. 백업 biped_deploy.cpp.bak_imupofs_<시각>.
+    { static const double POFS = getenv("IMU_PITCH_OFS_DEG") ? atof(getenv("IMU_PITCH_OFS_DEG")) : 0.0;
+      rpy[1] -= POFS*M_PI/180.0; }
     double gyro[3]= { hs.gyr[0]*u, hs.gyr[1]*u, hs.gyr[2]*u };
     // ★2026-09-22 IMU 상보필터 — IMU 자체융합(hs.rpy)이 tilt 를 늦게 따라와서,
     //   base 정렬 gyro(즉각·879행)로 예측 + IMU rpy 로 드리프트 보정. 표시·tilt E-stop 즉각반응.
@@ -2316,6 +2329,19 @@ int main(int argc, char** argv){
       const double kp_scale = (1.0-bs) + bs*kpf;      // 블렌드 끝에서 kpf 로 수렴
       jm.kp_ch(kp_ch.data(), kp_scale); jm.kd_ch(kd_ch.data(), kd_scale);
       for(int i=0;i<NCH;i++) tau_ch[i] = (float)(bs*(double)tau_ch[i]);
+      // ★2026-09-30 WALK_FF_LPF_HZ — walk 의 WBIC FF 토크 1차 저역통과 (기본 0 = 끔 = 종전 동작).
+      //   실기 점발 T3(arm_trace_walk_171004): FF 가 전 축에서 ±50Nm 를 초당 40~50회 부호반전
+      //   (약 20~25Hz 널뛰기) → hip roll 29Hz 발진 · 6.5s 에 EtherCAT 링크 단절.
+      //   sim(지연 8ms · 발 3cm · 시드 3): 15Hz = 0낙상 · 20Hz↑ 성분 −54% · 부호반전 28.7→13.1/s,
+      //   10Hz = 0낙상 · −68%. walk 진입 순간 필터 상태를 현재 FF 로 맞춰 계단이 없다.
+      //   원복: WALK_FF_LPF_HZ 미지정. 백업 biped_deploy.cpp.bak_fflpf_<시각>.
+      { static const double WALK_FF_LPF = env_gd("WALK_FF_LPF_HZ", 0.0, 0.0, 100.0);
+        static std::vector<float> fflp(NCH, 0.f); static bool fflp_on = false;
+        if(mode=="walk" && WALK_FF_LPF > 0.0){
+          const double al = 1.0 - std::exp(-2.0*M_PI*WALK_FF_LPF*dt);
+          if(!fflp_on){ for(int i=0;i<NCH;i++) fflp[i] = tau_ch[i]; fflp_on = true; }
+          for(int i=0;i<NCH;i++){ fflp[i] += (float)(al*(double)(tau_ch[i]-fflp[i])); tau_ch[i] = fflp[i]; }
+        } else fflp_on = false; }
       // 목표: 측정각 → 기하 자세로 블렌드와 **같은 계수**로 이동. bs=1 이면 순수 Qflat8.
       //   ⚠지금은 bs=1 에서 kp=0 이라 이 목표가 무영향이다. 그래도 측정각을 흘려보내지
       //     않는다 — STAND_KP_FLOOR 를 켜는 순간 **의미 있는 목표가 이미 들어가 있어야** 한다.
@@ -2389,6 +2415,7 @@ int main(int argc, char** argv){
                   (double)qcmd_ch[i], (double)kpcmd_ch[i], (double)kdcmd_ch[i]);
         if(TRACE_KEEP) for(int i=0;i<NCH;i++) fprintf(trc,",%.3f",(double)tau_ff_out[i]);
         if(TRACE_KEEP) for(int i=0;i<NCH;i++) fprintf(trc,",%.1f",(mode=="walk"||mode=="stand")?(double)vcmd_ch[i]:0.0);
+        if(TRACE_KEEP) for(int i=0;i<NCH;i++) fprintf(trc,",%d",(i<(int)hs.status.size())?(int)(hs.status[i]&0xff):-1);
         if(TRACE_KEEP){ float ap[16]={0}, av[16]={0}; hw->aux(ap,av);   // 출력축(감속기 뒤·벨트 앞) — 캐시 복사라 가벼움
           for(int i=0;i<8;i++) fprintf(trc,",%.3f",(double)ap[i]); for(int i=0;i<8;i++) fprintf(trc,",%.2f",(double)av[i]);
           fprintf(trc,",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f",(double)hs.gyr[0],(double)hs.gyr[1],(double)hs.gyr[2],

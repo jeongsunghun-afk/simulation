@@ -65,6 +65,7 @@ MJCF="$HERE/biped_from_quad.mjcf"                  # 1점 점발
 [ "${1:-}" = "point" ] && MJCF="$HERE/biped_pointfoot_payload.mjcf"  # 1점 점발 + 실물 payload(16.25kg)
 [ -f "${1:-}" ] && MJCF="$(realpath "$1")"         # ★임의 MJCF 경로 (무게추 변형 등)
                                                    #   절대경로화 필수 — 아래에서 cpp/ 로 cd 한다
+case "$MJCF" in *flatfoot*) IS_FLAT=1 ;; *) IS_FLAT=0 ;; esac   # ★2026-09-30 모드별 기본값 분기
 
 # ── ①float(무중력) 축별 중력배율 — 측정된 중립점 g* 그대로 ──────────────────
 #   이 값이면 무중력에서 전 축이 중립이다(뜨지도 지지도 않음). GUI 배율은 이 위에
@@ -93,7 +94,8 @@ export STAND_TAU_SCALE_JOINT="${STAND_TAU_SCALE_JOINT:-1.20,1.10,1.22,1.30,1.18,
 # ★★2026-09-22 승리 조합 기본값 — 웅크림 Qflat8(CoM z0.34) 자립(6주 forward-tip 해결). env 로 덮어쓰기 가능.
 export WBIC_SOFT_CONTACT="${WBIC_SOFT_CONTACT:-1}"      # 2점 평발 QP rank결손(code4) 해결
 export FLAT_WLEG="${FLAT_WLEG:-25}"                     # thigh/calf posture pin (25=stand Δq<1°)
-export STAND_WANKLE="${STAND_WANKLE:-200}"             # 발목 posture pin (발 drift 억제)
+# ★2026-09-30 발목 posture 가중은 모드별: 평발 200(발 drift 억제) · 점발 20(200 이 점발로 새면 발목이 굳어 낙상 — sim)
+if [ "$IS_FLAT" = "1" ]; then export STAND_WANKLE="${STAND_WANKLE:-200}"; else export STAND_WANKLE="${STAND_WANKLE:-20}"; fi
 export STAND_RUNAWAY_DEG="${STAND_RUNAWAY_DEG:-25}"    # 양성 처짐이 기본12°를 넘어 헛트립하던 것 완화
 export STAND_KP_FLOOR="${STAND_KP_FLOOR:-0.8}"        # 2026-09-22 stand 떨림 완화 - 위치서보 감쇠 0.30->0.6 (WBIC 목표=Qflat8 라 안싸움). 더 매끈=이값 up(최대 1.0) 또는 GUI kp 슬라이더 up
 # ★2026-09-18 hold FF 클램프 해제 — HL_thigh/HL_calf 가 기본 14Nm 에 포화해 왼다리 지지토크
@@ -111,6 +113,32 @@ export WALK_VEL_TRIP_DPS="${WALK_VEL_TRIP_DPS:-900}"
 #   허용 토크도 같이 오른다. 원복: WALK_TAU_TRIP_NM=25 (C++ 기본값은 여전히 25).
 export WALK_TAU_TRIP_NM="${WALK_TAU_TRIP_NM:-50}"
 export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
+
+# ── ③-b ★★2026-09-30 기본값 확정 (실기 결과 · env 로 덮어쓰기 가능 · 10-01 시험 후 재검토) ─────
+#   ◆2점 평발 stand (T1 5회 + RobotEmbeddedNew, biped/hw_traces/arm_trace_stand_16*)
+#     STANCE_KD=0     접촉 발속도 감쇠 K_D 폐기 — 7Hz 떨림 주경로(발목 80→12°/s). 관절속도는 그대로 씀.
+#     FRIC_COMP=0     마찰보상(음의 감쇠) 끔 — 잔여 7Hz 12→3°/s. NEW Emb 에서 60~80s 자립 확인
+#                     (deploy 의 "~20s 에 넘어진다" 경고는 IMU 1.8s 지연 시절 기록).
+#     STAND_BLEND_S=5 진입 35Hz 버스트 5→2s(T1-e). STAND_KD_FLOOR 는 1.0 유지(1.3 은 최고치만 −35%·총량 같음).
+#   ◆1점 점발 walk (09-30 T2~T3 계열 5회, arm_trace_walk_17*)
+#     WBIC_MIT=2 STANCE_KD=0      하이브리드(가중QP+J̇q̇, K_D 없음) + KinWBC 계획 q_des·q̇_des
+#     WALK_TRACK=1 TRK_KP/KD=1.0  드라이버 추종 — 기준선(kd 15%)은 hip roll 25~28Hz 발산
+#     WALK_FF_LPF_HZ=10           WBIC FF 널뛰기 억제: 부호반전 42.7→7.6/s · 실측↔명령 상관 0.01→0.6~0.7
+#     FLAT_STEPH=0.03             발 드는 높이 6→3cm(관절속도 −26%, sim 0낙상)
+#     STAND_BLEND_S=5             walk 진입 토크 인수 5s
+#     IMU_PITCH_OFS_DEG=12.7      IMU pitch ↔ 관절기구학 +12.7° 불일치 보정(적용 시 제자리 유지 4~5s·전엔 앞으로 달림).
+#                                 ⚠수평계 확인 전 · 평발 stand 에는 아직 미적용(미시험)
+#     ⚠MD80 속도한계 10 rad/s(=채널 573°/s)에 calf/foot 가 걸려 fault(0xC0) — RGA 10-01 상향 후 walk.
+if [ "$IS_FLAT" = "1" ]; then
+    export STANCE_KD="${STANCE_KD:-0}"; export FRIC_COMP="${FRIC_COMP:-0}"; export STAND_BLEND_S="${STAND_BLEND_S:-5}"
+    DEF_MSG="2점 평발 stand: STANCE_KD=$STANCE_KD FRIC_COMP=$FRIC_COMP STAND_BLEND_S=$STAND_BLEND_S"
+else
+    export WBIC_MIT="${WBIC_MIT:-2}"; export STANCE_KD="${STANCE_KD:-0}"
+    export WALK_TRACK="${WALK_TRACK:-1}"; export TRK_KP="${TRK_KP:-1.0}"; export TRK_KD="${TRK_KD:-1.0}"
+    export WALK_FF_LPF_HZ="${WALK_FF_LPF_HZ:-10}"; export FLAT_STEPH="${FLAT_STEPH:-0.03}"
+    export STAND_BLEND_S="${STAND_BLEND_S:-5}"; export IMU_PITCH_OFS_DEG="${IMU_PITCH_OFS_DEG:-12.7}"
+    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG"
+fi
 
 # ── ④hold 중력지지 — 자립 확정 설정 (2026-09-03 실기: 크레인 프리 25s+) ──────
 #   적용점 toe: 뒤꿈치는 발목축 위라 발목토크 기여 0 — 발끝 전량이 발목 FF ≈2배.
@@ -146,6 +174,7 @@ echo "[run_deploy_hw] MJCF=$MJCF"
 echo "[run_deploy_hw] GRAV_SCALE_JOINT=$GRAV_SCALE_JOINT"
 echo "[run_deploy_hw] STAND_TAU_SCALE_JOINT=$STAND_TAU_SCALE_JOINT"
 echo "[run_deploy_hw] 자립 기본값: SOFT_CONTACT=$WBIC_SOFT_CONTACT FLAT_WLEG=$FLAT_WLEG STAND_WANKLE=$STAND_WANKLE RUNAWAY=$STAND_RUNAWAY_DEG (웅크림 Qflat8)"
+echo "[run_deploy_hw] ★09-30 확정 기본값 — $DEF_MSG"
 echo "[run_deploy_hw] ⚠walk 는 왼무릎 벨트 수리 전 금지 — 헤더 주석 참조"
 # ★중복 writer 방지 (2026-09-04) — 모터 명령 writer 는 하나여야 한다. 기존 deploy 를 죽인다.
 #   (run_hw.sh up + 수동 run_deploy_hw.sh 처럼 두 번 뜨면 둘이 SHM 을 다퉈 반응이 이상해진다.)
