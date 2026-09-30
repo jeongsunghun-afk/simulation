@@ -5,6 +5,7 @@
 #include <mujoco/mujoco.h>
 #include "biped_mpc.hpp"
 #include "biped_wbic.hpp"
+#include "biped_wbic_mit.hpp"   // [scratch] MIT Mini Cheetah 구성(KinWBC+WBIC, K_D 없음) — WBIC_MIT=1
 #include "biped_zmp.hpp"
 #include <Eigen/Dense>
 #include <cmath>
@@ -268,6 +269,7 @@ struct BipedControl {
     if(getenv("FLAT_WORI")) FLAT_WORI=atof(getenv("FLAT_WORI"));
     if(getenv("FLAT_WLEG")) FLAT_WLEG=atof(getenv("FLAT_WLEG"));   // ★2026-09-22 thigh/calf posture 가중(기본 0.05=약함). 정적 stand 에서 다리가 드룹하면 ↑(예 2~10)해서 다리를 자세로 붙잡는다. 정적이라 CoM 높이조절 약해져도 무관.
     if(getenv("STAND_WANKLE")) W_ANKLE=atof(getenv("STAND_WANKLE"));   // ★2026-09-22 발목(foot) posture 가중(기본 20). 정적 stand 에서 발이 드리프트(HR_foot 30°)하면 ↑(예 100~300)해서 발목을 자세로 pin. FLAT_WLEG 의 발목판.
+    if(getenv("STANCE_KD")) STANCE_KD=atof(getenv("STANCE_KD"));   // [scratch] 접지 발속도 감쇠(기본 20)
     if(getenv("T_TRANS")) T_TRANS=atof(getenv("T_TRANS"));
     // ★발디딤 게인 env — leg-odom 야코비안 편향(구중심 vs 접촉점)을 제거하면
     //   K_RETURN 이 보던 오차의 성격이 바뀐다. 편향 위에 얹혀 튜닝돼 있던 값이므로
@@ -361,6 +363,80 @@ struct BipedControl {
   double footz(int leg){ return d->geom_xpos[sph[leg]*3+2]; }
   Vector3d spos(int leg){ return Vector3d(d->geom_xpos[sph[leg]*3],d->geom_xpos[sph[leg]*3+1],d->geom_xpos[sph[leg]*3+2]); }
 
+  // ── [scratch] MIT 구성 (WBIC_MIT=1) ─────────────────────────────────────────────
+  //   접촉 J q̈ + J̇ q̇ = 0 (K_D 없음) · 과제 J̇q̇ 포함 · KinWBC 계획 q_des/q̇_des 를 드라이버 PD 로.
+  double mit_qdes[8]={0}, mit_dqdes[8]={0}; bool mit_valid=false; long mit_n=0, mit_fail=0;
+  Vector3d mit_vprev=Vector3d::Zero(); int mit_swprev=-1;
+  Vector3d jacdot_qv(int geom,int body){ std::vector<double> jp(3*nv);
+    double pt[3]={d->geom_xpos[geom*3],d->geom_xpos[geom*3+1],d->geom_xpos[geom*3+2]};
+    mj_jacDot(m,d,jp.data(),nullptr,pt,body);
+    MatrixXd Jd(3,nv); for(int r=0;r<3;r++)for(int c=0;c<nv;c++) Jd(r,c)=jp[r*nv+c]; return Jd*qvel(); }
+  // [scratch] J̇(q, q̇_f)·q̇_f — 관절속도를 LPF(JDOT_LPF_HZ)한 q̇_f 로 계산. 0 이면 원시 q̇.
+  VectorXd qvf_state; bool qvf_init=false;
+  void update_qvf(){ static const double FC=getenv("JDOT_LPF_HZ")?atof(getenv("JDOT_LPF_HZ")):0.0;
+    VectorXd qv=qvel(); if(!qvf_init||FC<=0){ qvf_state=qv; qvf_init=true; return; }
+    const double a=1.0-std::exp(-2.0*M_PI*FC*dt_ctrl);
+    qvf_state.head(6)=qv.head(6); qvf_state.tail(nu)+=a*(qv.tail(nu)-qvf_state.tail(nu)); }
+  Vector3d jacdot_qv_f(int geom,int body){ static const double FC=getenv("JDOT_LPF_HZ")?atof(getenv("JDOT_LPF_HZ")):0.0;
+    if(FC<=0) return jacdot_qv(geom,body);
+    std::vector<double> save(d->qvel,d->qvel+nv); for(int i=0;i<nv;i++) d->qvel[i]=qvf_state[i]; mj_comVel(m,d);
+    Vector3d r=jacdot_qv(geom,body);
+    for(int i=0;i<nv;i++) d->qvel[i]=save[i]; mj_comVel(m,d); return r; }
+  void build_mit(int st,int sw,const Vector3d& ptgt,const Vector3d& vtgt, bipedmit::In& in){
+    using namespace bipedmit; in.nv=nv; in.nu=nu;
+    std::vector<double> Mb(nv*nv); mj_fullM(m,Mb.data(),d->qM);
+    in.M=Map<Matrix<double,Dynamic,Dynamic,RowMajor>>(Mb.data(),nv,nv);
+    in.h=Map<VectorXd>(d->qfrc_bias,nv); in.qv=qvel(); in.qj=Map<VectorXd>(&d->qpos[7],nu);
+    // 접촉(지지발 끝점) — a_c = J q̈ + J̇ q̇ = 0
+    in.Jc=foot_jac(st); in.JcDotQdot=jacdot_qv(sph[st],fbody[st]); in.Fr_des=lam.row(st).transpose();
+    in.mu=MU_EFF; in.fz_min=LAMZ_MIN; in.fz_max=2.0*mass*9.81; in.drv_peak=Map<VectorXd>(drv_peak8,nu);
+    static const double WB=getenv("MIT_WB")?atof(getenv("MIT_WB")):0.1, WF=getenv("MIT_WF")?atof(getenv("MIT_WF")):1.0;
+    in.W_b=WB; in.W_f=WF;
+    const VectorXd qv=qvel();
+    // T1 몸통 자세 (몸통좌표 각속도 선택, roll·pitch 수평 · yaw 는 감쇠만 — 기존 wbic_track 과 같은 목표)
+    { Task t; t.J=MatrixXd::Zero(3,nv); t.J.block(0,3,3,3).setIdentity();
+      double ya=base_yaw(), ql[4]={std::cos(ya/2),0,0,std::sin(ya/2)}, oe[3]; mju_subQuat(oe,&d->qpos[3],ql);
+      t.e=Vector3d(-oe[0],-oe[1],0.0); t.xd_des=Vector3d::Zero();
+      t.xdd_cmd=Vector3d(150*(-oe[0])-20*qv[3], 150*(-oe[1])-20*qv[4], -20*qv[5]);
+      t.JdotQdot=Vector3d::Zero(); in.tasks.push_back(t); }
+    // T2 CoM 높이 (J̇q̇ 는 무시 — mj 에 subtree-com 도함수 없음, 정적에 가까움)
+    { Task t; MatrixXd Jc=jac_com(); t.J=Jc.row(2); double ez=com_ref_z-com()[2];
+      t.e=VectorXd::Constant(1,ez); t.xd_des=VectorXd::Zero(1);
+      t.xdd_cmd=VectorXd::Constant(1, 300*ez-30*(Jc.row(2)*qv)(0)); t.JdotQdot=VectorXd::Zero(1); in.tasks.push_back(t); }
+    // T2b CoM 수평 속도 = 명령 속도 (MIT BodyPosTask 대응). 위치오차 0 → kp 로 몸통을 붙잡지 않고, 계획 q̇_des 에 전진 반영.
+    //   이 과제가 없으면 최하위 관절자세가 xy 영공간에서 지지다리를 home 으로 당겨 전진을 막는다.
+    { Task t; MatrixXd Jc=jac_com(); t.J=Jc.topRows(2); double ya=base_yaw();
+      Vector2d vc(std::cos(ya)*vx_cmd-std::sin(ya)*vy_cmd, std::sin(ya)*vx_cmd+std::cos(ya)*vy_cmd);
+      t.e=Vector2d::Zero(); t.xd_des=vc; t.xdd_cmd=30.0*(vc-(t.J*qv)); t.JdotQdot=Vector2d::Zero(); in.tasks.push_back(t); }
+    // T3 스윙 발끝 위치 (+ 궤적 가속 ff)
+    { Task t; t.J=foot_jac(sw); Vector3d ps=spos(sw), vs=t.J*qv;
+      Vector3d aff=Vector3d::Zero();
+      if(sw==mit_swprev){ aff=(vtgt-mit_vprev)/std::max(1e-4,dt_ctrl); if(aff.norm()>50) aff*=50/aff.norm(); }
+      mit_vprev=vtgt; mit_swprev=sw;
+      t.e=ptgt-ps; t.xd_des=vtgt; t.xdd_cmd=aff+SW_KP*(ptgt-ps)+SW_KD*(vtgt-vs);
+      t.JdotQdot=jacdot_qv(sph[sw],fbody[sw]); in.tasks.push_back(t); }
+    // T4 관절 자세 (최하위 — 점발 발목 등 남는 자유도)
+    { static double AKP=getenv("ANK_KP")?atof(getenv("ANK_KP")):60.0, AKD=getenv("ANK_KD")?atof(getenv("ANK_KD")):5.0;
+      Task t; t.J=MatrixXd::Zero(nu,nv); t.J.rightCols(nu).setIdentity(); t.e.resize(nu); t.xd_des=VectorXd::Zero(nu);
+      t.xdd_cmd.resize(nu); t.JdotQdot=VectorXd::Zero(nu); const double* Qh=Qcur();
+      for(int j=0;j<nu;j++){ bool ank=(j==ankle_idx[0]||j==ankle_idx[1]);
+        double kp=ank?AKP:60.0, kd=ank?AKD:5.0; t.e[j]=Qh[j]-d->qpos[7+j];
+        t.xdd_cmd[j]=kp*t.e[j]-kd*qv[6+j]; }
+      in.tasks.push_back(t); }
+  }
+  void wbic_mit(int st,int sw,const Vector3d& ptgt,const Vector3d& vtgt){
+    using namespace bipedmit; In in; build_mit(st,sw,ptgt,vtgt,in);
+    Out o=solve(in); mit_n++; if(!o.qp_ok) mit_fail++;
+    { static const int DBG=getenv("MIT_DBG")?atoi(getenv("MIT_DBG")):0;
+      if(DBG>0 && mit_n%DBG==1 && mit_n<40*DBG){
+        VectorXd qf=o.qdd; qf.head(6)+=o.z.head(6); VectorXd F=in.Fr_des+o.z.tail(3);
+        Vector3d ac=in.Jc*qf+in.JcDotQdot;
+        std::fprintf(stderr,"[mit] n%ld st%d |a_c|=%.3f δb=(%+.2f %+.2f %+.2f | %+.2f %+.2f %+.2f) F_des=(%+.1f %+.1f %+.1f) F=(%+.1f %+.1f %+.1f)\n",
+          mit_n,st,ac.norm(),o.z[0],o.z[1],o.z[2],o.z[3],o.z[4],o.z[5],in.Fr_des[0],in.Fr_des[1],in.Fr_des[2],F[0],F[1],F[2]);
+        std::fprintf(stderr,"      τ_mit =");for(int j=0;j<nu;j++)std::fprintf(stderr," %+6.1f",o.tau[j]);std::fprintf(stderr,"\n"); } }
+    for(int j=0;j<nu;j++){ mit_qdes[j]=o.qdes[j]; mit_dqdes[j]=o.dqdes[j]; } mit_valid=true;
+    set_ctrl_from_tau(o.tau);
+  }
   MatrixXd foot_jac(int leg){ std::vector<double> jp(3*nv);
     double pt[3]={d->geom_xpos[sph[leg]*3],d->geom_xpos[sph[leg]*3+1],d->geom_xpos[sph[leg]*3+2]};
     mj_jac(m,d,jp.data(),nullptr,pt,fbody[leg]);
@@ -847,6 +923,20 @@ struct BipedControl {
     static double ANK_KD=getenv("ANK_KD")?atof(getenv("ANK_KD")):5.0;
     static bool _ankp=[&]{ std::printf("[deploy] 발목 posture PD kp=%.0f kd=%.0f%s\n",ANK_KP,ANK_KD,(ANK_KP!=60||ANK_KD!=5)?"  ★튜닝(env)":"  (기본)"); return true; }(); (void)_ankp;
     in.ANK_KP=ANK_KP; in.ANK_KD=ANK_KD;
+    { // [scratch] WBIC_MIT=2 — 기존 단일 QP 유지 + MIT 요소: 접촉 J q̈=−J̇q̇(K_D 폐기) · 스윙 J̇q̇ · KinWBC 계획 q_des/q̇_des
+      static const int WMIT=getenv("WBIC_MIT")?atoi(getenv("WBIC_MIT")):0;
+      if(WMIT==2 && !(cmode==1&&has_heel)){
+        // 세 요소 독립: MIT_JDOT(0/1)·JDOT_LPF_HZ · STANCE_KD(env)·KD_TD_MS(착지 후 창만 K_D) · 드라이버는 sim 쪽 DRV_TRACK
+        static const int JD=getenv("MIT_JDOT")?atoi(getenv("MIT_JDOT")):1;
+        static const double KDTD=getenv("KD_TD_MS")?atof(getenv("KD_TD_MS"))/1000.0:0.0;
+        update_qvf();
+        in.use_jdot=(JD!=0);
+        if(in.use_jdot){ in.cjdqv.clear(); for(auto&cp:scp) in.cjdqv.push_back(jacdot_qv_f(cp.first,cp.second));
+          in.sw_jdqv=jacdot_qv_f(sph[sw],fbody[sw]); }
+        if(KDTD>0 && t_ss>KDTD) in.STANCE_KD=0.0;       // 착지 직후 창 밖에서는 K_D 끔
+        bipedmit::In kin; build_mit(stanceLeg,sw,ptgt,vtgt,kin);
+        VectorXd qd,dqd; bipedmit::kinwbc(kin,qd,dqd);
+        for(int j=0;j<nu;j++){ mit_qdes[j]=qd[j]; mit_dqdes[j]=dqd[j]; } mit_valid=true; } }
     set_ctrl_from_tau(wbic_track(in));   // ★전단(관절토크→드라이브)은 한 곳에서만
   }
 
@@ -995,6 +1085,7 @@ struct BipedControl {
 
   void control(double dt){
     dt_ctrl = dt;                     // ★적분항이 쓴다(wbic_stance 는 dt 를 안 받는다)
+    mit_valid = false;                // [scratch] 이번 틱 wbic_mit 가 돌면 true
     double ya=base_yaw();
     if(trans_on){ do_transition(dt); return; }   // ★1점/2점 전환 굴림 재생 중
     // ★2점 평발: 정지=정적 양발지지(밑창 ZMP). 이동명령=평발 동적 보행(아래 게이트, wbic 다접촉).
@@ -1039,6 +1130,11 @@ struct BipedControl {
     _k++;
     if(!have_liftoff[sw]){ liftoff[sw]=foot_center(sw); have_liftoff[sw]=true; }
     Vector3d p,v; swing_traj(sw,s,p,v);
-    wbic(st,sw,p,v);
+    static const int WMIT=getenv("WBIC_MIT")?atoi(getenv("WBIC_MIT")):0;   // 1=MIT 전체구성 · 2=기존QP+J̇q̇(K_D폐기)+KinWBC 드라이버목표
+    static const int SHD=getenv("MIT_DBG")?atoi(getenv("MIT_DBG")):0;
+    if(WMIT==1 && SHD>0 && (mit_n+1)%SHD==1 && mit_n<40*SHD){ wbic(st,sw,p,v);
+      VectorXd u(nu); for(int j=0;j<nu;j++) u[j]=d->ctrl[j]; VectorXd tq=bipedwbic::drive_to_tau(u);
+      std::fprintf(stderr,"      τ_old =");for(int j=0;j<nu;j++)std::fprintf(stderr," %+6.1f",tq[j]);std::fprintf(stderr,"\n"); }
+    if(WMIT==1 && !(cmode==1&&has_heel)) wbic_mit(st,sw,p,v); else wbic(st,sw,p,v);
   }
 };

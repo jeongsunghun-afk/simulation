@@ -13,7 +13,13 @@
 #   하여 복구 경로인 CheckState 에 영영 도달하지 못함). 유일한 복구는 이 스크립트의 stop→start.
 set -u
 
-EMB_DIR=/home/rpetubt/ZSource/RobotEmbedded/build
+# ★2026-09-30 기본 Emb = RobotEmbeddedNew (IMU 수신지연 수정판). 원본은 IMU UART 를 10ms 마다 1패킷만
+#   읽어 적체 → IMU(rpy·gyro 같은 패킷) 지연이 기동 후 1.0→1.8s 로 계속 늘었다(트레이스 회귀 실측).
+#   NEW 실기(16:40): 지연 8ms · stand 진입 출렁임 소멸 · 외란 0.3~0.4s 복귀. 변경은 IMU 파일 3개뿐
+#   (ZSource/RobotEmbeddedNew/IMU_latency_fix.md). 원본으로 되돌리기:
+#     EMB_DIR=/home/rpetubt/ZSource/RobotEmbedded/build ./run_all.sh ctrl
+#   바이너리 재빌드/교체 시 setcap 이 사라진다: sudo setcap cap_net_admin,cap_net_raw+eip $EMB_DIR/src/RobotEmbedded
+EMB_DIR=${EMB_DIR:-/home/rpetubt/ZSource/RobotEmbeddedNew/build}
 EMB_BIN=$EMB_DIR/src/RobotEmbedded
 # ★로그 = 실로그(/tmp/emb.log). SD 홍수는 이제 **원천 해결**됨 (2026-09-16):
 #   RobotEmbedded 디버그매크로 5개 OFF + 재빌드(defineGeneral.h:44-54). 풀스택 실측서

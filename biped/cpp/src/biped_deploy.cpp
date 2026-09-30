@@ -586,6 +586,12 @@ int main(int argc, char** argv){
     std::printf("[deploy] ⚠WALK_KD_FLOOR %.2f → 스윙 kd 제동 ≈%.0fNm — WALK_TAU_TRIP %.0fNm 근접/초과."
                 " kd 를 올리면 트립도 같이 올릴 것 (한계비 %.2f)\n",
                 WALK_KD_FLOOR, WALK_KD_FLOOR*41.0, WALK_TAU_TRIP, WALK_TAU_TRIP/41.0);
+  if(getenv("WALK_TRACK") && atoi(getenv("WALK_TRACK"))){
+    const char* wm=getenv("WBIC_MIT");
+    std::printf("[deploy] ★WALK_TRACK — 점발 walk 드라이버 추종 τff+kp(q_des−q)+kd(q̇_des−q̇) · kp×%.2f kd×%.2f%s\n",
+                getenv("TRK_KP")?atof(getenv("TRK_KP")):1.0, getenv("TRK_KD")?atof(getenv("TRK_KD")):1.0,
+                (wm && atoi(wm)==2) ? "" : "  ⚠WBIC_MIT=2 가 아니면 계획목표가 없어 추종 비활성(종전 동작)");
+  }
   std::printf("[deploy] walk 한정: 트립 %.0fdps/%.1fNm · kd×%.2f (타 모드 %.0fdps/%.1fNm·kd 유지)\n",
               WALK_VEL_TRIP, WALK_TAU_TRIP, WALK_KD_FLOOR, cfg.vel_trip_dps, cfg.tau_trip_nm);
   const double FLOAT_KD = getenv("FLOAT_KD") ? atof(getenv("FLOAT_KD")) : 0.30;
@@ -654,6 +660,13 @@ int main(int argc, char** argv){
                       const float* kpd, const float* kdd){
     for(int i=0;i<NCH;i++) tau_ff_out[i] = tau[i] * ff_comp[i];
     return hw->write_mit(qd, zero.data(), tau_ff_out.data(), kpd, kdd, NCH);
+  };
+  // ★2026-09-30 MIT식 드라이버 추종 — 계획 관절속도(q̇_des)도 싣는다(write_mit 의 dq_des, 종전 0 고정).
+  //   경로 확인: shm_bridge cmd.fVelocity → Emb halGait.cpp:794 외부명령 memcpy → 드라이브(Emb 수정 불필요).
+  auto write_ff_v = [&](const float* qd, const float* dqd, const std::vector<float>& tau,
+                        const float* kpd, const float* kdd){
+    for(int i=0;i<NCH;i++) tau_ff_out[i] = tau[i] * ff_comp[i];
+    return hw->write_mit(qd, dqd, tau_ff_out.data(), kpd, kdd, NCH);
   };
   if(ACT_ALPHA != 1.0 || alpha_ax[0] > 0){
     std::printf("[deploy] ★액추에이터 α 보정 ON — FF ×1/α (α=%.3f → ×%.3f · ~+%.0f%% 토크).\n"
@@ -771,6 +784,18 @@ int main(int argc, char** argv){
   //   원인 후보(게인 점프 / 낡은 측정값 / 부호 / 한쪽 다리)를 말로 가릴 수 없다.
   //   무장 순간부터 0.5초를 **매 틱** CSV 로 남긴다. 트립이 나도 파일은 남는다.
   FILE* trc=nullptr; double trc_t0=0;
+  // ★2026-09-29 TRACE_SEC env — 500Hz 트레이스 길이(기본 3s=종전). 설정하면 /dev/shm(RAM)에 모드·시각 파일명으로 저장(덮어쓰기·SD 쓰기지연 방지)
+  //   + 보낸 FF 토크(tff) 열 추가 — 실측 tau 와 비교해 왕복지연·진동주파수 측정용.
+  const double TRACE_SEC  = getenv("TRACE_SEC") ? atof(getenv("TRACE_SEC")) : 3.0;
+  const bool   TRACE_KEEP = getenv("TRACE_SEC") != nullptr;
+  // ★트레이스 헤더(모드진입·수동트리거 공용). TRACE_KEEP 이면 tff·aux(출력축 pos/vel)·IMU(gyr/rpy 원시) 열 추가.
+  auto trace_header=[&](FILE* f){ fprintf(f,"t");
+    for(int i=0;i<NCH;i++) fprintf(f,",q%d,dq%d,tau%d,cmd%d,kp%d,kd%d",i,i,i,i,i,i);
+    if(TRACE_KEEP){ for(int i=0;i<NCH;i++) fprintf(f,",tff%d",i);
+      for(int i=0;i<NCH;i++) fprintf(f,",vcmd%d",i);   // ★2026-09-30 WALK_TRACK q̇_des(채널 dps, 그 외 0)
+      for(int i=0;i<8;i++) fprintf(f,",auxp%d",i); for(int i=0;i<8;i++) fprintf(f,",auxv%d",i);
+      fprintf(f,",gyr0,gyr1,gyr2,rpy0,rpy1,rpy2,acc0,acc1,acc2"); }   // acc=몸통 선가속(중력제거) — 수직 튐 판별
+    fprintf(f,"\n"); };
   bool have_state=false; int ok_reads=0; double live_t0=0;
   std::string boot_mode="off"; bool mode_locked=false;   // ★기동 시 잔여명령 잠금   // ★센서 준비·생존 확인
   // ★★EtherCAT 동결 감지 (2026-08-20 실기). Emb 는 OP 를 잃어도 프로세스가 계속 돌고
@@ -807,6 +832,7 @@ int main(int argc, char** argv){
   //   ⇒ 위치게인을 내리면서 WBIC 토크를 올린다. MIT 모드는 둘을 동시에 받으므로
   //     블렌드 중에는 위치제어가 받쳐 주고, 끝나면 순수토크가 된다.
   double stand_t0=0, stand_T=0; std::vector<float> stand_hold(NCH,0.f), stand_to(NCH,0.f), stand_ref(NCH,0.f);
+  std::vector<float> trk_q(NCH,0.f), trk_dq(NCH,0.f), vcmd_ch(NCH,0.f);   // ★2026-09-30 WALK_TRACK 목표(채널 deg·dps)
   std::string mode = "off", prev_mode = "off", last_raw;
   bool estop = false, wd_tripped = false;
   double tau_over_t0 = -1, vel_over_t0 = -1, last_cmd_t = now_s(), last_pub = 0, hz_ema = cfg.ctrl_hz;
@@ -1202,12 +1228,14 @@ int main(int argc, char** argv){
           // ★stand 를 다시 들어오면 비교를 새로 잡는다(hold 스냅샷은 남긴다 — 기준이니까).
           if(mode=="stand") have_tau_stand=false;
           if(((mode!="off" && prev_mode=="off") || mode=="stand" || mode=="walk") && !trc){
-            trc = fopen("/tmp/arm_trace.csv","w"); trc_t0 = lt;
-            if(trc){ fprintf(trc,"t");
-              // cmd=실제 나간 위치명령 · kp/kd=그 틱에 실제 나간 게인(blend 중 매 틱 변한다)
-              for(int i=0;i<NCH;i++) fprintf(trc,",q%d,dq%d,tau%d,cmd%d,kp%d,kd%d",i,i,i,i,i,i);
-              fprintf(trc,"\n");
-              std::printf("[deploy] 트레이스 → /tmp/arm_trace.csv (3초 — 블렌드 전체)\n"); } }
+            char tpath[128] = "/tmp/arm_trace.csv";
+            if(TRACE_KEEP){ time_t tt=time(nullptr); struct tm tmv; localtime_r(&tt,&tmv);
+              snprintf(tpath,sizeof(tpath),"/dev/shm/arm_trace_%s_%02d%02d%02d.csv",
+                       mode.c_str(),tmv.tm_hour,tmv.tm_min,tmv.tm_sec); }
+            trc = fopen(tpath,"w"); trc_t0 = lt;
+            if(trc){ trace_header(trc);   // cmd=실제 나간 위치명령 · kp/kd=그 틱 게인 (+TRACE_KEEP: tff·aux·IMU)
+              std::printf("[deploy] 트레이스 → %s (%.0f초%s)\n", tpath, TRACE_SEC,
+                          TRACE_KEEP ? " · tff 포함" : " — 블렌드 전체"); } }
           hw->enable(mode=="off" ? 0 : 1);
           if(mode=="push" && (prev_mode=="stand" || prev_mode=="walk")){
             // ★검토 #7 (2026-08-27): 하중을 받는 stand/walk 에서 오클릭 한 번에
@@ -2098,7 +2126,49 @@ int main(int argc, char** argv){
       for(int j=0;j<NJ;j++) d->qpos[7+j]=q_ctrl[j];
       d->qvel[0]=est.v[0]; d->qvel[1]=est.v[1]; d->qvel[2]=est.v[2];
       for(int a=0;a<3;a++) d->qvel[3+a]=gyro[a];
-      for(int j=0;j<NJ;j++) d->qvel[6+j]=dq_ctrl[j];
+      // ★2026-09-29 WBIC 입력 관절속도 처리 — 3택(env). 기본(둘 다 0)=raw(기존동작).
+      //   DQ_OBS_HZ>0 : ★속도 observer(깨끗한 위치 q_ctrl 로 dq 추정) — 권장. LPF 와 달리 지연 거의 없음.
+      //     (LPF 는 실기서 지연→forward-tip 유발 확인 2026-09-29. observer 가 그 대안.)
+      //   DQ_LPF_HZ>0 : (구) 저역통과 — ⚠지연 有, forward-tip 주의. 비교용.
+      //   왜: stand 는 측정 dq(정지인데 35~154°/s 노이즈)를 WBIC 에 먹여 taucmd 5~10Nm 채터→떨림.
+      //   base(est.v·gyro)·estimator(dq_ctrl)는 그대로(관절속도만). q_ctrl·qvel 동일 rad.
+      {
+        static const double DQ_OBS_HZ = getenv("DQ_OBS_HZ") ? atof(getenv("DQ_OBS_HZ")) : 0.0;
+        static const double DQ_FC     = getenv("DQ_LPF_HZ") ? atof(getenv("DQ_LPF_HZ")) : 0.0;
+        static const double DQ_ZERO   = getenv("DQ_ZERO")  ? atof(getenv("DQ_ZERO"))  : 0.0;
+        static std::vector<double> dq_lpf(NJ,0.0), q_hat(NJ,0.0), dq_hat(NJ,0.0);
+        static bool obs_init=false, dq_p=false;
+        if(!dq_p){ dq_p=true;
+          if(DQ_OBS_HZ>0.0) std::printf("[deploy] ★속도 observer ON — DQ_OBS_HZ=%.1f Hz (위치서 dq 추정·지연 거의없음)\n", DQ_OBS_HZ);
+          else if(DQ_FC>0.0) std::printf("[deploy] ★dq LPF ON — DQ_LPF_HZ=%.1f Hz (⚠지연→forward-tip 주의)\n", DQ_FC);
+          else if(DQ_ZERO>0.0) std::printf("[deploy] ★DQ_ZERO=%d — %s (gyro 유지)\n", (int)DQ_ZERO,
+            (int)DQ_ZERO==2 ? "관절속도만 0" : (int)DQ_ZERO==3 ? "base 선속도만 0(관절 raw)" : "관절+base 선속도 0");
+        }
+        if(DQ_ZERO > 0.0){
+          // ★2026-09-29 분리: 1=관절+base 선속도(종전) · 2=관절속도만 0 · 3=base 선속도만 0(관절은 raw). gyro 는 항상 유지.
+          const int dz=(int)DQ_ZERO;
+          if(dz==3) for(int j=0;j<NJ;j++) d->qvel[6+j]=dq_ctrl[j];
+          else      for(int j=0;j<NJ;j++) d->qvel[6+j]=0.0;          // 1·2: 관절속도 0
+          if(dz!=2) d->qvel[0]=d->qvel[1]=d->qvel[2]=0.0;              // 1·3: base 선속도 0
+        } else if(DQ_OBS_HZ > 0.0){
+          const double wo=2.0*3.141592653589793*DQ_OBS_HZ, L1=2.0*wo, L2=wo*wo;   // Luenberger 극 -wo 이중
+          for(int j=0;j<NJ;j++){
+            double e = q_ctrl[j] - q_hat[j];                                       // 위치오차[rad]
+            if(!obs_init || std::fabs(e) > 0.175){ q_hat[j]=q_ctrl[j]; dq_hat[j]=0.0; e=0.0; }  // 재진입/글리치(>10°) 스냅
+            q_hat[j]  += (dq_hat[j] + L1*e)*dt;
+            dq_hat[j] += (L2*e)*dt;
+            if(dq_hat[j] >  10.0) dq_hat[j]= 10.0;                                  // 안전클램프 ±573°/s
+            else if(dq_hat[j] < -10.0) dq_hat[j]=-10.0;
+            d->qvel[6+j] = dq_hat[j];
+          }
+          obs_init=true;
+        } else if(DQ_FC > 0.0){
+          const double a = 1.0 - std::exp(-2.0*3.141592653589793*DQ_FC*dt);
+          for(int j=0;j<NJ;j++){ dq_lpf[j] += a*(dq_ctrl[j]-dq_lpf[j]); d->qvel[6+j]=dq_lpf[j]; }
+        } else {
+          for(int j=0;j<NJ;j++) d->qvel[6+j]=dq_ctrl[j];
+        }
+      }
 
       // ★지연보상 — 마지막 명령토크를 유지한 채 LCOMP step 굴려 "지금"을 만든다.
       //   실패하면 **조용히 실측으로 되돌린다**(예측을 안 쓸 뿐, 제어는 계속된다).
@@ -2210,7 +2280,17 @@ int main(int argc, char** argv){
       //   ★계단 금지(08-27 검증 확정 HIGH): walk↔stand 에서 kdf 를 한 틱에 0.15↔1.0 점프시키면
       //     잔류 스윙속도에 kd 제동 ~41Nm 이 같은 순간 실린다 → 2.0/s 램프(0.15↔1.0 에 ~0.43s).
       //     이탈 방향은 속도 붕괴(수십 ms)가 램프보다 훨씬 빨라 제동 스파이크가 없다.
-      const double kdf_tgt = (mode=="walk") ? WALK_KD_FLOOR
+      // ★★2026-09-30 MIT식 드라이버 추종 (WALK_TRACK=1 · 기본 0=종전 동작). 점발 walk 에서
+      //   τ_ff(WBIC) + kp(q_des−q) + kd(q̇_des−q̇), q_des·q̇_des = 컨트롤러 KinWBC 계획(WBIC_MIT=2 가 채움).
+      //   종전(kp 0 · q̇_des 0 · kd 15%)은 kd 가 스윙까지 제동했다 — 추종은 계획에서 벗어난 만큼만 보정한다.
+      //   sim(scratch simcpp) 72회: 추종 9조합 36회 0낙상 · kd 50% 는 54회 낙상(kd 100% 필수).
+      //   안전: 목표−측정 차를 ±TRK_QERR_DEG(기본 15°), |q̇_des| 를 TRK_DQ_MAX(기본 600dps)로 자른다.
+      //   원복: WALK_TRACK 미지정. 백업 biped_deploy.cpp.bak_mit_<시각>.
+      static const bool   WALK_TRACK = getenv("WALK_TRACK") && atoi(getenv("WALK_TRACK"));
+      static const double TRK_KP = env_gd("TRK_KP", 1.0, 0.0, 1.5), TRK_KD = env_gd("TRK_KD", 1.0, 0.0, 1.5);
+      static const double TRK_QERR = env_gd("TRK_QERR_DEG", 15.0, 1.0, 45.0), TRK_DQMAX = env_gd("TRK_DQ_MAX", 600.0, 50.0, 1500.0);
+      const bool trk = WALK_TRACK && mode=="walk" && c.cmode!=1 && c.mit_valid;
+      const double kdf_tgt = (mode=="walk") ? (trk ? TRK_KD : WALK_KD_FLOOR)
                        : (getenv("STAND_KD_FLOOR") ? atof(getenv("STAND_KD_FLOOR")) : 1.0);
       static double kdf_cur = -1.0;
       if(kdf_cur < 0.0) kdf_cur = kdf_tgt;
@@ -2229,7 +2309,7 @@ int main(int argc, char** argv){
       // ★1점 walk 는 kp 서보를 env 로도 못 켠다(08-27 검증 확정): 목표(stand_ref)가 진입 시점
       //   자세로 굳어 있어 매 스텝 움직이는 gait 와 kp 가 정면으로 싸운다. 2점(cmode=1)은
       //   목표=Qflat8=WBIC 자세라 유지(정적지지 전용 — FLAT_WALK 프리뷰 완성 시 재설계).
-      const double kpf = (mode=="walk" && c.cmode!=1) ? 0.0
+      const double kpf = (mode=="walk" && c.cmode!=1) ? (trk ? TRK_KP : 0.0)
                        : (getenv("STAND_KP_FLOOR") ? atof(getenv("STAND_KP_FLOOR"))
                                                    : (c.cmode==1 ? 0.30 : 0.0));
       const double kd_scale = (1.0-bs) + bs*kdf;      // 블렌드 끝에서 kdf 로 수렴
@@ -2240,10 +2320,23 @@ int main(int argc, char** argv){
       //   ⚠지금은 bs=1 에서 kp=0 이라 이 목표가 무영향이다. 그래도 측정각을 흘려보내지
       //     않는다 — STAND_KP_FLOOR 를 켜는 순간 **의미 있는 목표가 이미 들어가 있어야** 한다.
       //     측정각을 목표로 두면 err≡0(무효)이거나, 센서지연 때문에 err≈−q̇·τ = **음의 감쇠**가 된다.
+      std::fill(vcmd_ch.begin(), vcmd_ch.end(), 0.f);
+      if(trk){   // ★계획 관절각·속도(rad) → 채널(deg·dps). 발목 커플링·부호·감속비는 기존 변환이 처리.
+        std::vector<double> qd(NJ), dqd(NJ);
+        for(int j=0;j<NJ;j++){ qd[j]=c.mit_qdes[j]; dqd[j]=c.mit_dqdes[j]; }
+        jm.q_ctrl_to_ch(qd.data(), trk_q.data()); jm.dq_ctrl_to_ch(dqd.data(), trk_dq.data());
+        for(int i=0;i<NCH;i++){
+          const float lo=hs.q_deg[i]-(float)TRK_QERR, hi=hs.q_deg[i]+(float)TRK_QERR;
+          trk_q[i]=std::max(lo,std::min(hi,trk_q[i]));
+          trk_dq[i]=std::max(-(float)TRK_DQMAX,std::min((float)TRK_DQMAX,trk_dq[i]));
+          vcmd_ch[i]=(float)(bs*(double)trk_dq[i]); }
+      }
+      const std::vector<float>& tgt_ch = trk ? trk_q : stand_to;
       for(int i=0;i<NCH;i++)
-        stand_ref[i] = stand_hold[i] + (float)(bs*(double)(stand_to[i]-stand_hold[i]));
+        stand_ref[i] = stand_hold[i] + (float)(bs*(double)(tgt_ch[i]-stand_hold[i]));
       qcmd_ch = stand_ref; kpcmd_ch = kp_ch; kdcmd_ch = kd_ch;
-      write_ff(stand_ref.data(), tau_ch, kp_ch.data(), kd_ch.data());   // ★α 보정 FF
+      if(trk) write_ff_v(stand_ref.data(), vcmd_ch.data(), tau_ch, kp_ch.data(), kd_ch.data());
+      else    write_ff(stand_ref.data(), tau_ch, kp_ch.data(), kd_ch.data());   // ★α 보정 FF
       // ★stand 폭주 가드 (2026-09-03 · 상단 선언부 주석). 기준자세 이탈이
       //   STAND_RUNAWAY_DEG 를 0.3s 지속하면 hold 로 강하 + 래치(off 재무장까지 거부).
       if(mode=="stand"){
@@ -2278,12 +2371,29 @@ int main(int argc, char** argv){
     //   ★게인도 같이 찍는다: blend 중에는 kp·kd 가 매 틱 변한다. 이게 없으면
     //     τ_ff = τ_echo − kp·err − kd·(−q̇) 분해를 **추정**할 수밖에 없고, 08-28 리플
     //     조사가 실제로 그 재구성 때문에 불확실성을 안았다. 이제 직접 분해된다.
+    // ★2026-09-29 수동 트레이스 트리거(TRACE_SEC 설정 시): /dev/shm/trace_now 가 생기면 지금부터 TRACE_SEC 캡처.
+    //   탭(톡 치기) 시험처럼 모드진입과 무관한 순간을 잡기 위함. 0.2s 마다 확인(access 시스템콜 1회).
+    if(TRACE_KEEP && !trc){ static int tn_cnt=0;
+      if(++tn_cnt >= 100){ tn_cnt=0;
+        if(access("/dev/shm/trace_now", F_OK)==0){ unlink("/dev/shm/trace_now");
+          time_t tt=time(nullptr); struct tm tmv; localtime_r(&tt,&tmv); char tpath[128];
+          snprintf(tpath,sizeof(tpath),"/dev/shm/arm_trace_manual_%s_%02d%02d%02d.csv",
+                   mode.c_str(),tmv.tm_hour,tmv.tm_min,tmv.tm_sec);
+          trc=fopen(tpath,"w"); trc_t0=lt;
+          if(trc){ trace_header(trc); std::printf("[deploy] ★수동 트레이스 → %s (%.0f초)\n", tpath, TRACE_SEC); } } } }
     if(trc){
-      if(lt-trc_t0 <= 3.0){
+      if(lt-trc_t0 <= TRACE_SEC){
         fprintf(trc,"%.4f", lt-trc_t0);
         for(int i=0;i<NCH;i++)
           fprintf(trc,",%.3f,%.1f,%.3f,%.3f,%.2f,%.2f", hs.q_deg[i], hs.dq_dps[i], hs.tau_nm[i],
                   (double)qcmd_ch[i], (double)kpcmd_ch[i], (double)kdcmd_ch[i]);
+        if(TRACE_KEEP) for(int i=0;i<NCH;i++) fprintf(trc,",%.3f",(double)tau_ff_out[i]);
+        if(TRACE_KEEP) for(int i=0;i<NCH;i++) fprintf(trc,",%.1f",(mode=="walk"||mode=="stand")?(double)vcmd_ch[i]:0.0);
+        if(TRACE_KEEP){ float ap[16]={0}, av[16]={0}; hw->aux(ap,av);   // 출력축(감속기 뒤·벨트 앞) — 캐시 복사라 가벼움
+          for(int i=0;i<8;i++) fprintf(trc,",%.3f",(double)ap[i]); for(int i=0;i<8;i++) fprintf(trc,",%.2f",(double)av[i]);
+          fprintf(trc,",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f",(double)hs.gyr[0],(double)hs.gyr[1],(double)hs.gyr[2],
+                  (double)hs.rpy[0],(double)hs.rpy[1],(double)hs.rpy[2]);
+          fprintf(trc,",%.3f,%.3f,%.3f",(double)hs.acc[0],(double)hs.acc[1],(double)hs.acc[2]); }
         fprintf(trc,"\n");
       } else { fclose(trc); trc=nullptr; std::printf("[deploy] 트레이스 저장 완료\n"); }
     }

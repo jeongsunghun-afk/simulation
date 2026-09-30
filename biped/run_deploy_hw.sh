@@ -103,9 +103,13 @@ export HOLD_FF_TAU_MAX="${HOLD_FF_TAU_MAX:-50}"
 # ── ③walk 묶음 (2026-08-27 · sim 정량화 tools/walk_demand_check.py) ─────────
 #   walk 모드 **한정** 트립 상향(실측 플랜트 스윙 요구 calf 673dps·kd제동 41Nm — 고정
 #   200/15 는 스윙 즉살) + kd 축소(제동 제거 — sim 8/8 검증 플랜트와 정합).
-#   타 모드는 cfg 200dps/15Nm·kd 전량 그대로. C++ 기본값과 동일 — 여기선 가시화 목적.
+#   타 모드는 cfg(biped_emb.yaml safety) 400dps/50Nm·kd 전량. VEL·KD 는 C++ 기본값과 동일(가시화 목적).
 export WALK_VEL_TRIP_DPS="${WALK_VEL_TRIP_DPS:-900}"
-export WALK_TAU_TRIP_NM="${WALK_TAU_TRIP_NM:-25}"
+# ★2026-09-30 25→50Nm (2점 stand/hold 의 cfg tau_trip_nm 50 과 같게). 이유: cfg 가 15→50 으로 오른 뒤
+#   walk(25)가 오히려 stand/hold(50)보다 엄격해진 역전 — 점발 walk sim 에서 thigh 채널이 25Nm 를
+#   50ms+ 연속 초과(DQ_ZERO=2+WALK_KD_FLOOR=1.0 시험 전 확인). ⚠전 축 공통 한계라 calf/foot 벨트
+#   허용 토크도 같이 오른다. 원복: WALK_TAU_TRIP_NM=25 (C++ 기본값은 여전히 25).
+export WALK_TAU_TRIP_NM="${WALK_TAU_TRIP_NM:-50}"
 export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 
 # ── ④hold 중력지지 — 자립 확정 설정 (2026-09-03 실기: 크레인 프리 25s+) ──────

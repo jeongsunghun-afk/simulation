@@ -54,6 +54,8 @@ struct WbicIn {
   // 게인
   double SW_KP, SW_KD, W_ORI, W_ANKLE, W_POST, W_LAM, STANCE_KD, MU_EFF, LAMZ_MIN;
   double ANK_KP=60, ANK_KD=5;     // ★점발 발목 posture PD (2026-09-21 whip 튜닝). 기본=종전 60/5(ζ0.32). 파리티/미설정 콜러는 이 기본값.
+  // [scratch] MIT 식 가속 구속(WBIC_MIT=2): 접촉 J q̈ = −J̇q̇ (K_D 폐기) · 스윙 J q̈ = a − J̇q̇
+  bool use_jdot=false; std::vector<Vector3d> cjdqv; Vector3d sw_jdqv=Vector3d::Zero();
 };
 
 inline VectorXd wbic_track(const WbicIn& in){
@@ -65,6 +67,7 @@ inline VectorXd wbic_track(const WbicIn& in){
   if(in.has_swing){
     const MatrixXd& J=in.Jsw;
     Vector3d accel=in.SW_KP*(in.sw_ptgt-in.sw_pos)+in.SW_KD*(in.sw_vtgt-J*in.qv);
+    if(in.use_jdot) accel-=in.sw_jdqv;
     P.topLeftCorner(nv,nv)+=90.0*(J.transpose()*J); g.head(nv)-=90.0*(J.transpose()*accel);
     for(int t=0;t<4;t++) sw_vidx.push_back(6+in.swing_leg*4+t);
     if(in.has_sw_ori){                    // ★평발 swing 발 수평 유지(16cm 발 기울어 착지 교란 억제)
@@ -125,7 +128,9 @@ inline VectorXd wbic_track(const WbicIn& in){
   int neq=6+3*Kc; MatrixXd A=MatrixXd::Zero(neq,nz); VectorXd bb=VectorXd::Zero(neq);
   A.block(0,0,6,nv)=in.M.topRows(6); bb.head(6)=-in.h.head(6);
   for(int k=0;k<Kc;k++){ A.block(0,sl(k),6,3)=-in.cjac[k].leftCols(6).transpose();
-    A.block(6+3*k,0,3,nv)=in.cjac[k]; bb.segment(6+3*k,3)=-in.STANCE_KD*(in.cjac[k]*in.qv); }
+    A.block(6+3*k,0,3,nv)=in.cjac[k];
+    Vector3d rc=-in.STANCE_KD*(in.cjac[k]*in.qv); if(in.use_jdot) rc-=in.cjdqv[k];   // J q̈ + J̇q̇ = −K_D·J q̇ (각 항 독립 on/off)
+    bb.segment(6+3*k,3)=rc; }
   // 부등식 Gx≤h: 마찰추 + λz≥min + 토크한계
   std::vector<VectorXd> Gr; std::vector<double> hv;
   int sgn[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
