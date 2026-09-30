@@ -25,6 +25,7 @@ class MujocoHal : public RobotInterface {
   int Lsense_ = 0, Lact_ = 0;                                              // 지연 스텝(센서·구동)
   int NJ_ = 0, fsz_ = 0;                                                   // 관절수·센서프레임 크기
   std::vector<std::vector<double>> sring_, cring_;                         // 센서·구동 지연 링(고정 크기)
+  std::vector<std::vector<double>> pring_;                                 // ★드라이버 PD 목표 지연 링 [q_des|q̇_des|kp|kd]
   long step_ = 0;                                                          // 현재 틱(read/write 공유)
  public:
   explicit MujocoHal(const char* mjcf) {
@@ -37,6 +38,7 @@ class MujocoHal : public RobotInterface {
     Lact_   = (int)std::lround(ev("ACT_LAT_MS")   * 1e-3 / dt);
     sring_.assign(Lsense_ + 1, std::vector<double>(fsz_, 0.0));
     cring_.assign(Lact_ + 1,   std::vector<double>(q_.nu, 0.0));
+    pring_.assign(Lact_ + 1,   std::vector<double>(4 * q_.nu, 0.0));
   }
   ::QuadControl& core() { return q_; }            // 컨트롤러 브리지가 같은 코어 공유(TrotCtrl(q_))
 
@@ -78,6 +80,13 @@ class MujocoHal : public RobotInterface {
     { auto& cf = cring_[step_ % (long)cring_.size()]; for (int i = 0; i < q_.nu; i++) cf[i] = c.tau_ff[i]; }
     auto& dc = cring_[std::max(0L, step_ - Lact_) % (long)cring_.size()];
     for (int i = 0; i < q_.nu; i++) d->ctrl[i] = dc[i];          // TrotCtrl이 tau 계산(kp/kd=0 규약)
+    // ★2026-09-30 드라이버 PD(LowCmd kp/kd>0 일 때): 목표·게인도 토크와 같은 구동지연 → 현재 실상태로 PD. trot_sim DRV_TRACK 과 동일.
+    { auto& pf = pring_[step_ % (long)pring_.size()]; pf.assign(4 * q_.nu, 0.0);
+      for (int i = 0; i < q_.nu; i++) { pf[i] = c.q_des[i]; pf[q_.nu + i] = c.dq_des[i]; pf[2 * q_.nu + i] = c.kp[i]; pf[3 * q_.nu + i] = c.kd[i]; }
+      const auto& pd = pring_[std::max(0L, step_ - Lact_) % (long)pring_.size()];
+      if ((int)pd.size() == 4 * q_.nu)
+        for (int i = 0; i < q_.nu; i++) if (pd[2 * q_.nu + i] != 0.0 || pd[3 * q_.nu + i] != 0.0)
+          d->ctrl[i] += pd[2 * q_.nu + i] * (pd[i] - d->qpos[7 + i]) + pd[3 * q_.nu + i] * (pd[q_.nu + i] - d->qvel[6 + i]); }
     mj_step(q_.m, d);
     step_++;
     return true;

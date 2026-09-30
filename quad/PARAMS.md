@@ -74,7 +74,10 @@ override: `GAIT`(S)·`TROT_T`/`TROT_SWF`/`TROT_STEPH`/`RAIBERT_K`(S, 프리셋 �
 | w_ori | 5.0(17dof 20) | W_ORI (A) | 자세(roll/pitch) task 가중 |
 | w_yaw | 0.0 | W_YAW (A) | yaw 홀드(0=MPC 담당, 최적) |
 | W_AM / KD_AM | 0.0 / 8.0 | W_AM / KD_AM (A) | 각운동량 보상 가중 / 감쇠 |
-| STANCE_KD | 20.0 | STANCE_KD (S) | stance 접촉속도 감쇠(slip↓) |
+| STANCE_KD | 20.0 | STANCE_KD (S) | stance 접촉속도 감쇠(slip↓). ★하이브리드(기본) 추적 경로는 STANCE_KD_TRACK 사용 |
+| WBIC 구성 | 2 | WBIC_MIT | ★2026-09-30 0=종전 가중QP · 1=MIT 전체(연구용, 구동지연 8ms서 붕괴) · **2=하이브리드(기본)**: 가중QP + 접촉·스윙 J̇q̇ + KinWBC 계획(q_des·q̇_des) |
+| STANCE_KD_TRACK | 0.0 | STANCE_KD_TRACK | 하이브리드 추적(wbic_track) 접촉 K_D. 0=폐기(J q̈ = −J̇q̇) |
+| 드라이버 추종 | off | DRV_TRACK / TRK_KP_Q / TRK_KD_Q | τ_ff + kp(q_des−q) + kd(q̇_des−q̇). sim 권장 20 Nm/rad · 1 Nm·s/rad. ⚠실기 kp 단위(real_hal) 확인 전 off |
 | MU | 0.6 | MU (A) | 마찰콘 μ(MPC 동시) |
 | motor_curve | false | MOTOR_CURVE (A) | 토크-속도 곡선 |
 
@@ -152,7 +155,8 @@ Python(`quad_mpc_wbic_17dof.py`)과 C++(`cpp/src/`)는 같은 알고리즘·같�
 | 항목 | Python | C++ | 비고 |
 |---|---|---|---|
 | perceptive 몸통높이 | 4-hip 평균 → MPC+WBIC z-task 양쪽 | base 1점+슬루 → MPC만(WBIC 미공급) | 코드베이스 디테일차. Python 3.2°/C++ 3.7° 둘 다 완주. C++서 4힙+WBIC공급 재현 시 6.1°로 악화(충실 이식 finicky) |
-| STANCE_KD(터치다운 baumgarte) | trot 경로 없음(=0) | 20 (slip 7.2→5.9mm) | C++만. trot 접촉등식 b=−KD·cjac·q̇ |
+| STANCE_KD(터치다운 baumgarte) | trot 경로 없음(=0) | 종전 20 · 하이브리드 기본 0 | C++만. trot 접촉등식 b=−KD·cjac·q̇ (−J̇q̇) |
+| ★하이브리드 WBC(2026-09-30) | 없음(가중QP 그대로) | 기본: J̇q̇ + KinWBC 계획(+DRV_TRACK 시 드라이버 PD) | C++만. sim 실기수준(EST+2+6ms+노이즈) 전 조건 0낙상. Python 미이식 |
 | gallop 게이트 | 없음 | 있음(T0.35 등) | 프로젝트 방향상 미사용(leg-heavy 불가) |
 | walk foot-lock | LOCK=0.35 late-commit | 없음(매틱 reactive) | Python만. walk 둘 다 falls=0 |
 

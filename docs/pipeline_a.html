@@ -176,7 +176,7 @@
     <h3>제약</h3>
     <ul>
       <li><b>부동베이스 동역학</b> (등식 6): M<sub>0:6</sub> q<sup>¨</sup> + h<sub>0:6</sub> = Σ J<sub>c,0:6</sub><sup>T</sup> λ<sub>c</sub></li>
-      <li><b>접촉 비가속/감쇠</b> (등식 3K<sub>c</sub>): J<sub>c</sub> q<sup>¨</sup> = −STANCE_KD·(J<sub>c</sub> q<sup>˙</sup>)&nbsp;&nbsp;<span class="dim">(STANCE_KD=20, 터치다운 잔류속도→0=slip↓)</span></li>
+      <li><b>접촉 비가속/감쇠</b> (등식 3K<sub>c</sub>): J<sub>c</sub> q<sup>¨</sup> = −STANCE_KD·(J<sub>c</sub> q<sup>˙</sup>)&nbsp;&nbsp;<span class="dim">(STANCE_KD=20, 터치다운 잔류속도→0=slip↓)</span><br><span class="dim">★2026-09-30 하이브리드(기본 WBIC_MIT=2): J<sub>c</sub> q<sup>¨</sup> + J̇<sub>c</sub> q<sup>˙</sup> = −K<sub>D</sub>·J<sub>c</sub> q<sup>˙</sup>, K<sub>D</sub>=STANCE_KD_TRACK(기본 0) · 스윙도 J̇q̇ · KinWBC 계획 q_des/q̇_des 는 드라이버 PD(DRV_TRACK) 목표</span></li>
       <li><b>마찰추</b> (부등식 4K<sub>c</sub>): |λ<sub>x</sub>|,|λ<sub>y</sub>| ≤ μλ<sub>z</sub> · λ<sub>z</sub> ≥ 1</li>
       <li><b>토크 한계</b> (부등식 2·nu): −τ<sub>peak</sub> ≤ M<sub>6:</sub>q<sup>¨</sup> + h<sub>6:</sub> − J<sub>c,6:</sub><sup>T</sup>λ ≤ τ<sub>peak</sub></li>
       <li><b>관절 위치 한계</b>: 가속 상·하한 (look-ahead 0.05 s)</li>

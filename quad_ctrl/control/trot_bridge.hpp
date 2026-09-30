@@ -37,6 +37,13 @@ class TrotBridge {
     cmd.tau_ff.resize(nu); cmd.q_des.setZero(nu); cmd.dq_des.setZero(nu);
     cmd.kp.setZero(nu);    cmd.kd.setZero(nu);
     for (int i = 0; i < nu; ++i) cmd.tau_ff[i] = q_.d->ctrl[i];   // 컨트롤러 tau → LowCmd(kp/kd=0)
+    // ★2026-09-30 DRV_TRACK=1: 하이브리드 KinWBC 계획을 드라이버 PD 목표로(τ_ff + kp(q_des−q) + kd(q̇_des−q̇)).
+    //   기본 0 = 종전 순수토크. ⚠실기 kp 단위(real_hal "quad TBD") 확인 전에는 켜지 말 것. 게인 TRK_KP_Q/TRK_KD_Q(trot_sim 과 동일).
+    { static const bool DTRK = getenv("DRV_TRACK") && atoi(getenv("DRV_TRACK"));
+      static const double TKP = getenv("TRK_KP_Q") ? atof(getenv("TRK_KP_Q")) : 20.0, TKD = getenv("TRK_KD_Q") ? atof(getenv("TRK_KD_Q")) : 1.0;
+      if (DTRK && q_.mit_valid && q_.mit_qdes.size() == nu) {
+        for (int i = 0; i < nu; ++i) { cmd.q_des[i] = q_.mit_qdes[i]; cmd.dq_des[i] = q_.mit_dqdes[i]; cmd.kp[i] = TKP; cmd.kd[i] = TKD; } }
+      q_.mit_valid = false; }
     q_.d = saved;                          // ★HAL의 d_phys로 복원(write의 mj_step이 실물리를 밟도록)
   }
 

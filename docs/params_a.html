@@ -185,7 +185,10 @@
       <tr><td class="p">w_ori</td><td class="val">5.0 <span class="muted">(17dof 20)</span></td><td><span class="tag a">A</span> W_ORI</td><td class="mean">자세(roll/pitch) task 가중</td></tr>
       <tr><td class="p">w_yaw</td><td class="val">0.0</td><td><span class="tag a">A</span> W_YAW</td><td class="mean">yaw 홀드(0=MPC 담당, 최적)</td></tr>
       <tr><td class="p">W_AM / KD_AM</td><td class="val">0 / 24</td><td><span class="tag a">A</span> W_AM / KD_AM</td><td class="mean">★W_AM 제거(0): 외란복구 이득 측정상 무의미(측방 push서 오히려↑)</td></tr>
-      <tr><td class="p">STANCE_KD</td><td class="val">20.0</td><td><span class="tag s">S</span> STANCE_KD</td><td class="mean">stance 접촉속도 감쇠(slip↓)</td></tr>
+      <tr><td class="p">STANCE_KD</td><td class="val">20.0</td><td><span class="tag s">S</span> STANCE_KD</td><td class="mean">stance 접촉속도 감쇠(slip↓). ★하이브리드 추적 경로는 STANCE_KD_TRACK</td></tr>
+      <tr><td class="p">WBIC 구성</td><td class="val">2</td><td><span class="tag a">A</span> WBIC_MIT</td><td class="mean">★0=종전 가중QP · 1=MIT 전체(연구용, 지연 8ms 붕괴) · 2=하이브리드(기본): 가중QP+J̇q̇+KinWBC 계획</td></tr>
+      <tr><td class="p">STANCE_KD_TRACK</td><td class="val">0.0</td><td><span class="tag a">A</span> STANCE_KD_TRACK</td><td class="mean">하이브리드 추적 접촉 K_D (0=폐기: J q̈ = −J̇q̇)</td></tr>
+      <tr><td class="p">드라이버 추종</td><td class="val">off · 20 · 1</td><td><span class="tag a">A</span> DRV_TRACK · TRK_KP_Q · TRK_KD_Q</td><td class="mean">τ_ff + kp(q_des−q) + kd(q̇_des−q̇). ⚠실기 kp 단위 확인 전 off</td></tr>
       <tr><td class="p">MU</td><td class="val">0.6</td><td><span class="tag a">A</span> MU</td><td class="mean">마찰콘 μ(MPC 동시 갱신)</td></tr>
       <tr><td class="p">motor_curve</td><td class="val">false</td><td><span class="tag a">A</span> MOTOR_CURVE</td><td class="mean">토크-속도 곡선(고속 토크↓)</td></tr>
     </tbody>
@@ -312,7 +315,8 @@
     <thead><tr><th>남은 차이</th><th>Python</th><th>C++ (기준)</th><th>비고</th></tr></thead>
     <tbody>
       <tr><td class="p">perceptive 몸통높이</td><td class="mean">4-hip 평균 → MPC+WBIC 양쪽 (3.2°)</td><td class="mean">base 1점+슬루 → MPC만 (3.7°)</td><td class="mean">코드베이스 디테일차. 둘 다 완주. C++서 4힙+WBIC 재현 시 6.1°로 악화</td></tr>
-      <tr><td class="p">STANCE_KD</td><td class="mean">없음(=0)</td><td class="mean">20 (slip 7.2→5.9mm)</td><td class="mean">C++만. 터치다운 baumgarte</td></tr>
+      <tr><td class="p">STANCE_KD</td><td class="mean">없음(=0)</td><td class="mean">종전 20 · 하이브리드 기본 0</td><td class="mean">C++만. 터치다운 baumgarte</td></tr>
+      <tr><td class="p">★하이브리드 WBC</td><td class="mean">없음</td><td class="mean">J̇q̇ + KinWBC 계획 (+DRV_TRACK 드라이버 PD)</td><td class="mean">2026-09-30 C++만. 실기수준 sim 전 조건 0낙상. Python 미이식</td></tr>
       <tr><td class="p">gallop 게이트</td><td class="mean">없음</td><td class="mean">있음(T0.35)</td><td class="mean">미사용(leg-heavy 불가)</td></tr>
       <tr><td class="p">walk foot-lock</td><td class="mean">LOCK 0.35 late-commit</td><td class="mean">없음(매틱 reactive)</td><td class="mean">Python만. walk 둘 다 falls 0</td></tr>
     </tbody>

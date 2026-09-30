@@ -1,3 +1,4 @@
+#include <deque>
 // trot_sim — quad_mpc_wbic mode_trot 핵심경로 C++ closed-loop (헤드리스). 제어=TrotCtrl(trot_view와 공유).
 // 대상: standalone 평지 trot (DETECT=0 순수스케줄). 검증: falls=0 + 전진거리·tilt를 Python과 비교.
 #include "trot_controller.hpp"
@@ -180,6 +181,19 @@ int main(int argc,char**argv){
       auto& dc=cring[std::max(0,step-Lact)%(int)cring.size()];
       for(int i=0;i<m->nu;i++) d->ctrl[i]=dc[i];
     } else { ctrl.control(); }
+    { // ★2026-09-30 DRV_TRACK=1 — 드라이버 PD 추종: τ += kp(q_des−q) + kd(q̇_des−q̇) (관절공간). 목표는 토크와 같은 구동지연으로 도착.
+      //   q_des·q̇_des = QuadControl KinWBC 계획(WBIC_MIT=2). 게인 TRK_KP_Q[Nm/rad]·TRK_KD_Q[Nm·s/rad] (sim 권장 20/1).
+      //   quad_ctrl MujocoHal·TrotBridge 와 같은 규약 — verify.sh 비트동등 유지.
+      static const bool DTRK=getenv("DRV_TRACK")&&atoi(getenv("DRV_TRACK"));
+      static const double TKP=getenv("TRK_KP_Q")?atof(getenv("TRK_KP_Q")):20.0, TKD=getenv("TRK_KD_Q")?atof(getenv("TRK_KD_Q")):1.0;
+      static std::deque<std::vector<double>> pring;                 // [유효 | q_des(nu) | q̇_des(nu)]
+      std::vector<double> cur(1+2*q.nu,0.0);
+      if(q.mit_valid && q.mit_qdes.size()==q.nu){ cur[0]=1; for(int i=0;i<q.nu;i++){ cur[1+i]=q.mit_qdes[i]; cur[1+q.nu+i]=q.mit_dqdes[i]; } }
+      pring.push_back(cur); const int Ld=ESTCTRL?Lact:0; while((int)pring.size()>Ld+1) pring.pop_front();
+      const std::vector<double>& f=pring.front();
+      if(DTRK && f[0]>0.5)
+        for(int i=0;i<q.nu;i++) d->ctrl[i]+=TKP*(f[1+i]-d->qpos[7+i])+TKD*(f[1+q.nu+i]-d->qvel[6+i]);
+      q.mit_valid=false; }
     mj_step(m,d);
     if(ESTTEST && !ESTCTRL){
       std::vector<bool> cts(4,false);
@@ -223,6 +237,7 @@ int main(int argc,char**argv){
                   step,d->time,d->qpos[2],d->qpos[0],d->qpos[1],yaw,td,falls); }
   }
   double wall=std::chrono::duration<double>(std::chrono::high_resolution_clock::now()-t0).count();
+  if(q.mit_n>0) std::printf("[trot_sim] WBIC_MIT=1 QP 실패 %ld/%ld\n", q.mit_fail, q.mit_n);
   std::printf("\n=== 종료: STEPS=%d(%.1fs) x=%+.3f z=%.3f max_tilt=%.1f° falls=%d | ★침투평균 앞=%.1fmm 뒤=%.1fmm pitch=%.1f° | %.0f steps/s ===\n",
               STEPS,STEPS*dt,d->qpos[0],d->qpos[2],max_tilt,falls,pn?penF/pn*1000:0,pn?penR/pn*1000:0,pn?pitchSum/pn:0,STEPS/wall);
   if(q.couple_calls) std::printf("  [COUPLE] 무릎모터(τ_calf−τ_foot) 피크=%.1fNm(한계126) 사영발동=%ld/%ld\n", q.couple_km_pk, q.couple_hits, q.couple_calls);
