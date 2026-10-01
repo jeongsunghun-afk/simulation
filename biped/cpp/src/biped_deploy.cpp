@@ -798,6 +798,10 @@ int main(int argc, char** argv){
     if(TRACE_KEEP){ for(int i=0;i<NCH;i++) fprintf(f,",tff%d",i);
       for(int i=0;i<NCH;i++) fprintf(f,",vcmd%d",i);   // ★2026-09-30 WALK_TRACK q̇_des(채널 dps, 그 외 0)
       for(int i=0;i<NCH;i++) fprintf(f,",stt%d",i);    // ★2026-09-30 모터 상태바이트(MD80 ERROR VECTOR 하위 8bit) — 드라이버 fault 순간 특정용
+      // ★2026-10-01 명령 ACK(echo) — walk 중 드라이버 출력이 0 이 되는 구간이 '명령 미도달'인지 가리기 위함.
+      //   ackl = 보낸 명령이 echo 로 돌아오기까지 지연[틱] · acks = 새 echo 없이 지난 read 수(-1=echo 없음, -9=미지원)
+      for(int i=0;i<NCH;i++) fprintf(f,",ackl%d",i);
+      for(int i=0;i<NCH;i++) fprintf(f,",acks%d",i);
       for(int i=0;i<8;i++) fprintf(f,",auxp%d",i); for(int i=0;i<8;i++) fprintf(f,",auxv%d",i);
       fprintf(f,",gyr0,gyr1,gyr2,rpy0,rpy1,rpy2,acc0,acc1,acc2"); }   // acc=몸통 선가속(중력제거) — 수직 튐 판별
     fprintf(f,"\n"); };
@@ -2416,6 +2420,9 @@ int main(int argc, char** argv){
         if(TRACE_KEEP) for(int i=0;i<NCH;i++) fprintf(trc,",%.3f",(double)tau_ff_out[i]);
         if(TRACE_KEEP) for(int i=0;i<NCH;i++) fprintf(trc,",%.1f",(mode=="walk"||mode=="stand")?(double)vcmd_ch[i]:0.0);
         if(TRACE_KEEP) for(int i=0;i<NCH;i++) fprintf(trc,",%d",(i<(int)hs.status.size())?(int)(hs.status[i]&0xff):-1);
+        if(TRACE_KEEP){ int al[16]={0}, as_[16]={0}; const bool aok = (hw->ack(al, as_) == 0);
+          for(int i=0;i<NCH;i++) fprintf(trc,",%d", aok ? al[i] : -9);
+          for(int i=0;i<NCH;i++) fprintf(trc,",%d", aok ? as_[i] : -9); }
         if(TRACE_KEEP){ float ap[16]={0}, av[16]={0}; hw->aux(ap,av);   // 출력축(감속기 뒤·벨트 앞) — 캐시 복사라 가벼움
           for(int i=0;i<8;i++) fprintf(trc,",%.3f",(double)ap[i]); for(int i=0;i<8;i++) fprintf(trc,",%.2f",(double)av[i]);
           fprintf(trc,",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f",(double)hs.gyr[0],(double)hs.gyr[1],(double)hs.gyr[2],

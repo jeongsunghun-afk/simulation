@@ -108,6 +108,9 @@ start)
     #   돌리므로, 드물게 나오는 STT 줄이 하필 건너뛰어질 수 있다.
     #   이 로그의 존재 이유가 동결 진단이므로 그 경우에 유리한 쪽을 택한다.
     #   패턴별이면 각 패턴이 **독립적으로** 1/n 로 남는다.
+    # ★2026-10-01 `[IMU(Dev` 줄도 1/n 로 솎는다. Emb defineGeneral.h:58 DBG_ENA_halIMU_SENSING_DAT 가
+    #   켜져 있어(09-16 매크로 정리 때 누락, git HEAD 09-02 부터 ON) IMU 100Hz 마다 한 줄 → 52 KB/s(190MB/h)
+    #   를 SD(/tmp)에 썼다. Emb 소스(RGA)는 안 건드리고 여기서만 거른다. 근본 해결은 RGA 가 매크로 OFF.
     _every=${EMB_LOG_EVERY:-500}
     # ★2026-09-22 Emb 를 코어 0,1 에 고정 기동(런치타임 affinity=자기 자식이라 sudo 불필요).
     #   deploy RT(코어 2,3)와 분리 → 제어루프 스톨/속도 글리치 방지. Emb 90% CPU 가 떠다니며
@@ -117,6 +120,7 @@ start)
             /^\[STT\]RxCnt/    { if (++a % n) next }
             /^\[SET\]RxCnt/    { if (++b % n) next }
             /^\[engRobot_Proc/ { if (++d % n) next }
+            /^\[IMU\(Dev/       { if (++e % n) next }
             { print; fflush() }' \
         > "$LOG" & )
     sleep 2
