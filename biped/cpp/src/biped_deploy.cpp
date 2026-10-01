@@ -596,8 +596,31 @@ int main(int argc, char** argv){
     std::printf("[deploy] ★IMU_PITCH_OFS_DEG=%+.2f — 제어기 pitch 에서 이만큼 뺀다(IMU↔기구학 불일치 보정)\n", atof(getenv("IMU_PITCH_OFS_DEG")));
   if(getenv("WALK_FF_SCALE") && atof(getenv("WALK_FF_SCALE")) < 1.0)
     std::printf("[deploy] ★WALK_FF_SCALE=%.2f — walk WBIC FF 비중 상한(나머지는 드라이버 PD 추종)\n", atof(getenv("WALK_FF_SCALE")));
+  // ★2026-10-01 WALK_FF_SCALE_CH — walk WBIC FF 비중을 **채널별로**(쉼표 목록, 채널 순서 ch0,ch1,…). 미지정 채널은 WALK_FF_SCALE.
+  //   왜: 지연된 WBIC 토크가 15–50Hz 떨림에 에너지를 넣는 건 주로 hip roll 이다(FF1.0 실기 094650/093747,
+  //     왕복지연 4~7틱 반영 대역 일률: hip +6~10W 로 드라이버 kd 흡수를 넘음 · calf/foot +1~2W 는 kd 2~4W 가 이김).
+  //     반면 전 축 0.5 는 foot 를 명령 대비 7~10° 처지게 했다(foot kp 가 가장 낮아 빠진 FF 를 PD 오차로 메움).
+  //   예: WALK_FF_SCALE_CH=0.5,0.5,1,1,0.5,0.5,1,1 (hip·thigh 0.5 · calf·foot 1.0). 범위 0~1. 원복: 미지정.
+  std::vector<double> ff_scale_ch(NCH, -1.0);
+  if(const char* fs=getenv("WALK_FF_SCALE_CH")){
+    std::stringstream ss(fs); std::string t; int i=0;
+    while(std::getline(ss,t,',') && i<NCH){ if(!t.empty()) ff_scale_ch[i]=std::max(0.0,std::min(1.0,atof(t.c_str()))); i++; }
+    const double base = getenv("WALK_FF_SCALE") ? std::max(0.0,std::min(1.0,atof(getenv("WALK_FF_SCALE")))) : 1.0;
+    std::printf("[deploy] ★WALK_FF_SCALE_CH — walk WBIC FF 채널별 비중(미지정=WALK_FF_SCALE %.2f):", base);
+    for(const auto& j : cfg.joints) if(j.channel>=0 && j.channel<NCH)
+      std::printf("  %s(ch%d) %.2f", j.name.c_str(), j.channel, ff_scale_ch[j.channel]<0?base:ff_scale_ch[j.channel]);
+    std::printf("\n");
+  }
   if(getenv("WALK_FF_LPF_HZ") && atof(getenv("WALK_FF_LPF_HZ")) > 0)
     std::printf("[deploy] ★WALK_FF_LPF_HZ=%.1f — walk WBIC FF 저역통과(점발 FF 널뛰기 억제)\n", atof(getenv("WALK_FF_LPF_HZ")));
+  if(getenv("STAND_FF_NOTCH_HZ") && atof(getenv("STAND_FF_NOTCH_HZ")) > 0)
+    std::printf("[deploy] ★STAND_FF_NOTCH_HZ=%.1f (Q %.1f) — stand WBIC FF 노치(평발 stand 40Hz 자려진동 억제)\n",
+                atof(getenv("STAND_FF_NOTCH_HZ")), getenv("STAND_FF_NOTCH_Q") ? atof(getenv("STAND_FF_NOTCH_Q")) : 2.0);
+  if(getenv("WALK_FF_NOTCH_HZ"))
+    std::printf("[deploy] ★WALK_FF_NOTCH_HZ=%s (Q %.1f) — walk WBIC FF 노치(지연 때문에 주입이 되는 대역 제거)\n",
+                getenv("WALK_FF_NOTCH_HZ"), getenv("WALK_FF_NOTCH_Q") ? atof(getenv("WALK_FF_NOTCH_Q")) : 2.0);
+  if(getenv("STAND_FF_LPF_HZ") && atof(getenv("STAND_FF_LPF_HZ")) > 0)
+    std::printf("[deploy] ★STAND_FF_LPF_HZ=%.1f — stand WBIC FF 1차 저역통과\n", atof(getenv("STAND_FF_LPF_HZ")));
   std::printf("[deploy] walk 한정: 트립 %.0fdps/%.1fNm · kd×%.2f (타 모드 %.0fdps/%.1fNm·kd 유지)\n",
               WALK_VEL_TRIP, WALK_TAU_TRIP, WALK_KD_FLOOR, cfg.vel_trip_dps, cfg.tau_trip_nm);
   const double FLOAT_KD = getenv("FLOAT_KD") ? atof(getenv("FLOAT_KD")) : 0.30;
@@ -2348,14 +2371,62 @@ int main(int argc, char** argv){
           if(!fflp_on){ for(int i=0;i<NCH;i++) fflp[i] = tau_ch[i]; fflp_on = true; }
           for(int i=0;i<NCH;i++){ fflp[i] += (float)(al*(double)(tau_ch[i]-fflp[i])); tau_ch[i] = fflp[i]; }
         } else fflp_on = false; }
+      // ★2026-10-01 WALK_FF_NOTCH_HZ — walk 의 WBIC FF 토크 노치(쉼표 목록 최대 3개 · 기본 미지정 = 끔 = 종전).
+      //   왜: stand 40Hz 와 같은 원리 — WBIC 토크가 8~14ms 늦게 들어가 그 대역에선 감쇠가 아니라 주입이 된다.
+      //     walk 실기 대역 일률(왕복지연 4~7틱 반영, 8축 합, 10-01 094650·155722·171117):
+      //       무릎–발목 12~18Hz  WBIC FF +9~13W(FF0.5) · +26W(FF1.0) vs 드라이버 kd −9~13 / −28W → 순 주입(calf·foot)
+      //       hip roll 18~22Hz   FF1.0 +11W vs kd −11W(FF0.5 는 +1W) · 22Hz 위는 kd 가 이김
+      //     무릎–발목 모드는 보행 주기(2.9~4.9Hz)와 무관하게 14.5~15Hz 고정 공진(calf·foot 역위상).
+      //   권장 시험: WALK_FF_NOTCH_HZ=15,19.5 (Q=WALK_FF_NOTCH_Q, 기본 2). 두 노치 합 5Hz 위상 약 −18°.
+      //   walk 진입 순간 상태를 현재 FF 로 맞춰 계단 없음. WALK_FF_LPF 뒤 · WALK_FF_SCALE 앞. 원복: 미지정.
+      { static std::vector<double> wnf; static bool wnf_init = false;
+        if(!wnf_init){ wnf_init = true;
+          if(const char* s = getenv("WALK_FF_NOTCH_HZ")){ std::stringstream ss(s); std::string t;
+            while(std::getline(ss, t, ',') && wnf.size() < 3){ const double f = atof(t.c_str()); if(f > 0.0 && f < 0.45/dt) wnf.push_back(f); } } }
+        static const double WNQ = env_gd("WALK_FF_NOTCH_Q", 2.0, 0.3, 20.0);
+        static std::vector<double> wz(3*NCH*4, 0.0); static bool wn_on = false;
+        if(mode=="walk" && !wnf.empty()){
+          if(!wn_on){ for(size_t k=0;k<wnf.size();k++) for(int i=0;i<NCH;i++) for(int s=0;s<4;s++) wz[(k*NCH+i)*4+s] = (double)tau_ch[i]; wn_on = true; }
+          for(size_t k=0;k<wnf.size();k++){
+            const double w0 = 2.0*M_PI*wnf[k]*dt, al = std::sin(w0)/(2.0*WNQ), c = std::cos(w0), a0 = 1.0 + al;
+            const double b0 = 1.0/a0, b1 = -2.0*c/a0, b2 = 1.0/a0, a1 = -2.0*c/a0, a2 = (1.0 - al)/a0;
+            for(int i=0;i<NCH;i++){ double* z = &wz[(k*NCH+i)*4]; const double x = (double)tau_ch[i];   // z = x1,x2,y1,y2
+              const double y = b0*x + b1*z[0] + b2*z[1] - a1*z[2] - a2*z[3];
+              z[1]=z[0]; z[0]=x; z[3]=z[2]; z[2]=y; tau_ch[i] = (float)y; } }
+        } else wn_on = false; }
+      // ★2026-10-01 STAND_FF_NOTCH_HZ / STAND_FF_LPF_HZ — stand 의 WBIC FF 토크 필터 (기본 0 = 끔 = 종전 동작).
+      //   왜: 평발 stand "툭 치면 부르르" = 약 40Hz(36~42) thigh–calf–foot 자려진동(10-01 arm_trace_home_180950).
+      //     블렌드 중엔 1~2°/s 로 조용하다가 블렌드가 끝나 WBIC 가 100% 가 되고 0.4s 뒤부터 0.1~0.15s 마다
+      //     2배로 자람(HL calf 가 먼저, hip 은 0.3~0.4s 늦게 끌려감 — hip 설정 문제 아님).
+      //     25–45Hz 일률(왕복지연 4~7틱 반영): WBIC tff +1.35~1.47W vs 드라이버 kd −0.84~0.96W → 순 주입.
+      //     목표각(q_des) 항 0. walk 에는 WALK_FF_LPF·WALK_FF_SCALE 이 있었지만 stand 엔 없었다.
+      //   NOTCH: 2차 노치(RBJ) 중심 HZ · 폭 ≈ HZ/Q (Q=STAND_FF_NOTCH_Q, 기본 2). DC 이득 1 · 5Hz 위상 영향 약 −4°.
+      //   LPF  : 1차 저역통과(walk 와 같은 식). 위상 추정상 10Hz 면 40Hz 대 주입 약 −45%(지연 가정에 민감).
+      //   stand 진입 순간 필터 상태를 현재 FF 로 맞춰 계단이 없다. 둘 다 주면 노치 → LPF 순. 원복: 미지정.
+      { static const double SN_F = env_gd("STAND_FF_NOTCH_HZ", 0.0, 0.0, 200.0), SN_Q = env_gd("STAND_FF_NOTCH_Q", 2.0, 0.3, 20.0);
+        static const double SL_F = env_gd("STAND_FF_LPF_HZ", 0.0, 0.0, 100.0);
+        static std::vector<double> nx1(NCH,0.0), nx2(NCH,0.0), ny1(NCH,0.0), ny2(NCH,0.0), slp(NCH,0.0); static bool sf_on = false;
+        if(mode=="stand" && (SN_F > 0.0 || SL_F > 0.0)){
+          if(!sf_on){ for(int i=0;i<NCH;i++){ nx1[i]=nx2[i]=ny1[i]=ny2[i]=slp[i]=(double)tau_ch[i]; } sf_on = true; }
+          if(SN_F > 0.0 && SN_F < 0.45/dt){
+            const double w0 = 2.0*M_PI*SN_F*dt, al = std::sin(w0)/(2.0*SN_Q), c = std::cos(w0), a0 = 1.0 + al;
+            const double b0 = 1.0/a0, b1 = -2.0*c/a0, b2 = 1.0/a0, a1 = -2.0*c/a0, a2 = (1.0 - al)/a0;
+            for(int i=0;i<NCH;i++){ const double x = (double)tau_ch[i];
+              const double y = b0*x + b1*nx1[i] + b2*nx2[i] - a1*ny1[i] - a2*ny2[i];
+              nx2[i]=nx1[i]; nx1[i]=x; ny2[i]=ny1[i]; ny1[i]=y; tau_ch[i]=(float)y; } }
+          if(SL_F > 0.0){ const double al = 1.0 - std::exp(-2.0*M_PI*SL_F*dt);
+            for(int i=0;i<NCH;i++){ slp[i] += al*((double)tau_ch[i] - slp[i]); tau_ch[i] = (float)slp[i]; } }
+        } else sf_on = false; }
       // ★2026-10-01 WALK_FF_SCALE — walk 에서 WBIC FF 비중 상한(기본 1.0 = 종전 동작, 블렌드 bs 위에 곱한다).
       //   실기 점발 walk 3회: WBIC 토크 비중이 ~40% 를 넘는 순간(블렌드 2s)부터 12~50Hz 떨림 30→78°/s,
       //   FF 가 12Nm 를 넘으면(bs>0.9) 드라이버 출력0 구간 20~59%. 처음 한두 걸음(비중<30%)은 조용했다.
       //   sim(드라이버 추종 100%, FF 0.6/0.4): 0낙상 · 0.15m/s 15s 전진 1.96~2.28m(1.0 은 −0.22/1.60) · 높이 2~4cm 처짐.
       //   나머지 힘은 드라이버 PD(KinWBC 계획 q_des·q̇_des 추종)가 맡는다. 원복: 미지정.
+      //   ★WALK_FF_SCALE_CH 가 있으면 그 채널은 그 값을 쓴다(기동부 주석 참조). 둘 다 미지정 = 종전.
       { static const double WALK_FF_SCALE = env_gd("WALK_FF_SCALE", 1.0, 0.0, 1.0);
-        if(mode=="walk" && WALK_FF_SCALE < 1.0)
-          for(int i=0;i<NCH;i++) tau_ch[i] = (float)(WALK_FF_SCALE*(double)tau_ch[i]); }
+        if(mode=="walk")
+          for(int i=0;i<NCH;i++){ const double s = (ff_scale_ch[i] >= 0.0) ? ff_scale_ch[i] : WALK_FF_SCALE;
+            if(s < 1.0) tau_ch[i] = (float)(s*(double)tau_ch[i]); } }
       // 목표: 측정각 → 기하 자세로 블렌드와 **같은 계수**로 이동. bs=1 이면 순수 Qflat8.
       //   ⚠지금은 bs=1 에서 kp=0 이라 이 목표가 무영향이다. 그래도 측정각을 흘려보내지
       //     않는다 — STAND_KP_FLOOR 를 켜는 순간 **의미 있는 목표가 이미 들어가 있어야** 한다.

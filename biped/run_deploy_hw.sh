@@ -119,6 +119,8 @@ export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 #     STANCE_KD=0     접촉 발속도 감쇠 K_D 폐기 — 7Hz 떨림 주경로(발목 80→12°/s). 관절속도는 그대로 씀.
 #     FRIC_COMP=0     마찰보상(음의 감쇠) 끔 — 잔여 7Hz 12→3°/s. NEW Emb 에서 60~80s 자립 확인
 #                     (deploy 의 "~20s 에 넘어진다" 경고는 IMU 1.8s 지연 시절 기록).
+#     STAND_FF_NOTCH_HZ / STAND_FF_LPF_HZ  (선택·기본 없음) stand WBIC FF 노치(Q=STAND_FF_NOTCH_Q 기본 2)/1차 LPF.
+#                     10-01 평발 stand 약 40Hz 자려진동(툭 치면 부르르)은 WBIC tff 가 kd 보다 많이 주입해서 — 시험값 40Hz.
 #     STAND_BLEND_S=5 진입 35Hz 버스트 5→2s(T1-e). STAND_KD_FLOOR 는 1.0 유지(1.3 은 최고치만 −35%·총량 같음).
 #   ◆1점 점발 walk (09-30 T2~T3 계열 5회, arm_trace_walk_17*)
 #     WBIC_MIT=2 STANCE_KD=0      하이브리드(가중QP+J̇q̇, K_D 없음) + KinWBC 계획 q_des·q̇_des
@@ -131,6 +133,12 @@ export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 #     MPC_ASYNC=1                 MPC QP 를 워커 스레드로(제어 루프 2ms 보장). 10-01 실기: 틱>3ms 7~8.5%→0.22%
 #     WALK_FF_SCALE=0.5           WBIC FF 비중 상한. 10-01 실기(FF1.0→0.5): 20~50Hz 떨림 32~34→13~15°/s ·
 #                                 드라이버 출력0 26~33→2~3% · 명령↔실측 상관 0.1→0.6 · walk 56.5s. 0.6 과 사실상 같음.
+#     WALK_FF_SCALE_CH            (선택·기본 없음) 채널별 FF 비중, 미지정 채널=WALK_FF_SCALE. 예 0.5,0.5,1,1,0.5,0.5,1,1
+#                                 지연된 WBIC 가 떨림에 넣는 에너지는 hip roll 이 주범(calf/foot 는 kd 가 이김) · 전 축 0.5 는 foot 7~10° 처짐.
+#     WALK_FF_NOTCH_HZ            (선택·기본 없음) walk WBIC FF 노치, 쉼표 목록 최대 3개(Q=WALK_FF_NOTCH_Q 기본 2). 시험값 15,19.5
+#                                 무릎–발목 15Hz·hip roll 19.5Hz 에서 지연된 WBIC FF 가 kd 보다 많이 주입(stand 40Hz 와 같은 원리).
+#                                 ★기본 15Hz·Q4(10-01 185634 walk 117s: 12–18Hz 35~43→16°/s, 주입 +9~13→+1W, 균형 이상 없음).
+#                                 Q2·15,19.5 는 sim 에서 밀기 회복 악화(FF1.0 은 붕괴) — 보행대역(4–5Hz) 위상을 깎으므로 넓히지 말 것.
 #     RET_TAU=1                   발디딤 복귀앵커(com0) 누설 1s. 10-01 실기 50s walk: 추정 xy 드리프트(1~2m)×K_RETURN 0.15 로
 #                                 착지점이 몸통 대비 ~20cm 앞으로(CAP_CLAMP 포화) → 주저앉음·발목 꺾임·미끌림. sim 재현·해소(밀림 12.8→3.2cm).
 #                                 실기 10-01 171117: walk 133s·발위치/종아리각/높이 내내 유지. ⚠좌우는 사람이 살짝 받침 — 혼자서는 못 선다(측방 균형 미해결).
@@ -138,7 +146,8 @@ export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 #     ⚠MD80 max current 20A ≈ 채널 28Nm 상한 — 크레인 느슨(체중 지지) 시 calf 수요 p99.5 ~45Nm(sim) → 포화 주의.
 if [ "$IS_FLAT" = "1" ]; then
     export STANCE_KD="${STANCE_KD:-0}"; export FRIC_COMP="${FRIC_COMP:-0}"; export STAND_BLEND_S="${STAND_BLEND_S:-5}"
-    DEF_MSG="2점 평발 stand: STANCE_KD=$STANCE_KD FRIC_COMP=$FRIC_COMP STAND_BLEND_S=$STAND_BLEND_S"
+    export STAND_FF_NOTCH_HZ="${STAND_FF_NOTCH_HZ:-40}"   # ★10-01 stand WBIC FF 40Hz 노치(Q2) — 툭 치면 부르르(40Hz 자려진동) 25–50Hz 20→1°/s. 0=끔
+    DEF_MSG="2점 평발 stand: STANCE_KD=$STANCE_KD FRIC_COMP=$FRIC_COMP STAND_BLEND_S=$STAND_BLEND_S FF_NOTCH=${STAND_FF_NOTCH_HZ}Hz"
 else
     export WBIC_MIT="${WBIC_MIT:-2}"; export STANCE_KD="${STANCE_KD:-0}"
     export WALK_TRACK="${WALK_TRACK:-1}"; export TRK_KP="${TRK_KP:-1.0}"; export TRK_KD="${TRK_KD:-1.0}"
@@ -147,7 +156,8 @@ else
     export MPC_ASYNC="${MPC_ASYNC:-1}"   # ★10-01 MPC 워커 스레드 — 실기 틱>3ms 7~8.5%→0.22%(sim 0낙상 동일)
     export WALK_FF_SCALE="${WALK_FF_SCALE:-0.5}"   # ★10-01 WBIC FF 비중 50%(나머지 드라이버 PD 추종) — 실기 떨림 −50%·출력0 30→2%·56.5s walk
     export RET_TAU="${RET_TAU:-1}"   # ★10-01 발디딤 복귀앵커 누설 1s — 추정 드리프트에 착지가 끌려가 앉던 것 해소(0=종전)
-    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG MPC_ASYNC=$MPC_ASYNC FF_SCALE=$WALK_FF_SCALE RET_TAU=$RET_TAU"
+    export WALK_FF_NOTCH_HZ="${WALK_FF_NOTCH_HZ:-15}"; export WALK_FF_NOTCH_Q="${WALK_FF_NOTCH_Q:-4}"   # ★10-01 walk WBIC FF 15Hz 좁은 노치 — 무릎–발목 12–18Hz 떨림 −55~62%·주입 −90%(185634). 0=끔
+    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG MPC_ASYNC=$MPC_ASYNC FF_SCALE=$WALK_FF_SCALE RET_TAU=$RET_TAU FF_NOTCH=${WALK_FF_NOTCH_HZ}Hz/Q$WALK_FF_NOTCH_Q"
 fi
 
 # ── ④hold 중력지지 — 자립 확정 설정 (2026-09-03 실기: 크레인 프리 25s+) ──────
