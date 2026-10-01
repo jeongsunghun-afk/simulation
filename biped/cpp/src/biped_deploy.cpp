@@ -594,6 +594,8 @@ int main(int argc, char** argv){
   }
   if(getenv("IMU_PITCH_OFS_DEG") && atof(getenv("IMU_PITCH_OFS_DEG")) != 0)
     std::printf("[deploy] ★IMU_PITCH_OFS_DEG=%+.2f — 제어기 pitch 에서 이만큼 뺀다(IMU↔기구학 불일치 보정)\n", atof(getenv("IMU_PITCH_OFS_DEG")));
+  if(getenv("WALK_FF_SCALE") && atof(getenv("WALK_FF_SCALE")) < 1.0)
+    std::printf("[deploy] ★WALK_FF_SCALE=%.2f — walk WBIC FF 비중 상한(나머지는 드라이버 PD 추종)\n", atof(getenv("WALK_FF_SCALE")));
   if(getenv("WALK_FF_LPF_HZ") && atof(getenv("WALK_FF_LPF_HZ")) > 0)
     std::printf("[deploy] ★WALK_FF_LPF_HZ=%.1f — walk WBIC FF 저역통과(점발 FF 널뛰기 억제)\n", atof(getenv("WALK_FF_LPF_HZ")));
   std::printf("[deploy] walk 한정: 트립 %.0fdps/%.1fNm · kd×%.2f (타 모드 %.0fdps/%.1fNm·kd 유지)\n",
@@ -2346,6 +2348,14 @@ int main(int argc, char** argv){
           if(!fflp_on){ for(int i=0;i<NCH;i++) fflp[i] = tau_ch[i]; fflp_on = true; }
           for(int i=0;i<NCH;i++){ fflp[i] += (float)(al*(double)(tau_ch[i]-fflp[i])); tau_ch[i] = fflp[i]; }
         } else fflp_on = false; }
+      // ★2026-10-01 WALK_FF_SCALE — walk 에서 WBIC FF 비중 상한(기본 1.0 = 종전 동작, 블렌드 bs 위에 곱한다).
+      //   실기 점발 walk 3회: WBIC 토크 비중이 ~40% 를 넘는 순간(블렌드 2s)부터 12~50Hz 떨림 30→78°/s,
+      //   FF 가 12Nm 를 넘으면(bs>0.9) 드라이버 출력0 구간 20~59%. 처음 한두 걸음(비중<30%)은 조용했다.
+      //   sim(드라이버 추종 100%, FF 0.6/0.4): 0낙상 · 0.15m/s 15s 전진 1.96~2.28m(1.0 은 −0.22/1.60) · 높이 2~4cm 처짐.
+      //   나머지 힘은 드라이버 PD(KinWBC 계획 q_des·q̇_des 추종)가 맡는다. 원복: 미지정.
+      { static const double WALK_FF_SCALE = env_gd("WALK_FF_SCALE", 1.0, 0.0, 1.0);
+        if(mode=="walk" && WALK_FF_SCALE < 1.0)
+          for(int i=0;i<NCH;i++) tau_ch[i] = (float)(WALK_FF_SCALE*(double)tau_ch[i]); }
       // 목표: 측정각 → 기하 자세로 블렌드와 **같은 계수**로 이동. bs=1 이면 순수 Qflat8.
       //   ⚠지금은 bs=1 에서 kp=0 이라 이 목표가 무영향이다. 그래도 측정각을 흘려보내지
       //     않는다 — STAND_KP_FLOOR 를 켜는 순간 **의미 있는 목표가 이미 들어가 있어야** 한다.
