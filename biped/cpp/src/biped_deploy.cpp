@@ -685,16 +685,17 @@ int main(int argc, char** argv){
   }
   std::vector<float> tau_ff_out(NCH, 0.f);
   // FF 토크에 1/α 를 곱해 실기 실현토크를 모델값으로 되돌린다. 전 write_mit 이 이걸 쓴다.
+  std::vector<float> last_ff_sent(NCH, 0.f);   // ★2026-10-01 BUMPLESS_FF 용 — 직전 틱에 실제로 보낸 FF(α보정 전 채널값)
   auto write_ff = [&](const float* qd, const std::vector<float>& tau,
                       const float* kpd, const float* kdd){
-    for(int i=0;i<NCH;i++) tau_ff_out[i] = tau[i] * ff_comp[i];
+    for(int i=0;i<NCH;i++){ tau_ff_out[i] = tau[i] * ff_comp[i]; last_ff_sent[i] = tau[i]; }
     return hw->write_mit(qd, zero.data(), tau_ff_out.data(), kpd, kdd, NCH);
   };
   // ★2026-09-30 MIT식 드라이버 추종 — 계획 관절속도(q̇_des)도 싣는다(write_mit 의 dq_des, 종전 0 고정).
   //   경로 확인: shm_bridge cmd.fVelocity → Emb halGait.cpp:794 외부명령 memcpy → 드라이브(Emb 수정 불필요).
   auto write_ff_v = [&](const float* qd, const float* dqd, const std::vector<float>& tau,
                         const float* kpd, const float* kdd){
-    for(int i=0;i<NCH;i++) tau_ff_out[i] = tau[i] * ff_comp[i];
+    for(int i=0;i<NCH;i++){ tau_ff_out[i] = tau[i] * ff_comp[i]; last_ff_sent[i] = tau[i]; }
     return hw->write_mit(qd, dqd, tau_ff_out.data(), kpd, kdd, NCH);
   };
   if(ACT_ALPHA != 1.0 || alpha_ax[0] > 0){
@@ -866,6 +867,8 @@ int main(int argc, char** argv){
   //   ⇒ 위치게인을 내리면서 WBIC 토크를 올린다. MIT 모드는 둘을 동시에 받으므로
   //     블렌드 중에는 위치제어가 받쳐 주고, 끝나면 순수토크가 된다.
   double stand_t0=0, stand_T=0; std::vector<float> stand_hold(NCH,0.f), stand_to(NCH,0.f), stand_ref(NCH,0.f);
+  std::vector<float> bt_ff(NCH, 0.f); bool bt_on = false;                       // ★BUMPLESS_FF 진입 스냅샷
+  const bool BUMPLESS_FF = getenv("BUMPLESS_FF") && atoi(getenv("BUMPLESS_FF"));
   std::vector<float> trk_q(NCH,0.f), trk_dq(NCH,0.f), vcmd_ch(NCH,0.f);   // ★2026-09-30 WALK_TRACK 목표(채널 deg·dps)
   std::string mode = "off", prev_mode = "off", last_raw;
   bool estop = false, wd_tripped = false;
@@ -1690,6 +1693,13 @@ int main(int argc, char** argv){
             stand_t0 = lt;
             std::printf("[deploy] stand 진입 — 위치제어→토크 **%.1fs 블렌드**"
                         "(계단 전환은 주저앉는다)\n", stand_T);
+            // ★2026-10-01 BUMPLESS_FF=1 — 직전 hold 가 내던 FF(중력지지)를 그대로 받아 블렌드 동안 (1−bs) 로 줄인다.
+            //   왜: 종전엔 진입 틱에 hold FF 가 0 이 되고 WBIC FF 는 bs=0 에서 5s 에 걸쳐 올라와(+LPF) 첫 1s 동안
+            //     다리를 받칠 토크가 거의 없었다 → 실기 192238: 0.2s 만에 foot −0.7→−14.9°, calf +3.6°.
+            //     (게인 ×GUI→×1 계단은 그대로 둔다 — ×10 을 walk 로 넘기면 스텝 중 토크트립 위험.)
+            if(BUMPLESS_FF){ bt_ff = last_ff_sent; bt_on = true; double sabs = 0; for(float v : bt_ff) sabs += std::fabs(v);
+              std::printf("[deploy] ★FF 무충격 전환(BUMPLESS_FF) — 직전 hold FF |τ|합 %.1f Nm 를 블렌드 %.1fs 동안 (1−bs)로 넘긴다\n", sabs, stand_T); }
+            else bt_on = false;
             // ★★c.reset() 전에 **측정 자세를 모델에 주입**한다 (2026-08-20 실기).
             //   reset() 은 d->qpos 를 읽어 com_ref_xy · nominal_off · com_ref_z 를 잡는다.
             //   그런데 hold/home 분기는 d 에 아무것도 주입하지 않는다 — 그래서 그때까지
@@ -2427,6 +2437,10 @@ int main(int argc, char** argv){
         if(mode=="walk")
           for(int i=0;i<NCH;i++){ const double s = (ff_scale_ch[i] >= 0.0) ? ff_scale_ch[i] : WALK_FF_SCALE;
             if(s < 1.0) tau_ch[i] = (float)(s*(double)tau_ch[i]); } }
+      // ★2026-10-01 BUMPLESS_FF — 진입 때 받은 hold FF 를 (1−bs) 로 더한다(필터·스케일 뒤 → 그대로 나감). bs=1 이면 끝.
+      if(bt_on && (mode=="stand" || mode=="walk")){
+        for(int i=0;i<NCH;i++) tau_ch[i] += (float)((1.0 - bs) * (double)bt_ff[i]);
+        if(bs >= 1.0) bt_on = false; }
       // 목표: 측정각 → 기하 자세로 블렌드와 **같은 계수**로 이동. bs=1 이면 순수 Qflat8.
       //   ⚠지금은 bs=1 에서 kp=0 이라 이 목표가 무영향이다. 그래도 측정각을 흘려보내지
       //     않는다 — STAND_KP_FLOOR 를 켜는 순간 **의미 있는 목표가 이미 들어가 있어야** 한다.
