@@ -131,6 +131,9 @@ export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 #     MPC_ASYNC=1                 MPC QP 를 워커 스레드로(제어 루프 2ms 보장). 10-01 실기: 틱>3ms 7~8.5%→0.22%
 #     WALK_FF_SCALE=0.5           WBIC FF 비중 상한. 10-01 실기(FF1.0→0.5): 20~50Hz 떨림 32~34→13~15°/s ·
 #                                 드라이버 출력0 26~33→2~3% · 명령↔실측 상관 0.1→0.6 · walk 56.5s. 0.6 과 사실상 같음.
+#     RET_TAU=1                   발디딤 복귀앵커(com0) 누설 1s. 10-01 실기 50s walk: 추정 xy 드리프트(1~2m)×K_RETURN 0.15 로
+#                                 착지점이 몸통 대비 ~20cm 앞으로(CAP_CLAMP 포화) → 주저앉음·발목 꺾임·미끌림. sim 재현·해소(밀림 12.8→3.2cm).
+#                                 실기 10-01 171117: walk 133s·발위치/종아리각/높이 내내 유지. ⚠좌우는 사람이 살짝 받침 — 혼자서는 못 선다(측방 균형 미해결).
 #     ⚠MD80 속도한계 10 rad/s(=채널 573°/s)에 calf/foot 가 걸려 fault(0xC0) — RGA 10-01 08:14 20 rad/s 로 상향(fault 0 확인).
 #     ⚠MD80 max current 20A ≈ 채널 28Nm 상한 — 크레인 느슨(체중 지지) 시 calf 수요 p99.5 ~45Nm(sim) → 포화 주의.
 if [ "$IS_FLAT" = "1" ]; then
@@ -143,7 +146,8 @@ else
     export STAND_BLEND_S="${STAND_BLEND_S:-5}"; export IMU_PITCH_OFS_DEG="${IMU_PITCH_OFS_DEG:-12.7}"
     export MPC_ASYNC="${MPC_ASYNC:-1}"   # ★10-01 MPC 워커 스레드 — 실기 틱>3ms 7~8.5%→0.22%(sim 0낙상 동일)
     export WALK_FF_SCALE="${WALK_FF_SCALE:-0.5}"   # ★10-01 WBIC FF 비중 50%(나머지 드라이버 PD 추종) — 실기 떨림 −50%·출력0 30→2%·56.5s walk
-    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG MPC_ASYNC=$MPC_ASYNC FF_SCALE=$WALK_FF_SCALE"
+    export RET_TAU="${RET_TAU:-1}"   # ★10-01 발디딤 복귀앵커 누설 1s — 추정 드리프트에 착지가 끌려가 앉던 것 해소(0=종전)
+    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG MPC_ASYNC=$MPC_ASYNC FF_SCALE=$WALK_FF_SCALE RET_TAU=$RET_TAU"
 fi
 
 # ── ④hold 중력지지 — 자립 확정 설정 (2026-09-03 실기: 크레인 프리 25s+) ──────

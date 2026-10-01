@@ -1175,6 +1175,18 @@ struct BipedControl {
     }
     double cya=std::cos(ya),sya=std::sin(ya);   // ★복귀목표 이동=실제 base yaw 기준(base-relative)
     com0[0]+=(cya*vx_cmd-sya*vy_cmd)*dt; com0[1]+=(sya*vx_cmd+cya*vy_cmd)*dt;
+    { // ★2026-10-01 RET_TAU>0 — 발디딤 복귀앵커 com0 를 추정 CoM 쪽으로 시정수 RET_TAU[s] 로 당긴다(누설).
+      //   왜: 추정 xy 는 leg-odom 적분이라 실기서 50s 에 1~2m 드리프트한다(실제로는 크레인에 붙어 제자리).
+      //     그 드리프트×K_RETURN(0.15) 이 dcm_target 의 착지점을 CAP_CLAMP(22cm)까지 한쪽으로 밀었다 —
+      //     10-01 161511 실측: 착지점이 몸통 대비 +8.6/+14.7/+20~22cm(20/30/45s) = 0.15×드리프트와 일치.
+      //     발이 몸 앞에 놓여 크레인에 기대 앉음 → 종아리 −12→−52°·높이 −4cm·발목 꺾임·미끌림 가속.
+      //   누설하면 오차가 (드리프트 속도)×τ 로 묶여 착지가 끌려가지 않는다.
+      //   sim(크레인 0.3·추정 드리프트 ±4cm/s·3시드): 지지발 밀림 최대 12.8→3.2cm · 낙상 3→0 ·
+      //     자유 밀기 60N 낙상 1→1 · 40N 측면 0→0. 대가=자유 제자리 위치유지 약화(크레인 하 무관).
+      //   0=종전(무누설). 되돌리기: RET_TAU=0.
+      static const double RT=getenv("RET_TAU")?atof(getenv("RET_TAU")):0.0;
+      static bool _rt=[&]{ if(RT>0) std::printf("[deploy] ★RET_TAU=%.1fs — 발디딤 복귀앵커 누설(추정 xy 드리프트에 착지가 끌려가지 않게)\n",RT); return true; }(); (void)_rt;
+      if(RT>0){ Vector3d cc=com(); const double a=std::min(1.0,dt/RT); com0[0]+=a*(cc[0]-com0[0]); com0[1]+=a*(cc[1]-com0[1]); } }
     int st,sw; double s; step_gait(dt,st,sw,s);
     { static const int MPC_ASYNC=getenv("MPC_ASYNC")?atoi(getenv("MPC_ASYNC")):0;
       static const int MPC_LAG=getenv("MPC_LAG_TICKS")?atoi(getenv("MPC_LAG_TICKS")):2;
