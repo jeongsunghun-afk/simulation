@@ -11,6 +11,13 @@
 #include <cmath>
 #include <cstring>
 #include <cstdio>
+#include <thread>              // ★2026-09-30 MPC_ASYNC 워커
+#include <mutex>
+#include <condition_variable>
+#include <memory>
+#include <deque>
+#include <chrono>
+#include <pthread.h>
 using namespace Eigen;
 
 struct BipedControl {
@@ -815,7 +822,10 @@ struct BipedControl {
   }
 
   // ── MPC ──
-  Matrix<double,2,3> mpc_grf(int stanceLeg){
+  // ★2026-09-30 MPC 입력 묶음 — 입력은 제어 스레드에서 만들고(빠름) QP 풀이만 따로 돌릴 수 있게 분리.
+  struct MpcJob { bipedmpc::MpcCfg c; Matrix<double,13,1> x0, xr;
+    std::vector<std::array<int,bipedmpc::NF>> cs; std::vector<std::array<Vector3d,bipedmpc::NF>> fp; };
+  void mpc_build(int stanceLeg, MpcJob& J){
     using namespace bipedmpc; MpcCfg c; c.N=MPC_N; c.DT=MPC_DT; c.TOTAL_MASS=mass; c.G_ACC=9.81;
     c.MU=MU_EFF; c.LAMZ_MIN=LAMZ_MIN; c.LAMZ_MAX=2.0*mass*9.81; c.I_BODY=I_body;
     double qd[13]={200,200,100,0,0,200,0,0,1,10,10,1,0}; for(int i=0;i<13;i++) c.Qdiag[i]=qd[i];
@@ -834,8 +844,48 @@ struct BipedControl {
     double ya=base_yaw(), cya=std::cos(ya),sya=std::sin(ya);   // ★속도명령=실제 base yaw(base-relative, 17-DOF yaw_m 방식)
     double vxw=cya*vx_cmd-sya*vy_cmd, vyw=sya*vx_cmd+cya*vy_cmd;
     Matrix<double,13,1> xr; xr<<0,0,yaw_des, cc[0],cc[1],com_ref_z, 0,0,wz_cmd, vxw,vyw,0, -9.81;  // 헤딩참조=yaw_des
-    return mpc_qp_plan(c,x0,cs,fp,xr);
+    J.c=c; J.x0=x0; J.cs=cs; J.fp=fp; J.xr=xr;
   }
+  Matrix<double,2,3> mpc_grf(int stanceLeg){ MpcJob J; mpc_build(stanceLeg,J); return bipedmpc::mpc_qp_plan(J.c,J.x0,J.cs,J.fp,J.xr); }
+
+  // ── ★2026-09-30 MPC 비동기 (MPC_ASYNC) ─────────────────────────────────────────
+  //   실기 점발 walk: 틱의 7~8.5% 가 3ms 초과(stand 0%), 정확히 10틱(=MPC_DT 20ms)마다 —
+  //   제어 스레드 안의 MPC QP 풀이(N=14)가 2ms 예산을 넘었다. 입력은 여기서 만들고 풀이만 워커로 넘긴다.
+  //   제어 루프는 가장 최근에 끝난 해(lam)를 쓴다 — 동기판도 한 번 푼 lam 을 10틱 재사용하므로 의미가 같고,
+  //   차이는 해가 1~2틱 늦게 들어오는 것뿐이다(sim 에서 MPC_ASYNC=2 로 그 지연을 결정적으로 검증).
+  //   MPC_ASYNC: 0=종전 동기(기본) · 1=워커 스레드(배포) · 2=MPC_LAG_TICKS 틱 뒤 적용(sim 검증 흉내)
+  //   워커는 SCHED_OTHER — 제어 스레드(SCHED_FIFO)보다 낮아 제어 루프를 절대 막지 않는다.
+  struct MpcAsync {
+    std::thread th; std::mutex mx; std::condition_variable cv;
+    bool job_ready=false, res_ready=false, stop=false; long job_gen=0, res_gen=-1;
+    MpcJob job; Matrix<double,2,3> res=Matrix<double,2,3>::Zero();
+    long n_submit=0, n_replace=0, n_apply=0, n_solve=0; double ms_max=0, ms_sum=0;
+    ~MpcAsync(){ { std::lock_guard<std::mutex> lk(mx); stop=true; } cv.notify_all(); if(th.joinable()) th.join();
+      if(n_solve>0) std::fprintf(stderr,"[mpc_async] 풀이 %ld회 · 평균 %.2fms · 최대 %.2fms · 제출 %ld · 교체(못 따라감) %ld · 적용 %ld\n",
+                                  n_solve, ms_sum/n_solve, ms_max, n_submit, n_replace, n_apply); }
+    void loop(){
+      for(;;){ MpcJob j; long g;
+        { std::unique_lock<std::mutex> lk(mx); cv.wait(lk,[&]{ return job_ready||stop; });
+          if(stop) return; j=job; g=job_gen; job_ready=false; }
+        const auto t0=std::chrono::steady_clock::now();
+        const Matrix<double,2,3> r=bipedmpc::mpc_qp_plan(j.c,j.x0,j.cs,j.fp,j.xr);
+        const double ms=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-t0).count();
+        { std::lock_guard<std::mutex> lk(mx); res=r; res_gen=g; res_ready=true;
+          n_solve++; ms_sum+=ms; if(ms>ms_max) ms_max=ms; } } }
+    void start(){ th=std::thread(&MpcAsync::loop,this);
+      sched_param sp{}; sp.sched_priority=0; pthread_setschedparam(th.native_handle(), SCHED_OTHER, &sp); }
+  };
+  std::shared_ptr<MpcAsync> mpc_as;           // shared_ptr — BipedControl 복사 가능성 유지
+  long mpc_gen=0; std::deque<std::pair<long,Matrix<double,2,3>>> mpc_lagq;
+  void mpc_submit(int st){ MpcJob J; mpc_build(st,J);
+    if(!mpc_as){ mpc_as=std::make_shared<MpcAsync>(); mpc_as->start(); }
+    { std::lock_guard<std::mutex> lk(mpc_as->mx); if(mpc_as->job_ready) mpc_as->n_replace++;   // 못 푼 옛 작업은 최신으로 교체
+      mpc_as->job=std::move(J); mpc_as->job_gen=mpc_gen; mpc_as->job_ready=true; mpc_as->n_submit++; }
+    mpc_as->cv.notify_one(); }
+  bool mpc_fetch(Matrix<double,2,3>& out){ if(!mpc_as) return false;
+    std::lock_guard<std::mutex> lk(mpc_as->mx); if(!mpc_as->res_ready) return false;
+    mpc_as->res_ready=false; if(mpc_as->res_gen!=mpc_gen) return false;   // 진입 전 세대 결과는 버림
+    out=mpc_as->res; mpc_as->n_apply++; return true; }
 
   // ★평발 MPC: stance 발을 heel+toe 2점으로(총 4점 [HL_h,HL_t,HR_h,HR_t]) → heel/toe fz 분배=CoP=pitch 권한.
   //   f_z≥0(마찰추 내장)이 CoP를 발 안(heel~toe)으로 자동 제약 = ZMP 제약. 단일지지 pitch를 MPC가 계획.
@@ -1126,7 +1176,13 @@ struct BipedControl {
     double cya=std::cos(ya),sya=std::sin(ya);   // ★복귀목표 이동=실제 base yaw 기준(base-relative)
     com0[0]+=(cya*vx_cmd-sya*vy_cmd)*dt; com0[1]+=(sya*vx_cmd+cya*vy_cmd)*dt;
     int st,sw; double s; step_gait(dt,st,sw,s);
-    if(_k%mpc_decim==0) lam=mpc_grf(st);
+    { static const int MPC_ASYNC=getenv("MPC_ASYNC")?atoi(getenv("MPC_ASYNC")):0;
+      static const int MPC_LAG=getenv("MPC_LAG_TICKS")?atoi(getenv("MPC_LAG_TICKS")):2;
+      if(MPC_ASYNC==0){ if(_k%mpc_decim==0) lam=mpc_grf(st); }                          // 종전 동기
+      else if(_k==0){ lam=mpc_grf(st); mpc_gen++; mpc_lagq.clear(); }                     // 진입 첫 틱은 동기(종전과 같음)·이전 세대 폐기
+      else if(MPC_ASYNC==2){ if(_k%mpc_decim==0) mpc_lagq.push_back({_k+MPC_LAG, mpc_grf(st)});
+        while(!mpc_lagq.empty() && mpc_lagq.front().first<=_k){ lam=mpc_lagq.front().second; mpc_lagq.pop_front(); } }
+      else { if(_k%mpc_decim==0) mpc_submit(st); Matrix<double,2,3> r; if(mpc_fetch(r)) lam=r; } }
     _k++;
     if(!have_liftoff[sw]){ liftoff[sw]=foot_center(sw); have_liftoff[sw]=true; }
     Vector3d p,v; swing_traj(sw,s,p,v);

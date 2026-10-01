@@ -128,7 +128,9 @@ export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 #     STAND_BLEND_S=5             walk 진입 토크 인수 5s
 #     IMU_PITCH_OFS_DEG=12.7      IMU pitch ↔ 관절기구학 +12.7° 불일치 보정(적용 시 제자리 유지 4~5s·전엔 앞으로 달림).
 #                                 ⚠수평계 확인 전 · 평발 stand 에는 아직 미적용(미시험)
-#     ⚠MD80 속도한계 10 rad/s(=채널 573°/s)에 calf/foot 가 걸려 fault(0xC0) — RGA 10-01 상향 후 walk.
+#     MPC_ASYNC=1                 MPC QP 를 워커 스레드로(제어 루프 2ms 보장). 10-01 실기: 틱>3ms 7~8.5%→0.22%
+#     ⚠MD80 속도한계 10 rad/s(=채널 573°/s)에 calf/foot 가 걸려 fault(0xC0) — RGA 10-01 08:14 20 rad/s 로 상향(fault 0 확인).
+#     ⚠MD80 max current 20A ≈ 채널 28Nm 상한 — 크레인 느슨(체중 지지) 시 calf 수요 p99.5 ~45Nm(sim) → 포화 주의.
 if [ "$IS_FLAT" = "1" ]; then
     export STANCE_KD="${STANCE_KD:-0}"; export FRIC_COMP="${FRIC_COMP:-0}"; export STAND_BLEND_S="${STAND_BLEND_S:-5}"
     DEF_MSG="2점 평발 stand: STANCE_KD=$STANCE_KD FRIC_COMP=$FRIC_COMP STAND_BLEND_S=$STAND_BLEND_S"
@@ -137,7 +139,8 @@ else
     export WALK_TRACK="${WALK_TRACK:-1}"; export TRK_KP="${TRK_KP:-1.0}"; export TRK_KD="${TRK_KD:-1.0}"
     export WALK_FF_LPF_HZ="${WALK_FF_LPF_HZ:-10}"; export FLAT_STEPH="${FLAT_STEPH:-0.03}"
     export STAND_BLEND_S="${STAND_BLEND_S:-5}"; export IMU_PITCH_OFS_DEG="${IMU_PITCH_OFS_DEG:-12.7}"
-    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG"
+    export MPC_ASYNC="${MPC_ASYNC:-1}"   # ★10-01 MPC 워커 스레드 — 실기 틱>3ms 7~8.5%→0.22%(sim 0낙상 동일)
+    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG MPC_ASYNC=$MPC_ASYNC"
 fi
 
 # ── ④hold 중력지지 — 자립 확정 설정 (2026-09-03 실기: 크레인 프리 25s+) ──────
