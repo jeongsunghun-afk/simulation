@@ -141,6 +141,11 @@ export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 #                                 walk 77.7s 무동결·몸통 옆쏠림 std 1.86cm(오늘 최저)·떨림 FF0.5 수준·foot 처짐 +6.3°(FF0.5 +8.6°).
 #                                 kd 를 올려 떨림을 잡았기 때문에 FF 를 올릴 수 있다. kd 1.0 이면 0.75 도 떨림 1.5배 → 그땐 0.5.
 #                                 FF1.0 은 실기 2/2 가 walk 10s 안에 통신 동결(전류·떨림 큼) — 크레인 확실할 때만.
+#     EST_ACC_FUSE_HZ=2           ★10-02 제어기에 주는 몸통 옆(y)속도 상보필터: 2Hz 아래 = 다리 기구학(leg-odom), 위 = IMU 옆가속(acc1×0.67) 적분.
+#                                 기구학 옆속도는 다리 떨림이 섞여 잡음 0.35m/s(실제 변동 0.11)·보행대역 ~100ms 늦어 발디딤이 반대로 반응했다
+#                                 ("왼쪽으로 기울이면 오른쪽으로 보정"). sim 에 같은 잡음·지연 주입 → 제자리 30s 7/12 낙상, 2Hz 융합 1/12.
+#                                 실기 ⑯(exp_logs/walk_20261002_200002): 같은 높이(est_z ~55cm)에서 ⑬ 대비 옆흔들림 1.49→0.80cm·roll 1.41→0.79°.
+#                                 0.5Hz 는 불안정(IMU 적분을 보행대역까지 믿음) · 1Hz 미시험 · 전후 속도는 종전 그대로. 0=끔(종전).
 #     WALK_HIP_NOTCH_HZ           (선택·기본 없음) hip roll 채널에만 FF 노치(Q=WALK_HIP_NOTCH_Q 기본 2). 시험값 19.5
 #     TRK_KD_HIP                  (선택·기본 1) walk 추종 중 hip roll 드라이버 kd 배율. 시험값 1.5
 #                                 둘 다 FF1.0 남은 19.5Hz(hip roll 이 지연 때문에 주입) 대책 후보 — sim 은 밀기 소폭 악화, 실기 A/B 로 판정.
@@ -166,10 +171,11 @@ else
     export STAND_BLEND_S="${STAND_BLEND_S:-5}"; export IMU_PITCH_OFS_DEG="${IMU_PITCH_OFS_DEG:-12.7}"
     export MPC_ASYNC="${MPC_ASYNC:-1}"   # ★10-01 MPC 워커 스레드 — 실기 틱>3ms 7~8.5%→0.22%(sim 0낙상 동일)
     export WALK_FF_SCALE="${WALK_FF_SCALE:-0.75}"   # ★10-02 0.75 + TRK_KD1.5 = 오늘 최선(옆쏠림 최저·처짐 6°·무동결 77.7s)
+    export EST_ACC_FUSE_HZ="${EST_ACC_FUSE_HZ:-2}"   # ★10-02 몸통 옆속도 = 저주파 leg-odom + 고주파 IMU 가속 적분 — 옆흔들림·roll 절반(⑯). 0=종전
     export RET_TAU="${RET_TAU:-1}"   # ★10-01 발디딤 복귀앵커 누설 1s — 추정 드리프트에 착지가 끌려가 앉던 것 해소(0=종전)
     export WALK_FF_NOTCH_HZ="${WALK_FF_NOTCH_HZ:-15}"; export WALK_FF_NOTCH_Q="${WALK_FF_NOTCH_Q:-4}"   # ★10-01 walk WBIC FF 15Hz 좁은 노치 — 무릎–발목 12–18Hz 떨림 −55~62%·주입 −90%(185634). 0=끔
     export BUMPLESS_FF="${BUMPLESS_FF:-1}"   # ★10-01 hold→walk 진입 때 hold FF 를 블렌드 동안 넘김 — 진입 0.2s foot 14° 낙하 방지(0=종전)
-    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG MPC_ASYNC=$MPC_ASYNC FF_SCALE=$WALK_FF_SCALE RET_TAU=$RET_TAU FF_NOTCH=${WALK_FF_NOTCH_HZ}Hz/Q$WALK_FF_NOTCH_Q BUMPLESS=$BUMPLESS_FF"
+    DEF_MSG="1점 점발 walk: WBIC_MIT=$WBIC_MIT STANCE_KD=$STANCE_KD WALK_TRACK=$WALK_TRACK TRK=$TRK_KP/$TRK_KD FF_LPF=${WALK_FF_LPF_HZ}Hz STEPH=$FLAT_STEPH BLEND=${STAND_BLEND_S}s IMU_OFS=$IMU_PITCH_OFS_DEG MPC_ASYNC=$MPC_ASYNC FF_SCALE=$WALK_FF_SCALE RET_TAU=$RET_TAU FF_NOTCH=${WALK_FF_NOTCH_HZ}Hz/Q$WALK_FF_NOTCH_Q BUMPLESS=$BUMPLESS_FF ACC_FUSE=${EST_ACC_FUSE_HZ}Hz"
 fi
 
 # ── ④hold 중력지지 — 자립 확정 설정 (2026-09-03 실기: 크레인 프리 25s+) ──────
