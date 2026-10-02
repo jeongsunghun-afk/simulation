@@ -2421,7 +2421,7 @@ int main(int argc, char** argv){
       //   안전: 목표−측정 차를 ±TRK_QERR_DEG(기본 15°), |q̇_des| 를 TRK_DQ_MAX(기본 600dps)로 자른다.
       //   원복: WALK_TRACK 미지정. 백업 biped_deploy.cpp.bak_mit_<시각>.
       static const bool   WALK_TRACK = getenv("WALK_TRACK") && atoi(getenv("WALK_TRACK"));
-      static const double TRK_KP = env_gd("TRK_KP", 1.0, 0.0, 1.5), TRK_KD = env_gd("TRK_KD", 1.0, 0.0, 1.5);
+      static const double TRK_KP = env_gd("TRK_KP", 1.0, 0.0, 1.5), TRK_KD = env_gd("TRK_KD", 1.0, 0.0, 3.0);   // ★10-02 상한 1.5→3.0 (2.0 이 범위 밖이라 말없이 기본 1.0 으로 떨어졌다 — 배너 603행은 원값 표시)
       static const double TRK_QERR = env_gd("TRK_QERR_DEG", 15.0, 1.0, 45.0), TRK_DQMAX = env_gd("TRK_DQ_MAX", 600.0, 50.0, 1500.0);
       const bool trk = WALK_TRACK && mode=="walk" && c.cmode!=1 && c.mit_valid;
       const double kdf_tgt = (mode=="walk") ? (trk ? TRK_KD : WALK_KD_FLOOR)

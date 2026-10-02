@@ -827,10 +827,38 @@ struct BipedControl {
     Vector3d p1(tgt[0],tgt[1],gz);
     double ss=std::min(std::max(s,0.0),1.0);
     double sm=10*ss*ss*ss-15*ss*ss*ss*ss+6*ss*ss*ss*ss*ss;
-    double dsm=(30*ss*ss-60*ss*ss*ss+30*ss*ss*ss*ss)/std::max(1e-6,(1-DS_FRAC)*T_STEP);
+    // ★2026-10-02 SWV_SSN — 스윙 속도의 시간 기준을 위치와 같은 SS_NOMINAL 로 맞춘다(기본 0 = 종전).
+    //   점발 step_gait 의 위치 위상은 s = t_ss/SS_NOMINAL(0.16s) 인데 속도는 ds/dt 를 1/((1−DS_FRAC)·T_STEP)=1/0.27s 로 써서
+    //   스윙 목표속도(→KinWBC q̇_des → 드라이버 kd 기준)가 실제 궤적 미분의 ~0.59배였다. 실기 hip q̇_des ≈ 0.03~0.13×d(q_des)/dt.
+    //   궤적을 그대로 미분한 값을 쓰는 표준 방식(MIT 등)이다 — 비표준 SWV_TGT(목표 이동속도 주입)의 대안.
+    //   ⚠10-02 sim(지연 12ms·옆속도 잡음/지연·융합 2Hz·12시드×제자리/옆40/앞40, 낙상/36): kd1.5 15 · kd1.5+SSN 24 · kd2.0+SSN 25 ·
+    //   kd2.5+SSN 29 — **악화, 기각(기본 끔 유지)**. q̇_des p99 310→460~550°/s·스윙 hip 오차 0.77→1.1~1.7°. 같은 조건 kd2.0+SWV_TGT 5.
+    static const bool SWV_SSN=getenv("SWV_SSN")&&atoi(getenv("SWV_SSN"));
+    static bool _ssn=[&]{ if(SWV_SSN) std::printf("[ctrl] ★SWV_SSN=1 — 스윙 속도 시간기준 = SS_NOMINAL %.3fs (종전 (1−DS_FRAC)·T_STEP %.3fs)\n",SS_NOMINAL,(1-DS_FRAC)*T_STEP); return true; }(); (void)_ssn;
+    double dsm=(30*ss*ss-60*ss*ss*ss+30*ss*ss*ss*ss)/std::max(1e-6,SWV_SSN?SS_NOMINAL:(1-DS_FRAC)*T_STEP);
     p=p0+(p1-p0)*sm; double zl=4*STEP_H*ss*(1-ss);
     p[2]=p0[2]+(p1[2]-p0[2])*sm+zl;
     v=(p1-p0)*dsm; v[2]=(p1[2]-p0[2])*dsm+4*STEP_H*(1-2*ss)*dsm;
+    // ★2026-10-02 SWV_TGT — 스윙 목표속도에 "착지 목표 p1 자체가 움직이는 속도"(ṗ1, 10Hz LPF)를 더한다(기본 0 = 종전).
+    //   p = p0+(p1−p0)·sm 이므로 ṗ 에는 ṗ1·sm 항이 있는데 종전 v 에는 빠져 있었다. 점발은 캡처 발디딤이라 측방 목표가
+    //   매 틱 움직이고, 그 움직임이 KinWBC q̇_des 에 안 실려 실기 hip q̇_des ≈ 0.02×(실제 q_des 변화속도)였다.
+    //   추종 모드 드라이버는 kd·(q̇_des − q̇) 라 hip 이 의도대로 움직여도 kd 가 그걸 제동한다(TRK_KD 1.5 에서 hip kd/kp=90ms).
+    //   sim(옆속도 잡음 0.35·지연 100ms·융합 2Hz, 12시드×제자리/옆40/앞40 낙상): kd1.5 8/36 · kd2.0 단독 27/36(악화) ·
+    //   **kd2.0+SWV_TGT 1/36** · kd2.5/3.0+SWV_TGT 3/36. 대가: 토크 RMS +15%(열 확인). 원복: SWV_TGT 미지정.
+    //   ⚠10-02 실기 ⑰(arm_trace_home_202945): TRK_KD 가 범위 밖(2.0>1.5)이라 kd 1.0 으로 떨어진 채 10Hz 버전을 켜자 walk 4.5s 에
+    //   foot q̇_des p99 9→585°/s 로 자라 foot 1111°/s 속도트립. 착지목표는 측정 몸통속도로 정해지므로 ṗ1 을 q̇_des 에 넣으면
+    //   "다리 움직임 → 측정속도 → 목표 이동 → 다리 목표속도" 지연 되먹임 고리가 생긴다. sim 재현: kd1.0+10Hz 6/8 낙상(12ms 지연 8/8).
+    //   → 안전장치 SWV_TGT_HZ(기본 4Hz, 고리 이득↓)·SWV_TGT_MAX(기본 0.5 m/s, 수평 크기 상한). sim(12ms 지연·12시드×3, 낙상/36):
+    //   kd1.5 16 · kd1.0+TGT 19(발산 없음, q̇_des p99 339 vs 10Hz 566) · kd1.5+TGT 5 · kd2.0+TGT 4 · kd2.5+TGT 2. **kd 1.5 미만에서 켜지 말 것.**
+    { static const bool SWT=getenv("SWV_TGT")&&atoi(getenv("SWV_TGT"));
+      static const double THZ=getenv("SWV_TGT_HZ")?atof(getenv("SWV_TGT_HZ")):4.0, TMX=getenv("SWV_TGT_MAX")?atof(getenv("SWV_TGT_MAX")):0.5;
+      static bool _swt=[&]{ if(SWT) std::printf("[ctrl] ★SWV_TGT=1 — 스윙 목표속도에 착지목표 이동속도(ṗ1·sm) 포함 · LPF %.1fHz · 상한 %.2f m/s\n",THZ,TMX); return true; }(); (void)_swt;
+      static Vector3d p1p[2]={Vector3d::Zero(),Vector3d::Zero()}, p1d[2]={Vector3d::Zero(),Vector3d::Zero()}; static double sp[2]={1,1};
+      if(SWT){ const double dtc=m->opt.timestep, al=1.0-std::exp(-2*M_PI*THZ*dtc);   // m->opt.timestep = 제어주기 2ms(MJCF·ctrl_hz 500 동일)
+        if(ss<sp[leg]){ p1p[leg]=p1; p1d[leg].setZero(); }          // 새 스윙 시작 — 목표 기억 초기화
+        Vector3d raw=(p1-p1p[leg])/dtc; raw[2]=0; p1d[leg]+=al*(raw-p1d[leg]); p1p[leg]=p1; sp[leg]=ss;
+        Vector3d add=p1d[leg]; if(TMX>0){ const double n=add.head(2).norm(); if(n>TMX) add*=TMX/n; }
+        v+=add*sm; } }
   }
 
   // ── MPC ──
