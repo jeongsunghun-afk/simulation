@@ -127,17 +127,20 @@ export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 #     STAND_BLEND_S=5 진입 35Hz 버스트 5→2s(T1-e). STAND_KD_FLOOR 는 1.0 유지(1.3 은 최고치만 −35%·총량 같음).
 #   ◆1점 점발 walk (09-30 T2~T3 계열 5회, arm_trace_walk_17*)
 #     WBIC_MIT=2 STANCE_KD=0      하이브리드(가중QP+J̇q̇, K_D 없음) + KinWBC 계획 q_des·q̇_des
-#     WALK_TRACK=1 TRK_KP/KD=1.0  드라이버 추종 — 기준선(kd 15%)은 hip roll 25~28Hz 발산
+#     WALK_TRACK=1 TRK_KP=1.0     드라이버 추종 — 기준선(kd 15%)은 hip roll 25~28Hz 발산
+#     TRK_KD=1.5                  ★10-02 1.0→1.5: 지연 없는 드라이버 감쇠↑(RL 정책과 같은 구조). 추종 모드라 kd 는
+#                                 계획 속도 대비 오차에만 작용(계획된 걸음을 제동하지 않음). FF0.5 실기 떨림 40~50%↓
+#                                 (12-17Hz calf/foot 23→15·hip 8→4°/s)·12-25Hz 순에너지 +0.71→+0.17W.
 #     WALK_FF_LPF_HZ=10           WBIC FF 널뛰기 억제: 부호반전 42.7→7.6/s · 실측↔명령 상관 0.01→0.6~0.7
 #     FLAT_STEPH=0.03             발 드는 높이 6→3cm(관절속도 −26%, sim 0낙상)
 #     STAND_BLEND_S=5             walk 진입 토크 인수 5s
 #     IMU_PITCH_OFS_DEG=12.7      IMU pitch ↔ 관절기구학 +12.7° 불일치 보정(적용 시 제자리 유지 4~5s·전엔 앞으로 달림).
 #                                 ⚠수평계 확인 전 · 평발 stand 에는 아직 미적용(미시험)
 #     MPC_ASYNC=1                 MPC QP 를 워커 스레드로(제어 루프 2ms 보장). 10-01 실기: 틱>3ms 7~8.5%→0.22%
-#     WALK_FF_SCALE=0.5           WBIC FF 비중 상한. ★10-02 하루 1.0 을 기본으로 했다가 **0.5 로 되돌림**:
-#                                 FF1.0 실기 2/2 가 walk 10s 안에 통신 동결(전류·떨림 큼)·17-22Hz 떨림 2배, FF0.75 는 그 중간.
-#                                 FF0.5 = 오늘 최장 walk 77.7s·떨림 최소(12-17Hz calf/foot 23°/s·hip 8°/s). 대가 foot 처짐 +8.6°.
-#                                 (10-01 근거: FF1.0→0.5 로 20~50Hz 떨림 32~34→13~15°/s · 출력0 26~33→2~3%.)
+#     WALK_FF_SCALE=0.75          WBIC FF 비중 상한. ★10-02 결론: **FF0.75 + TRK_KD1.5** 가 오늘 최선(arm_trace_home_175534):
+#                                 walk 77.7s 무동결·몸통 옆쏠림 std 1.86cm(오늘 최저)·떨림 FF0.5 수준·foot 처짐 +6.3°(FF0.5 +8.6°).
+#                                 kd 를 올려 떨림을 잡았기 때문에 FF 를 올릴 수 있다. kd 1.0 이면 0.75 도 떨림 1.5배 → 그땐 0.5.
+#                                 FF1.0 은 실기 2/2 가 walk 10s 안에 통신 동결(전류·떨림 큼) — 크레인 확실할 때만.
 #     WALK_HIP_NOTCH_HZ           (선택·기본 없음) hip roll 채널에만 FF 노치(Q=WALK_HIP_NOTCH_Q 기본 2). 시험값 19.5
 #     TRK_KD_HIP                  (선택·기본 1) walk 추종 중 hip roll 드라이버 kd 배율. 시험값 1.5
 #                                 둘 다 FF1.0 남은 19.5Hz(hip roll 이 지연 때문에 주입) 대책 후보 — sim 은 밀기 소폭 악화, 실기 A/B 로 판정.
@@ -158,11 +161,11 @@ if [ "$IS_FLAT" = "1" ]; then
     DEF_MSG="2점 평발 stand: STANCE_KD=$STANCE_KD FRIC_COMP=$FRIC_COMP STAND_BLEND_S=$STAND_BLEND_S FF_NOTCH=${STAND_FF_NOTCH_HZ}Hz"
 else
     export WBIC_MIT="${WBIC_MIT:-2}"; export STANCE_KD="${STANCE_KD:-0}"
-    export WALK_TRACK="${WALK_TRACK:-1}"; export TRK_KP="${TRK_KP:-1.0}"; export TRK_KD="${TRK_KD:-1.0}"
+    export WALK_TRACK="${WALK_TRACK:-1}"; export TRK_KP="${TRK_KP:-1.0}"; export TRK_KD="${TRK_KD:-1.5}"
     export WALK_FF_LPF_HZ="${WALK_FF_LPF_HZ:-10}"; export FLAT_STEPH="${FLAT_STEPH:-0.03}"
     export STAND_BLEND_S="${STAND_BLEND_S:-5}"; export IMU_PITCH_OFS_DEG="${IMU_PITCH_OFS_DEG:-12.7}"
     export MPC_ASYNC="${MPC_ASYNC:-1}"   # ★10-01 MPC 워커 스레드 — 실기 틱>3ms 7~8.5%→0.22%(sim 0낙상 동일)
-    export WALK_FF_SCALE="${WALK_FF_SCALE:-0.5}"   # ★10-02 1.0→0.5 복귀 — FF1.0 은 10s 내 통신동결·떨림 2배. 0.5 = 최장 walk 77.7s
+    export WALK_FF_SCALE="${WALK_FF_SCALE:-0.75}"   # ★10-02 0.75 + TRK_KD1.5 = 오늘 최선(옆쏠림 최저·처짐 6°·무동결 77.7s)
     export RET_TAU="${RET_TAU:-1}"   # ★10-01 발디딤 복귀앵커 누설 1s — 추정 드리프트에 착지가 끌려가 앉던 것 해소(0=종전)
     export WALK_FF_NOTCH_HZ="${WALK_FF_NOTCH_HZ:-15}"; export WALK_FF_NOTCH_Q="${WALK_FF_NOTCH_Q:-4}"   # ★10-01 walk WBIC FF 15Hz 좁은 노치 — 무릎–발목 12–18Hz 떨림 −55~62%·주입 −90%(185634). 0=끔
     export BUMPLESS_FF="${BUMPLESS_FF:-1}"   # ★10-01 hold→walk 진입 때 hold FF 를 블렌드 동안 넘김 — 진입 0.2s foot 14° 낙하 방지(0=종전)
