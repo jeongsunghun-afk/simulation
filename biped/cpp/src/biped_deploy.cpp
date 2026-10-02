@@ -579,6 +579,17 @@ int main(int argc, char** argv){
   const double WALK_VEL_TRIP = env_gd("WALK_VEL_TRIP_DPS", 900.0, 300.0, 3000.0);
   const double WALK_TAU_TRIP = env_gd("WALK_TAU_TRIP_NM",   25.0,   5.0,   80.0);
   const double WALK_KD_FLOOR = env_gd("WALK_KD_FLOOR",       0.15,  0.0,    1.0);
+  // ★2026-10-02 TAU_RMS — 열(연속전류) 보호. 토크 트립(WALK_TAU_TRIP·tau_trip_nm 50Nm)은 **측정** 토크로
+  //   판정하는데, MD80 전류한계 20A(0.2Nm/A×7 = 채널 28Nm)에서 측정값이 잘려 **절대 안 걸린다**
+  //   (10-01 실기: 명령 42~50Nm → 실측 28~29.5Nm 천장) = 사실상 꺼진 상태였다.
+  //   MD80 연속 10A(쿨링 시 20A) ≈ 채널 14Nm. 10-01 walk 의 20s RMS 최대 10~13.3Nm(FF1.0 hip roll 13.3).
+  //   ⇒ 축별 측정토크² 의 지수이동평균(시정수 TAU_RMS_TAU_S)의 √ 를 본다(off 에서도 계속 → 식는 것 반영).
+  //     WARN 초과 = 경고(5s 솎음 + GUI 표시) · HOLD 초과 = stand/walk → hold 강하(limp 아님) + 래치
+  //     (다른 모드를 한 번 고를 때까지 stand/walk 를 hold 로 누름 — ground_refused 와 같은 규약).
+  //   피크(28Nm 순간)는 막지 않는다 — 착지 충격은 정상이다. 0 = 끔. 원복: TAU_RMS_WARN_NM=0 TAU_RMS_HOLD_NM=0
+  const double TAU_RMS_TAU  = env_gd("TAU_RMS_TAU_S",   20.0, 1.0, 600.0);
+  const double TAU_RMS_WARN = env_gd("TAU_RMS_WARN_NM", 14.0, 0.0,  28.0);
+  const double TAU_RMS_HOLD = env_gd("TAU_RMS_HOLD_NM", 17.0, 0.0,  28.0);
   // ⚠숨은 결합(08-27 검증 확정): 토크트립은 kd 제동이 포함된 명령 에코를 본다 —
   //   calf kd_ch 3.5 × 스윙 673dps ⇒ 전량 41 Nm. WALK_KD_FLOOR > TAU_TRIP/41 이면
   //   **정상 스윙 제동만으로** walk 토크트립이 발화한다. 현장에서 kd 를 올릴 때 같이 볼 것.
@@ -616,6 +627,17 @@ int main(int argc, char** argv){
   if(getenv("STAND_FF_NOTCH_HZ") && atof(getenv("STAND_FF_NOTCH_HZ")) > 0)
     std::printf("[deploy] ★STAND_FF_NOTCH_HZ=%.1f (Q %.1f) — stand WBIC FF 노치(평발 stand 40Hz 자려진동 억제)\n",
                 atof(getenv("STAND_FF_NOTCH_HZ")), getenv("STAND_FF_NOTCH_Q") ? atof(getenv("STAND_FF_NOTCH_Q")) : 2.0);
+  if(getenv("WALK_HIP_NOTCH_HZ") && atof(getenv("WALK_HIP_NOTCH_HZ")) > 0)
+    std::printf("[deploy] ★WALK_HIP_NOTCH_HZ=%.1f (Q %.1f) — walk WBIC FF 노치를 **hip roll 채널에만**\n",
+                atof(getenv("WALK_HIP_NOTCH_HZ")), getenv("WALK_HIP_NOTCH_Q") ? atof(getenv("WALK_HIP_NOTCH_Q")) : 2.0);
+  if(getenv("EST_ACC_FUSE_HZ") && atof(getenv("EST_ACC_FUSE_HZ")) > 0)
+    std::printf("[deploy] ★EST_ACC_FUSE_HZ=%.1f · EST_ACC_SCALE=%.2f — 몸통 옆속도 상보필터(저주파 leg-odom + 고주파 IMU acc1 적분)\n",
+                atof(getenv("EST_ACC_FUSE_HZ")), getenv("EST_ACC_SCALE") ? atof(getenv("EST_ACC_SCALE")) : 0.67);
+  if(getenv("SWING_HIP_KP") || getenv("SWING_HIP_KD"))
+    std::printf("[deploy] ★SWING_HIP_KP=%.2f · SWING_HIP_KD=%.2f — walk 추종 중 **스윙 다리** hip roll 만 kp/kd 배율(40ms 램프)\n",
+                getenv("SWING_HIP_KP") ? atof(getenv("SWING_HIP_KP")) : 1.0, getenv("SWING_HIP_KD") ? atof(getenv("SWING_HIP_KD")) : 1.0);
+  if(getenv("TRK_KD_HIP") && atof(getenv("TRK_KD_HIP")) != 1.0)
+    std::printf("[deploy] ★TRK_KD_HIP=%.2f — walk 추종 중 hip roll 드라이버 kd 배율(지연 없는 국소 감쇠)\n", atof(getenv("TRK_KD_HIP")));
   if(getenv("WALK_FF_NOTCH_HZ"))
     std::printf("[deploy] ★WALK_FF_NOTCH_HZ=%s (Q %.1f) — walk WBIC FF 노치(지연 때문에 주입이 되는 대역 제거)\n",
                 getenv("WALK_FF_NOTCH_HZ"), getenv("WALK_FF_NOTCH_Q") ? atof(getenv("WALK_FF_NOTCH_Q")) : 2.0);
@@ -623,6 +645,8 @@ int main(int argc, char** argv){
     std::printf("[deploy] ★STAND_FF_LPF_HZ=%.1f — stand WBIC FF 1차 저역통과\n", atof(getenv("STAND_FF_LPF_HZ")));
   std::printf("[deploy] walk 한정: 트립 %.0fdps/%.1fNm · kd×%.2f (타 모드 %.0fdps/%.1fNm·kd 유지)\n",
               WALK_VEL_TRIP, WALK_TAU_TRIP, WALK_KD_FLOOR, cfg.vel_trip_dps, cfg.tau_trip_nm);
+  std::printf("[deploy] ★열 보호 TAU_RMS: 시정수 %.0fs · 경고 %.1fNm · hold 강하 %.1fNm (채널, 0=끔. 연속정격 10A≈14Nm)\n",
+              TAU_RMS_TAU, TAU_RMS_WARN, TAU_RMS_HOLD);
   const double FLOAT_KD = getenv("FLOAT_KD") ? atof(getenv("FLOAT_KD")) : 0.30;
   //   ★**기본은 전 축이다.** 무중력은 다리 전체를 무게 없이 만드는 것이 목적이다 —
   //     축이 서로 커플링돼 있어(hip 이 처지면 thigh 의 중력이 바뀐다) 전 축을 같이 놓아야
@@ -829,7 +853,7 @@ int main(int argc, char** argv){
       for(int i=0;i<NCH;i++) fprintf(f,",ackl%d",i);
       for(int i=0;i<NCH;i++) fprintf(f,",acks%d",i);
       for(int i=0;i<8;i++) fprintf(f,",auxp%d",i); for(int i=0;i<8;i++) fprintf(f,",auxv%d",i);
-      fprintf(f,",gyr0,gyr1,gyr2,rpy0,rpy1,rpy2,acc0,acc1,acc2"); }   // acc=몸통 선가속(중력제거) — 수직 튐 판별
+      fprintf(f,",gyr0,gyr1,gyr2,rpy0,rpy1,rpy2,acc0,acc1,acc2,vyod,vyfu,plv,plr,pls,plw"); }   // vyod/vyfu = 몸통 옆속도 leg-odom/융합(EST_ACC_FUSE)   // acc=몸통 선가속(중력제거) — 수직 튐 판별
     fprintf(f,"\n"); };
   bool have_state=false; int ok_reads=0; double live_t0=0;
   std::string boot_mode="off"; bool mode_locked=false;   // ★기동 시 잔여명령 잠금   // ★센서 준비·생존 확인
@@ -869,11 +893,14 @@ int main(int argc, char** argv){
   double stand_t0=0, stand_T=0; std::vector<float> stand_hold(NCH,0.f), stand_to(NCH,0.f), stand_ref(NCH,0.f);
   std::vector<float> bt_ff(NCH, 0.f); bool bt_on = false;                       // ★BUMPLESS_FF 진입 스냅샷
   const bool BUMPLESS_FF = getenv("BUMPLESS_FF") && atoi(getenv("BUMPLESS_FF"));
+  double tr_vyod = 0.0, tr_vyfu = 0.0;   // ★EST_ACC_FUSE 트레이스(몸통 옆속도: leg-odom / 융합, m/s)
+  std::vector<double> tau_ms(NCH,0.0), tau_rms(NCH,0.0);                  // ★TAU_RMS 열 보호(τ² 이동평균·√)
+  double rms_max = 0.0, rms_warn_t = -1e9, rms_latch_t = -1e9; int rms_ch = -1; bool rms_warn = false, rms_latched = false;
   std::vector<float> trk_q(NCH,0.f), trk_dq(NCH,0.f), vcmd_ch(NCH,0.f);   // ★2026-09-30 WALK_TRACK 목표(채널 deg·dps)
   std::string mode = "off", prev_mode = "off", last_raw;
   bool estop = false, wd_tripped = false;
   double tau_over_t0 = -1, vel_over_t0 = -1, last_cmd_t = now_s(), last_pub = 0, hz_ema = cfg.ctrl_hz;
-  Cmd cmd; double body_h = 0.48;   // ★0.50→0.48 (08-28 높이 스윕 — GUI H_DEF_1PT 와 동기)
+  Cmd cmd; double body_h = 0.50;   // ★0.48→0.50 (10-02 — GUI H_DEF_1PT 와 동기. 이전 0.50→0.48 은 08-28 높이 스윕)
   const double watchdog_s = cfg.watchdog_ms/1000.0;
 
   hw->enable(0);
@@ -1232,6 +1259,7 @@ int main(int argc, char** argv){
         }
         if(nm!="stand" && nm!="walk") ground_refused = false;   // ★다른 모드 = 재시도 허용
         if(nm!="push") push_refused = false;                     // ★push 거부도 같은 규약
+        if(nm!="stand" && nm!="walk") rms_latched = false;       // ★열 보호 래치도 같은 규약
         // ★안전 종료 완료 래치 (2026-08-28): 완료 뒤에도 GUI 는 soft_off 를 20ms 마다
         //   계속 보낸다. 그대로 두면 재진입 → hw->enable(1) 로 **드라이브가 되살아난다.**
         //   ground_refused/push_refused 와 같은 규약: 다른 모드를 한 번 고를 때까지 off 유지.
@@ -1245,6 +1273,11 @@ int main(int argc, char** argv){
         //   ⚠접지 검사도 같은 경로였다 — 이 커밋 이전엔 "접지 안 됨" 도 한 번만 막혔다.
         //   ⇒ 다른 모드를 한 번 고를 때까지 stand/walk 를 hold 로 눌러 둔다.
         if(ground_refused && (nm=="stand" || nm=="walk")) nm = "hold";
+        if(rms_latched && (nm=="stand" || nm=="walk")){           // ★열 보호 래치 — GUI 20ms 재발행을 hold 로
+          if(lt - rms_latch_t > 2.0){ rms_latch_t = lt;
+            std::printf("[deploy] ⛔ 열 보호 래치 중 — %s 거부, hold 유지. 다른 모드(hold 등)를 한 번 누른 뒤 재시도"
+                        " (지금 RMS %.1fNm %s).\n", nm.c_str(), rms_max, rms_ch>=0?chname[rms_ch].c_str():"-"); }
+          nm = "hold"; }
         // ★★**움직이는 중에는 무장하지 않는다** (2026-08-20 실기).
         //   속도트립은 *측정* 속도로 걸린다 — 우리가 명령을 안 줘도, 로봇이 이미
         //   무너지는 중이면 무장하는 순간 그대로 트립한다(ch6 201dps · ch2 204 · ch3 224).
@@ -1835,6 +1868,31 @@ int main(int argc, char** argv){
         }
       } else vel_over_t0 = -1;
     } else { tau_over_t0 = -1; vel_over_t0 = -1; }
+    // ★TAU_RMS 열 보호 (선언부 주석). 측정 채널토크² 지수이동평균 — 모드 무관 매 틱(off 면 τ≈0 이라 식는다).
+    { const double a = std::min(1.0, dt / TAU_RMS_TAU);
+      double rmx = 0.0; int rch = -1;
+      for(int i=0;i<NCH;i++){
+        // ★동결 채널 제외(10-02 실기): FDCAN 동결로 값이 얼면 마지막 토크(예 27Nm)가 off 에서도 계속 쌓여
+        //   RMS 가 14→27Nm 로 오르며 거짓 열 경고가 났다. 값이 0.2s 넘게 그대로면(실측 토크는 늘 흔들린다) 0 으로 본다.
+        const double tq = (cfg.installed_has(i) && frz_t[i] < 0.2) ? (double)hs.tau_nm[i] : 0.0;
+        tau_ms[i] += a * (tq*tq - tau_ms[i]);
+        tau_rms[i] = std::sqrt(std::max(0.0, tau_ms[i]));
+        if(tau_rms[i] > rmx){ rmx = tau_rms[i]; rch = i; } }
+      rms_max = rmx; rms_ch = rch;
+      rms_warn = (TAU_RMS_WARN > 0.0 && rmx > TAU_RMS_WARN);
+      if(rms_warn && lt - rms_warn_t > 5.0){ rms_warn_t = lt;
+        std::printf("[deploy] ⚠열 경고: %s 토크 RMS(%.0fs) %.1fNm > %.1fNm(연속정격 10A) · mode=%s%s\n",
+                    rch>=0?chname[rch].c_str():"-", TAU_RMS_TAU, rmx, TAU_RMS_WARN, mode.c_str(),
+                    TAU_RMS_HOLD>0.0 ? " — 계속 오르면 hold 강하" : ""); }
+      if(!estop && TAU_RMS_HOLD > 0.0 && rmx > TAU_RMS_HOLD && (mode=="stand" || mode=="walk")){
+        std::printf("[deploy] ⛔ **열 보호** — %s 토크 RMS %.1fNm > %.1fNm. %s → hold 강하(limp 아님) + 래치.\n"
+                    "         다른 모드를 한 번 고른 뒤 재시도. RMS 가 %.1fNm(경고선) 아래로 식은 뒤 권장(시정수 %.0fs).\n",
+                    rch>=0?chname[rch].c_str():"-", rmx, TAU_RMS_HOLD, mode.c_str(), TAU_RMS_WARN, TAU_RMS_TAU);
+        std::fflush(stdout);
+        hold_ch = hs.q_deg; jm.clamp_ch_via_joint(hold_ch.data());   // stand 폭주 강하와 같은 경로
+        prev_mode = mode; mode = "hold"; mode_t0 = lt;
+        rms_latched = true; rms_latch_t = lt;
+      } }
     if(estop) hw->enable(0);
 
     // (트레이스 기록은 **모드 분기 뒤로** 옮겼다 — 아래 "트레이스 기록" 참조)
@@ -2178,6 +2236,30 @@ int main(int argc, char** argv){
       for(int j=0;j<NJ;j++) d->qpos[7+j]=q_ctrl[j];
       d->qvel[0]=est.v[0]; d->qvel[1]=est.v[1]; d->qvel[2]=est.v[2];
       for(int a=0;a<3;a++) d->qvel[3+a]=gyro[a];
+      // ★2026-10-02 EST_ACC_FUSE_HZ — 제어기에 주는 몸통 **옆(y)** 속도만 상보필터(기본 0 = 끔 = 종전).
+      //   왜: 점발 walk 좌우 무너짐의 원인 = 발디딤 캡처항에 들어가는 옆속도가 잡음(10-02 ③~⑦):
+      //     지지다리 관절속도의 15~20Hz 떨림이 leg-odom 에 그대로 실려 옆속도 잡음 std 0.27~0.51 m/s(실제 변동 ~0.11).
+      //     계획 착지를 실제 옆속도에 회귀한 실효 캡처게인 0.14~0.34(설정 K_LAT 0.5~1.0)·상관 0.16~0.39.
+      //   해법: 저주파 = leg-odom(est.v), 고주파 = IMU 선가속 acc1(몸통 y, 왼쪽 +, 중력제거) 적분 × EST_ACC_SCALE.
+      //     LPF(odom) + HPF(∫acc) — 두 필터 합이 1 이라 실제 속도엔 지연이 없다(단순 저역통과는 sim 서 옆밀기 대폭 악화).
+      //   보정(10-02 arm_trace_home_171546, hold 중 손 좌우흔들기): acc1 부호 + · 상관 0.78 · IMU 가 기구학보다 18ms 빠름 ·
+      //     배율(기구학/IMU) 0.67 → 기본 EST_ACC_SCALE 0.67. 전후는 종전 유지(잘 된다).
+      //   est.v(추정기 내부 상태)는 안 바꾼다 — 바꾸면 추정기 다음 틱 필터로 되먹임돼 LPF(odom) 경로가 오염된다.
+      //   sim(scratch, 6시드): 2Hz·가속잡음 3m/s² → 보통 0낙상·옆60N 2/6 동일·앞60N 3→0/6. 원복: 미지정.
+      { static const double AFH = env_gd("EST_ACC_FUSE_HZ", 0.0, 0.0, 10.0), AFS = env_gd("EST_ACC_SCALE", 0.67, 0.1, 2.0);
+        static double vb_lp = 0.0, vi = 0.0, vi_lp = 0.0; static bool af_on = false;
+        const double cy = std::cos(rpy[2]), sy = std::sin(rpy[2]);
+        const double vx_b = cy*d->qvel[0] + sy*d->qvel[1], vy_b = -sy*d->qvel[0] + cy*d->qvel[1];
+        tr_vyod = vy_b; tr_vyfu = vy_b;
+        if(AFH > 0.0 && c.cmode != 1){
+          const double al = 1.0 - std::exp(-2.0*M_PI*AFH*dt);
+          if(!af_on){ vb_lp = vy_b; vi = vy_b; vi_lp = vy_b; af_on = true; }
+          vb_lp += al*(vy_b - vb_lp);
+          vi    += AFS*(double)hs.acc[1]*dt;
+          vi_lp += al*(vi - vi_lp);
+          const double vy_f = vb_lp + (vi - vi_lp);
+          d->qvel[0] = cy*vx_b - sy*vy_f; d->qvel[1] = sy*vx_b + cy*vy_f; tr_vyfu = vy_f;
+        } else af_on = false; }
       // ★2026-09-29 WBIC 입력 관절속도 처리 — 3택(env). 기본(둘 다 0)=raw(기존동작).
       //   DQ_OBS_HZ>0 : ★속도 observer(깨끗한 위치 q_ctrl 로 dq 추정) — 권장. LPF 와 달리 지연 거의 없음.
       //     (LPF 는 실기서 지연→forward-tip 유발 확인 2026-09-29. observer 가 그 대안.)
@@ -2367,6 +2449,30 @@ int main(int argc, char** argv){
       const double kd_scale = (1.0-bs) + bs*kdf;      // 블렌드 끝에서 kdf 로 수렴
       const double kp_scale = (1.0-bs) + bs*kpf;      // 블렌드 끝에서 kpf 로 수렴
       jm.kp_ch(kp_ch.data(), kp_scale); jm.kd_ch(kd_ch.data(), kd_scale);
+      // ★2026-10-02 TRK_KD_HIP — walk 추종(WALK_TRACK) 중 hip roll 채널 드라이버 kd 만 배율(기본 1 = 종전).
+      //   왜: FF1.0 walk 의 17~22Hz 에서 지연된 WBIC FF 가 hip roll 에 넣는 에너지(+0.37W)가 드라이버 kd 흡수
+      //     (−0.25~−0.30W)를 넘는다(10-02 195006 대역 일률, 6틱 지연 정렬). kd 는 지연 없는 감쇠라 직접 상쇄한다.
+      //   sim(scratch, 6시드): ×1.5 → hip 19.5Hz 순감쇠 2.6→5.1 · 보통보행 0낙상 · 밀기 낙상 2→4/12(옆밀기 8→13°).
+      //   bs 블렌드와 함께 들어간다(진입 계단 없음). 원복: 미지정.
+      { static const double TKH = env_gd("TRK_KD_HIP", 1.0, 0.3, 3.0);
+        if(trk && TKH != 1.0){ const double s_ = 1.0 + bs*(TKH - 1.0);
+          for(int i=0;i<NCH;i++) if(chname[i].find("_hip") != std::string::npos) kd_ch[i] = (float)(s_*(double)kd_ch[i]); } }
+      // ★2026-10-02 SWING_HIP_KP / SWING_HIP_KD — walk 추종 중 **스윙 다리** hip roll 채널만 kp/kd 배율(기본 1 = 종전).
+      //   왜: 실기 10-02 ⑤⑥ — KinWBC 가 명령한 옆 디딤 위치 변화의 41~73% 만 실제로 옮겨지고(sim 은 1.02~1.05),
+      //     착지가 평균 1.5cm 안쪽에 떨어진다 → 측방 캡처 게인(K_LAT)을 올려도 효과가 반감("좌우를 못 잡는다").
+      //     스윙 중 hip roll 오차 평균 2.0~2.3°(p95 5.5~6°)인데 PD 위치토크 3.5~4Nm·실측 |τ| p95 18Nm(한계 42)
+      //     → 모터 힘이 아니라 위치 강성 부족. 스윙 다리는 접지가 없어 kp 를 올려도 지면과 싸우지 않는다.
+      //   지지↔스윙 전환은 40ms 램프(계단 토크 방지)·블렌드 bs 와 곱. sim(이미 추종 1.0): ×2 보통보행 0낙상·옆60N 1→2/6.
+      //   원복: 미지정.
+      { static const double SHK = env_gd("SWING_HIP_KP", 1.0, 0.5, 3.0), SHD = env_gd("SWING_HIP_KD", 1.0, 0.5, 3.0);
+        static double swm[2] = {0.0, 0.0};
+        if(trk && (SHK != 1.0 || SHD != 1.0)){
+          for(int l=0;l<2;l++){ const double tg = (l != c.stance) ? 1.0 : 0.0; swm[l] += std::max(-0.05, std::min(0.05, tg - swm[l])); }
+          for(int i=0;i<NCH;i++){ if(chname[i].find("_hip") == std::string::npos) continue;
+            const int l = (chname[i].rfind("HL", 0) == 0) ? 0 : 1;
+            kp_ch[i] = (float)((1.0 + bs*swm[l]*(SHK - 1.0)) * (double)kp_ch[i]);
+            kd_ch[i] = (float)((1.0 + bs*swm[l]*(SHD - 1.0)) * (double)kd_ch[i]); } }
+        else { swm[0] = swm[1] = 0.0; } }
       for(int i=0;i<NCH;i++) tau_ch[i] = (float)(bs*(double)tau_ch[i]);
       // ★2026-09-30 WALK_FF_LPF_HZ — walk 의 WBIC FF 토크 1차 저역통과 (기본 0 = 끔 = 종전 동작).
       //   실기 점발 T3(arm_trace_walk_171004): FF 가 전 축에서 ±50Nm 를 초당 40~50회 부호반전
@@ -2404,6 +2510,23 @@ int main(int argc, char** argv){
               const double y = b0*x + b1*z[0] + b2*z[1] - a1*z[2] - a2*z[3];
               z[1]=z[0]; z[0]=x; z[3]=z[2]; z[2]=y; tau_ch[i] = (float)y; } }
         } else wn_on = false; }
+      // ★2026-10-02 WALK_HIP_NOTCH_HZ — walk WBIC FF 노치를 **hip roll 채널에만**(Q=WALK_HIP_NOTCH_Q 기본 2 · 미지정 = 끔).
+      //   왜: FF1.0 남은 떨림 19.5Hz 를 전 축 노치로 깎으면 보행대역(4~5Hz) 위상이 깎여 균형이 무너졌다(10-01 sim).
+      //     hip roll 은 지연 때문에 19.5Hz 에서 FF 가 주입으로 뒤집히는 축이다(sim 외란 측정 Re(H) +3.4, 지연 0 이면 −0.3).
+      //   ⚠실기 19.5Hz 는 thigh·foot 가 hip 보다 2~2.5배 크고 hip 과의 일관성 0.2~0.6 — hip 만으론 일부만 준다.
+      //   sim(6시드): Q2 → 보통보행 0낙상 · 밀기 낙상 2→3/12 · 옆밀기 8→20°(hip roll 이 옆 균형축). 원복: 미지정.
+      { static const double HNF = getenv("WALK_HIP_NOTCH_HZ") ? atof(getenv("WALK_HIP_NOTCH_HZ")) : 0.0;
+        static const double HNQ = env_gd("WALK_HIP_NOTCH_Q", 2.0, 0.3, 20.0);
+        static std::vector<double> hz(NCH*4, 0.0); static bool hn_on = false;
+        if(mode=="walk" && HNF > 0.0 && HNF < 0.45/dt){
+          if(!hn_on){ for(int i=0;i<NCH;i++) for(int s=0;s<4;s++) hz[i*4+s] = (double)tau_ch[i]; hn_on = true; }
+          const double w0 = 2.0*M_PI*HNF*dt, al = std::sin(w0)/(2.0*HNQ), c = std::cos(w0), a0 = 1.0 + al;
+          const double b0 = 1.0/a0, b1 = -2.0*c/a0, b2 = 1.0/a0, a1 = -2.0*c/a0, a2 = (1.0 - al)/a0;
+          for(int i=0;i<NCH;i++){ if(chname[i].find("_hip") == std::string::npos) continue;
+            double* z = &hz[i*4]; const double x = (double)tau_ch[i];
+            const double y = b0*x + b1*z[0] + b2*z[1] - a1*z[2] - a2*z[3];
+            z[1]=z[0]; z[0]=x; z[3]=z[2]; z[2]=y; tau_ch[i] = (float)y; }
+        } else hn_on = false; }
       // ★2026-10-01 STAND_FF_NOTCH_HZ / STAND_FF_LPF_HZ — stand 의 WBIC FF 토크 필터 (기본 0 = 끔 = 종전 동작).
       //   왜: 평발 stand "툭 치면 부르르" = 약 40Hz(36~42) thigh–calf–foot 자려진동(10-01 arm_trace_home_180950).
       //     블렌드 중엔 1~2°/s 로 조용하다가 블렌드가 끝나 WBIC 가 100% 가 되고 0.4s 뒤부터 0.1~0.15s 마다
@@ -2522,7 +2645,8 @@ int main(int argc, char** argv){
           for(int i=0;i<8;i++) fprintf(trc,",%.3f",(double)ap[i]); for(int i=0;i<8;i++) fprintf(trc,",%.2f",(double)av[i]);
           fprintf(trc,",%.3f,%.3f,%.3f,%.3f,%.3f,%.3f",(double)hs.gyr[0],(double)hs.gyr[1],(double)hs.gyr[2],
                   (double)hs.rpy[0],(double)hs.rpy[1],(double)hs.rpy[2]);
-          fprintf(trc,",%.3f,%.3f,%.3f",(double)hs.acc[0],(double)hs.acc[1],(double)hs.acc[2]); }
+          fprintf(trc,",%.3f,%.3f,%.3f,%.4f,%.4f",(double)hs.acc[0],(double)hs.acc[1],(double)hs.acc[2],tr_vyod,tr_vyfu);
+          fprintf(trc,",%.4f,%.4f,%.4f,%d",c.dbg_lat[0],c.dbg_lat[1],c.dbg_lat[2],c.dbg_lat_sw); }   // 측방 발디딤 진단(plv=캡처 옆속도·plr=목표·pls=지지발·plw=스윙발)
         fprintf(trc,"\n");
       } else { fclose(trc); trc=nullptr; std::printf("[deploy] 트레이스 저장 완료\n"); }
     }
@@ -2723,6 +2847,13 @@ int main(int argc, char** argv){
       //   키 부재 = "기능 없음"(구 .so/mock), 값 0 = "AUX_MODE 꺼짐/에코 정상" — 셋을 구분한다.
       //   aux_deg 는 **채널 원시각**(모델각 아님): 벨트 앞단이라 calf/foot 은 gear_k 나누기 전 값.
       std::string extra_json;
+      { char b[64];   // ★TAU_RMS 열 보호 상태(채널 Nm)
+        extra_json += "\"tau_rms_nm\":[";
+        for(int i=0;i<NCH;i++){ std::snprintf(b,sizeof b,"%s%.2f", i?",":"", tau_rms[i]); extra_json += b; }
+        std::snprintf(b,sizeof b,"],\"tau_rms_max\":%.2f,", rms_max); extra_json += b;
+        extra_json += "\"tau_rms_ch\":\""; extra_json += (rms_ch>=0 ? chname[rms_ch] : std::string("-")); extra_json += "\",";
+        extra_json += "\"tau_rms_warn\":"; extra_json += rms_warn ? "true," : "false,";
+        extra_json += "\"tau_rms_latched\":"; extra_json += rms_latched ? "true," : "false,"; }
       { float ap[16], av[16]; int al[16], as_[16];
         const int ar = hw->aux(ap, av);
         if(ar >= 0){

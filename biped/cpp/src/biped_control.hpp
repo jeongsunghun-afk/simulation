@@ -221,6 +221,7 @@ struct BipedControl {
   double vx_cmd=0, vy_cmd=0, wz_cmd=0, yaw_des=0, yaw_hold=0; bool yaw_hold_set=false;   // ★heading-hold latch
   Vector2d com0; Vector2d nominal_off[2]; double com_ref_z; Vector2d com_ref_xy;   // ★2점 정적 CoM xy 목표
   Vector4d foot_home_quat[2];         // ★평발 swing 발 수평 목표(home world quat, yaw=0)
+  double dbg_lat[3]={0,0,0}; int dbg_lat_sw=-1;   // ★측방 발디딤 진단(dcm_target 점발 분기)
   int stance=1, swing=0; double t_ss=0; long _k=0; bool walk_init=true; double walk_init_t=0;   // ★평발 보행개시 weight-shift
   // ── ZMP 프리뷰 보행(평발) ──
   ZmpPreview pv; long zkk=-1; double zanchor_x=0, zaf_y[2]={0,0}, z_sx=0;   // 발 앵커·스텝전진
@@ -283,6 +284,14 @@ struct BipedControl {
     //   추정기 수정과 반드시 짝지어 재튜닝해야 한다.
     if(getenv("K_RETURN")) K_RETURN=atof(getenv("K_RETURN"));
     if(getenv("K_CAP"))    K_CAP   =atof(getenv("K_CAP"));
+    // ★2026-10-02 K_LAT / K_RET_LAT env — 측방 발디딤 게인(기본 0.5 / 0 = 종전). 전후는 K_CAP 1.0·K_RETURN 0.15 인데
+    //   측방은 캡처 절반·복귀 0 이라 옆으로 밀리면 필요한 거리의 절반만 디딘다(실기 10-02: "좌우를 잘 못 잡는다").
+    //   sim(scratch, FF0.75·6시드): K_LAT 1.0 → 옆 60N 밀기 낙상 3→1/6·최대기울기 26→12°, 보통보행 0낙상·진행방향 전진 동일,
+    //   단 자유 sim 에서 yaw 방황 증가(크레인이 yaw 를 잡는 실기에선 영향 작을 것). K_RET_LAT 0.15 는 오히려 악화(5/6).
+    if(getenv("K_LAT"))     K_LAT    =atof(getenv("K_LAT"));
+    if(getenv("K_RET_LAT")) K_RET_LAT=atof(getenv("K_RET_LAT"));
+    if(getenv("K_LAT") || getenv("K_RET_LAT"))
+      std::printf("[ctrl] ★측방 발디딤 K_LAT=%.2f · K_RET_LAT=%.2f (기본 0.50/0.00 · 전후 K_CAP=%.2f·K_RETURN=%.2f)\n", K_LAT, K_RET_LAT, K_CAP, K_RETURN);
     if(getenv("FRIC_COMP")) FRIC_COMP=atof(getenv("FRIC_COMP"));   // ★마찰 전방보상 배율(0=끔)
     if(getenv("FRIC_V0"))   FRIC_V0  =atof(getenv("FRIC_V0"));
     if(getenv("FRIC_STANCE_ONLY")) FRIC_STANCE_ONLY=atoi(getenv("FRIC_STANCE_ONLY"));
@@ -805,6 +814,9 @@ struct BipedControl {
     Vector2d st_b=to_b(foot_center(1-sw).head(2)-c.head(2));
     double gap=std::min(std::max(lat*(rel_lat-st_b[1]),GAP_MIN),GAP_MAX);
     rel_lat=st_b[1]+lat*gap;
+    // ★2026-10-02 측방 발디딤 진단값(트레이스 plv/plr/pls/plw) — 실기서 좌우 디딤이 몸통 옆속도와 반대로 반응(sim 은 정상).
+    //   v_b[1]=캡처에 쓴 몸통 CoM 옆속도 · rel_lat=CoM 기준 스윙 목표 옆위치 · st_b[1]=CoM 기준 지지발 옆위치 · sw=스윙발.
+    dbg_lat[0]=v_b[1]; dbg_lat[1]=rel_lat; dbg_lat[2]=st_b[1]; dbg_lat_sw=sw;
     return c.head(2)+to_w(Vector2d(rel_fwd,rel_lat));
   }
   // swing 궤적

@@ -19,7 +19,12 @@ set -u
 #   (ZSource/RobotEmbeddedNew/IMU_latency_fix.md). 원본으로 되돌리기:
 #     EMB_DIR=/home/rpetubt/ZSource/RobotEmbedded/build ./run_all.sh ctrl
 #   바이너리 재빌드/교체 시 setcap 이 사라진다: sudo setcap cap_net_admin,cap_net_raw+eip $EMB_DIR/src/RobotEmbedded
-EMB_DIR=${EMB_DIR:-/home/rpetubt/ZSource/RobotEmbeddedNew/build}
+# ★★2026-10-02 기본 Emb = **원본 RobotEmbedded**(RGA 재빌드 10-02 10:57)로 되돌림. RGA 가 원본에 자체 IMU 지연 수정을
+#   넣었다(modules/sensIMU/interfaceIMU.cpp: UART 를 호출당 최대 11패킷까지 읽어 최신 패킷 사용). NEW 와 원본의 소스 차이는
+#   IMU 읽기 파일 3개뿐이고, 앞으로 RGA 수정은 원본에만 들어오므로 원본을 쓴다(유저 결정). NEW 는 예비:
+#     EMB_DIR=/home/rpetubt/ZSource/RobotEmbeddedNew/build ./run_all.sh ctrl
+#   ⚠원본 재빌드 직후엔 setcap 이 없다(아래 start 가 검사·안내). 첫 런 후 imu_lag_check.py 로 지연 확인(NEW 8ms 기준).
+EMB_DIR=${EMB_DIR:-/home/rpetubt/ZSource/RobotEmbedded/build}
 EMB_BIN=$EMB_DIR/src/RobotEmbedded
 # ★로그 = 실로그(/tmp/emb.log). SD 홍수는 이제 **원천 해결**됨 (2026-09-16):
 #   RobotEmbedded 디버그매크로 5개 OFF + 재빌드(defineGeneral.h:44-54). 풀스택 실측서

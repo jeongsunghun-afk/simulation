@@ -39,7 +39,7 @@ def main(paths):
             a = dr[max(0, L):len(dr)+min(0, L)]; b = g[max(0, -L):len(g)-max(0, L)]
             c = abs(np.corrcoef(a, b)[0, 1])
             if c > best[0]: best = (c, L*dt)
-        verdict = "정상(≈0)" if Lb < 0.05 else "⚠IMU 지연 — Emb IMU 수신 적체 의심(RobotEmbeddedNew 로 기동했는지 확인)"
+        verdict = "정상(≈0)" if Lb < 0.05 else "⚠IMU 지연 — Emb IMU 수신 적체 의심(Emb 버전 확인 — 기본 원본은 RGA IMU 수정 10-02, 예비 RobotEmbeddedNew)"
         print(f"{p}\n  IMU pitch 지연 {Lb*1000:.0f} ms (R² {rb:.3f} · 지연0 가정 R² {r2_at(y, X, 0):.3f})  → {verdict}"
               f"\n  d(pitch)/dt ↔ gyro 시차 {best[1]*1000:+.0f} ms (상관 {best[0]:.2f})")
 

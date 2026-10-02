@@ -21,7 +21,7 @@ VMAX   = float(os.environ.get('VMAX',   '0.15'))  # 전진 상한[m/s]
 VY_MAX = float(os.environ.get('VY_MAX', '0.10'))  # 좌우 상한[m/s]
 WZ_MAX = float(os.environ.get('WZ_MAX', '0.30'))  # 선회 상한[rad/s]
 H_MIN, H_MAX, H_DEF = 0.36, 0.54, 0.38  # 슬라이더 전체범위·시작(2점)기본
-H_DEF_1PT, H_DEF_2PT = 0.48, 0.38       # ★접촉모드별 기본 몸통높이. 1점 0.50→0.48(08-28 스윕: 강건성 — biped_mpc_wbic.py 주석)
+H_DEF_1PT, H_DEF_2PT = 0.50, 0.38       # ★접촉모드별 기본 몸통높이(=CoM z). 1점 0.48→0.50(10-02: sim 높이 스윕 FF1.0 밀기 낙상 0/6·발 처짐 최소, 실기 슬라이더 확인 · home 자세 CoM 0.52 에 더 가까워 KinWBC 발목 편차 −21→−11°). 이전 0.50→0.48(08-28 스윕)
 
 # ── 각축(JOG) 검증용 관절 정의 — emb/config/biped_emb.yaml 있으면 로드, 없으면 기본값 ──
 #   실기(app/biped_emb.py) 배포 시 축별 목표각·통신 LED로 각 모터 확인. sim에선 inert(무해).
@@ -1797,6 +1797,10 @@ while dpg.is_dearpygui_running():
                        st.get('tilt_deg', 0), st.get('loop_hz', 0)))
             if st.get('n_absent'):
                 line += '  · 미장착%d' % st['n_absent']
+            if 'tau_rms_max' in st:              # ★10-02 열 보호(deploy TAU_RMS) — 채널 토크 RMS, 연속정격 ≈14Nm
+                line += '  τRMS %.1fNm(%s)' % (st['tau_rms_max'], st.get('tau_rms_ch', '-'))
+                if st.get('tau_rms_latched'): line += ' ⛔열보호→hold'
+                elif st.get('tau_rms_warn'): line += ' ⚠열'
             if 'home_progress' in st:            # home 모드 진행률 + 실제 도달 여부
                 # ★진행률(명령 기준)과 도달(측정 기준)을 따로 보여준다 — 궤적이 끝나도
                 #   부하·마찰로 실제로는 안 들어와 있을 수 있고, 그게 중요한 정보다.

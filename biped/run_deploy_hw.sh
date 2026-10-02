@@ -112,6 +112,9 @@ export WALK_VEL_TRIP_DPS="${WALK_VEL_TRIP_DPS:-900}"
 #   50ms+ 연속 초과(DQ_ZERO=2+WALK_KD_FLOOR=1.0 시험 전 확인). ⚠전 축 공통 한계라 calf/foot 벨트
 #   허용 토크도 같이 오른다. 원복: WALK_TAU_TRIP_NM=25 (C++ 기본값은 여전히 25).
 export WALK_TAU_TRIP_NM="${WALK_TAU_TRIP_NM:-50}"
+# ★2026-10-02 열 보호(TAU_RMS, deploy 기본값) — 위 토크 트립은 측정토크가 MD80 20A(채널 28Nm)에서 잘려 실제론 안 걸린다.
+#   대신 축별 토크 RMS(시정수 TAU_RMS_TAU_S=20s)가 TAU_RMS_WARN_NM=14(연속 10A) 넘으면 경고,
+#   TAU_RMS_HOLD_NM=17 넘으면 stand/walk → hold 강하 + 래치(limp 아님). 10-01 walk RMS 최대 13.3Nm. 0=끔.
 export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 
 # ── ③-b ★★2026-09-30 기본값 확정 (실기 결과 · env 로 덮어쓰기 가능 · 10-01 시험 후 재검토) ─────
@@ -131,8 +134,13 @@ export WALK_KD_FLOOR="${WALK_KD_FLOOR:-0.15}"
 #     IMU_PITCH_OFS_DEG=12.7      IMU pitch ↔ 관절기구학 +12.7° 불일치 보정(적용 시 제자리 유지 4~5s·전엔 앞으로 달림).
 #                                 ⚠수평계 확인 전 · 평발 stand 에는 아직 미적용(미시험)
 #     MPC_ASYNC=1                 MPC QP 를 워커 스레드로(제어 루프 2ms 보장). 10-01 실기: 틱>3ms 7~8.5%→0.22%
-#     WALK_FF_SCALE=0.5           WBIC FF 비중 상한. 10-01 실기(FF1.0→0.5): 20~50Hz 떨림 32~34→13~15°/s ·
-#                                 드라이버 출력0 26~33→2~3% · 명령↔실측 상관 0.1→0.6 · walk 56.5s. 0.6 과 사실상 같음.
+#     WALK_FF_SCALE=0.5           WBIC FF 비중 상한. ★10-02 하루 1.0 을 기본으로 했다가 **0.5 로 되돌림**:
+#                                 FF1.0 실기 2/2 가 walk 10s 안에 통신 동결(전류·떨림 큼)·17-22Hz 떨림 2배, FF0.75 는 그 중간.
+#                                 FF0.5 = 오늘 최장 walk 77.7s·떨림 최소(12-17Hz calf/foot 23°/s·hip 8°/s). 대가 foot 처짐 +8.6°.
+#                                 (10-01 근거: FF1.0→0.5 로 20~50Hz 떨림 32~34→13~15°/s · 출력0 26~33→2~3%.)
+#     WALK_HIP_NOTCH_HZ           (선택·기본 없음) hip roll 채널에만 FF 노치(Q=WALK_HIP_NOTCH_Q 기본 2). 시험값 19.5
+#     TRK_KD_HIP                  (선택·기본 1) walk 추종 중 hip roll 드라이버 kd 배율. 시험값 1.5
+#                                 둘 다 FF1.0 남은 19.5Hz(hip roll 이 지연 때문에 주입) 대책 후보 — sim 은 밀기 소폭 악화, 실기 A/B 로 판정.
 #     WALK_FF_SCALE_CH            (선택·기본 없음) 채널별 FF 비중, 미지정 채널=WALK_FF_SCALE. 예 0.5,0.5,1,1,0.5,0.5,1,1
 #                                 지연된 WBIC 가 떨림에 넣는 에너지는 hip roll 이 주범(calf/foot 는 kd 가 이김) · 전 축 0.5 는 foot 7~10° 처짐.
 #     WALK_FF_NOTCH_HZ            (선택·기본 없음) walk WBIC FF 노치, 쉼표 목록 최대 3개(Q=WALK_FF_NOTCH_Q 기본 2). 시험값 15,19.5
@@ -154,7 +162,7 @@ else
     export WALK_FF_LPF_HZ="${WALK_FF_LPF_HZ:-10}"; export FLAT_STEPH="${FLAT_STEPH:-0.03}"
     export STAND_BLEND_S="${STAND_BLEND_S:-5}"; export IMU_PITCH_OFS_DEG="${IMU_PITCH_OFS_DEG:-12.7}"
     export MPC_ASYNC="${MPC_ASYNC:-1}"   # ★10-01 MPC 워커 스레드 — 실기 틱>3ms 7~8.5%→0.22%(sim 0낙상 동일)
-    export WALK_FF_SCALE="${WALK_FF_SCALE:-0.5}"   # ★10-01 WBIC FF 비중 50%(나머지 드라이버 PD 추종) — 실기 떨림 −50%·출력0 30→2%·56.5s walk
+    export WALK_FF_SCALE="${WALK_FF_SCALE:-0.5}"   # ★10-02 1.0→0.5 복귀 — FF1.0 은 10s 내 통신동결·떨림 2배. 0.5 = 최장 walk 77.7s
     export RET_TAU="${RET_TAU:-1}"   # ★10-01 발디딤 복귀앵커 누설 1s — 추정 드리프트에 착지가 끌려가 앉던 것 해소(0=종전)
     export WALK_FF_NOTCH_HZ="${WALK_FF_NOTCH_HZ:-15}"; export WALK_FF_NOTCH_Q="${WALK_FF_NOTCH_Q:-4}"   # ★10-01 walk WBIC FF 15Hz 좁은 노치 — 무릎–발목 12–18Hz 떨림 −55~62%·주입 −90%(185634). 0=끔
     export BUMPLESS_FF="${BUMPLESS_FF:-1}"   # ★10-01 hold→walk 진입 때 hold FF 를 블렌드 동안 넘김 — 진입 0.2s foot 14° 낙하 방지(0=종전)
