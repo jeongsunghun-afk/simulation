@@ -1,3 +1,4 @@
+#include "sim_plant.hpp"
 #include <deque>
 // trot_sim — quad_mpc_wbic mode_trot 핵심경로 C++ closed-loop (헤드리스). 제어=TrotCtrl(trot_view와 공유).
 // 대상: standalone 평지 trot (DETECT=0 순수스케줄). 검증: falls=0 + 전진거리·tilt를 Python과 비교.
@@ -96,6 +97,11 @@ int main(int argc,char**argv){
   if(getenv("ALIP") && !strcmp(getenv("ALIP"),"0")) ctrl.ALIP=false;
   if(getenv("POS_HOLD") && !strcmp(getenv("POS_HOLD"),"0")) ctrl.POS_HOLD=false;
   mjModel*m=q.m; mjData*d=q.d; double dt=m->opt.timestep;
+  // ★2026-10-06 PLANT=1 — 실기 유사 플랜트(sim_plant.hpp): 드라이버 PD 추종(구동지연된 KinWBC 목표, 드라이버 내부라 지연 없음)
+  //   · FF 비율/저역/노치 · 드라이브 한계 · (EL_K) 모터-링크 탄성·백래시. 이족 실기에서 확정한 구조를 사족 sim 에 같은 규약으로.
+  //   미지정이면 종전 경로(DRV_TRACK·mj_step) 그대로 — verify.sh 비트동등 유지. 탄성은 GEARBOX=1(로터 반사관성) 필요.
+  const bool PLANT = getenv("PLANT") && atoi(getenv("PLANT"));
+  SimPlant plant; if(PLANT) plant.init(m,d);
   MjRayTerrainMap tmap; bool TMAPDUMP=getenv("TMAP_DUMP")!=nullptr;   // ★TAMOLS P0 헤드리스 검증: 로컬 elevation map+footScore 덤프
   if(getenv("DBG")) std::printf("[dbg] nu=%d leg_dof=[%d %d %d %d] standing_z=%.5f com_ref=[%.5f %.5f %.5f]\n",
       q.nu,q.leg_dof[0],q.leg_dof[1],q.leg_dof[2],q.leg_dof[3],d->qpos[2],q.com_ref[0],q.com_ref[1],q.com_ref[2]);
@@ -151,8 +157,11 @@ int main(int argc,char**argv){
       std::vector<bool> cts0(4,false);
       for(int i=0;i<4;i++) for(int ci=0;ci<d->ncon;ci++){ const auto&c=d->contact[ci]; if((c.geom1==q.fgid[i]||c.geom2==q.fgid[i])&&c.dist<0.002){ cts0[i]=true; break; } }
       { auto& fr=sring[step%(int)sring.size()]; int o=0;
-        for(int j=0;j<NJ;j++) fr[o++]=d->qpos[7+j]+ENCQN*_nd(_rng);
-        for(int j=0;j<NJ;j++) fr[o++]=d->qvel[6+j]+ENCDQN*_nd(_rng);
+        static std::vector<double> _qs,_dqs; _qs.resize(NJ); _dqs.resize(NJ);
+        if(PLANT) plant.sensor_joint(d,_qs.data(),_dqs.data());       // 탄성 시 모터측 엔코더
+        else for(int j=0;j<NJ;j++){ _qs[j]=d->qpos[7+j]; _dqs[j]=d->qvel[6+j]; }
+        for(int j=0;j<NJ;j++) fr[o++]=_qs[j]+ENCQN*_nd(_rng);
+        for(int j=0;j<NJ;j++) fr[o++]=_dqs[j]+ENCDQN*_nd(_rng);
         double dqp[4]={1,0.5*QUATN*_nd(_rng),0.5*QUATN*_nd(_rng),0.5*QUATN*_nd(_rng)}; mju_normalize4(dqp);
         double qq[4]; mju_mulQuat(qq,&d->qpos[3],dqp); for(int a=0;a<4;a++) fr[o++]=qq[a];
         for(int a=0;a<3;a++) fr[o++]=d->qvel[3+a]+GYRON*_nd(_rng);
@@ -191,10 +200,17 @@ int main(int argc,char**argv){
       if(q.mit_valid && q.mit_qdes.size()==q.nu){ cur[0]=1; for(int i=0;i<q.nu;i++){ cur[1+i]=q.mit_qdes[i]; cur[1+q.nu+i]=q.mit_dqdes[i]; } }
       pring.push_back(cur); const int Ld=ESTCTRL?Lact:0; while((int)pring.size()>Ld+1) pring.pop_front();
       const std::vector<double>& f=pring.front();
-      if(DTRK && f[0]>0.5)
+      if(PLANT){   // 플랜트가 드라이버 PD(구동좌표·서브스텝)와 물리 진행을 맡는다
+        const int NJp=m->nq-7; std::vector<double> qj(NJp), dqj(NJp), tff(d->ctrl, d->ctrl+m->nu);
+        for(int j=0;j<NJp;j++){ qj[j]=d->qpos[7+j]; dqj[j]=0.0; }
+        const bool pv=f[0]>0.5;
+        if(pv) for(int i=0;i<q.nu;i++) if(m->actuator_trntype[i]==mjTRN_JOINT){
+          int ja=m->jnt_qposadr[m->actuator_trnid[2*i]]-7; if(ja>=0&&ja<NJp){ qj[ja]=f[1+i]; dqj[ja]=f[1+q.nu+i]; } }
+        plant.step(d, tff.data(), pv?qj.data():nullptr, pv?dqj.data():nullptr, dt);
+      } else if(DTRK && f[0]>0.5)
         for(int i=0;i<q.nu;i++) d->ctrl[i]+=TKP*(f[1+i]-d->qpos[7+i])+TKD*(f[1+q.nu+i]-d->qvel[6+i]);
       q.mit_valid=false; }
-    mj_step(m,d);
+    if(!PLANT) mj_step(m,d);
     if(ESTTEST && !ESTCTRL){
       std::vector<bool> cts(4,false);
       for(int i=0;i<4;i++) for(int ci=0;ci<d->ncon;ci++){ const auto&c=d->contact[ci]; if((c.geom1==q.fgid[i]||c.geom2==q.fgid[i])&&c.dist<0.002){ cts[i]=true; break; } }
