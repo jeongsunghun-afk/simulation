@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 02_Leg 17-DOF GUI 텔레옵 원샷 런처 (C++ 뷰어 + dearpygui GUI)
-#   사용: bash run_gui.sh [map]        map = course(기본)|flat|stairs|rough|friction|gap|stepping|soft
+#   사용: bash run_gui.sh [map]        map = course(기본)|flat(16-DOF)|flat17|stairs|rough|friction|gap|stepping|soft
 #   기본 맵 = 종합코스(마찰→험지→계단, perceptive 자동 ON)
 #
 # ★견고화(한 번에 확실히 실행): ①이전 인스턴스 SIGTERM 후 "실제 종료까지 폴링"(SIGKILL은 GL/X
@@ -11,13 +11,31 @@
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"          # simulation/quad
 CPP="$HERE/cpp"
-PXI=/home/jsh/miniforge3/envs/proxddp/bin/python
+PXI="${PXI:-/home/jsh/miniforge3/envs/proxddp/bin/python}"
+[ -x "$PXI" ] || PXI="$(command -v python3)"                   # conda env 없는 PC(노트북 WSL) → 시스템 python3(dearpygui 필요)
 export DISPLAY="${DISPLAY:-:0}"
+# ★WSL(노트북 RTX4050, 2026-10-06 실측): ①Mesa d3d12 기본 어댑터면 MuJoCo 창이 검정(픽셀 0)·소프트웨어 GL 은 1fps
+#   → NVIDIA 어댑터 지정. ②화면전송(스왑)이 프레임당 ~90ms → 7fps·프레임당 60스텝 상한 탓에 sim 0.36배속
+#   → 그림자·반사 끔(VIEW_LITE, 스왑 31ms)+따라잡기 상한 200(VIEW_MAXSTEP) = ~17fps·실시간 0.99. WSL 아니면 안 건드림.
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
+  export VIEW_LITE="${VIEW_LITE:-1}" VIEW_MAXSTEP="${VIEW_MAXSTEP:-200}"
+fi
 CMD=/tmp/quad_cmd.json; STATE=/tmp/quad_state.json
+# ★HWSIM=1 — 실기 유사 조건 묶음(2026-10-06, tools/plant/qrun.sh 와 동일 + 플랜트): 추정기 폐루프·지연 센서4+구동6ms·
+#   엔코더/자이로 잡음·로터 반사관성(GEARBOX) + 플랜트(드라이버 PD 추종 kp 100/50/180/43.2·kd×1.5 · FF 0.75·LPF10·노치15).
+#   각 값은 앞에 env 로 덮어쓰기. MIT 게인 시험: HWSIM=1 WBIC_MIT=1 SW_KP=500 SW_KD=10 bash run_gui.sh flat
+if [ "${HWSIM:-0}" = 1 ]; then
+  export EST_CTRL="${EST_CTRL:-1}" SENSE_LAT_MS="${SENSE_LAT_MS:-4}" ACT_LAT_MS="${ACT_LAT_MS:-6}"
+  export ENCQ_N="${ENCQ_N:-7.6e-5}" ENCDQ_N="${ENCDQ_N:-0.037}" GYRO_N="${GYRO_N:-0.002}" GEARBOX="${GEARBOX:-1}"
+  export PLANT="${PLANT:-1}" WALK_TRACK="${WALK_TRACK:-1}" TRK_KD="${TRK_KD:-1.5}" WALK_FF_SCALE="${WALK_FF_SCALE:-0.75}"
+  export WALK_FF_LPF_HZ="${WALK_FF_LPF_HZ:-10}" WALK_FF_NOTCH_HZ="${WALK_FF_NOTCH_HZ:-15}" WALK_FF_NOTCH_Q="${WALK_FF_NOTCH_Q:-4}"
+fi
 
 case "${1:-course}" in
   course)   MJCF=mjcf/quad_terrain_course.mjcf ;;
-  flat)     MJCF=mjcf/quad_real_17dof_waist_sphere.mjcf ;;
+  flat)     MJCF=mjcf/quad_real_16dof_sphere.mjcf ;;         # ★2026-10-06 실물 허리 제거 → 16-DOF 기본
+  flat17)   MJCF=mjcf/quad_real_17dof_waist_sphere.mjcf ;;   # 구 허리 모델(지형 맵들은 아직 이 모델 include)
   stairs)   MJCF=mjcf/quad_terrain_stairs.mjcf ;;
   rough)    MJCF=mjcf/quad_terrain_rough.mjcf ;;
   friction) MJCF=mjcf/quad_terrain_friction.mjcf ;;

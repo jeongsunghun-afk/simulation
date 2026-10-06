@@ -2,6 +2,7 @@
 //   마우스: 좌드래그=회전 우드래그=이동 휠=줌.  키보드: ↑↓=전진속도 ←→=선회 space=정지 backspace=리셋.
 #include "trot_controller.hpp"
 #include "state_estimator.hpp"   // ★sim2real: leg-odometry 추정기(뷰어 추정상태 제어 + GT비교 시각화)
+#include "sim_plant.hpp"         // ★2026-10-06 PLANT=1 실기 유사 플랜트(trot_sim 과 같은 규약)
 #include "terrain_map.hpp"       // ★TAMOLS P0: 로컬 elevation map(mj_ray→격자) + footScore 시각화
 #include <mujoco/mujoco.h>
 #include <GLFW/glfw3.h>
@@ -127,6 +128,11 @@ int main(int argc,char**argv){
   if(getenv("HAUNCH_HOCK_Z")) q.HAUNCH_HOCK_Z=atof(getenv("HAUNCH_HOCK_Z"));
   if(getenv("SIT_CPITCH")) ctrl.SIT_CPITCH=atof(getenv("SIT_CPITCH"));      // 앉기 nose-up 목표(뷰어 튜닝)
   mjModel*m=q.m; mjData*d=q.d;
+  // ★2026-10-06 PLANT=1 — trot_sim 과 같은 실기 유사 플랜트: 드라이버 PD 추종(구동지연된 KinWBC 목표)·FF 비율/저역/노치·
+  //   드라이브 한계·(EL_K) 탄성. 드라이버 추종은 WALK_TRACK=1. 미지정이면 종전 경로(mj_step) 그대로.
+  const bool PLANT = getenv("PLANT") && atoi(getenv("PLANT"));
+  SimPlant plant; if(PLANT) plant.init(m,d);
+  std::deque<std::vector<double>> pring;   // [유효 | q_des(nu) | q̇_des(nu)] — 토크와 같은 구동지연
 
   // ★sim2real GT↔추정 비교 시각화.
   //   기본(GUI '모니터 표시' viz on): 추정기를 **개루프**로 병행(컨트롤러는 참 상태 GT로 제어=보행 안정 유지) + 추정 base 고스트 오버레이.
@@ -155,13 +161,19 @@ int main(int argc,char**argv){
   long estep=0;
 
   if(!glfwInit()){ std::fprintf(stderr,"glfw init 실패\n"); return 1; }
-  GLFWwindow* win=glfwCreateWindow(1280,900,"17-DOF C++ trot (quad_mpc_wbic_17dof)",NULL,NULL);
+  GLFWwindow* win=glfwCreateWindow(getenv("VIEW_W")?atoi(getenv("VIEW_W")):1280, getenv("VIEW_H")?atoi(getenv("VIEW_H")):900,"17-DOF C++ trot (quad_mpc_wbic_17dof)",NULL,NULL);
   if(!win){ std::fprintf(stderr,"창 생성 실패(DISPLAY?)\n"); glfwTerminate(); return 1; }
-  glfwMakeContextCurrent(win); glfwSwapInterval(1);
+  glfwMakeContextCurrent(win);
+  // ★VIEW_SWAP(기본 1=vsync)·VIEW_MAXSTEP(기본 60=프레임당 따라잡기 상한). WSL 노트북은 화면전송 ~6fps 라
+  //   60스텝/프레임이면 sim 이 실시간 0.36배 → VIEW_MAXSTEP 를 올려 실시간 유지(2026-10-06)
+  glfwSwapInterval(getenv("VIEW_SWAP")?atoi(getenv("VIEW_SWAP")):1);
+  const int VIEW_MAXSTEP=getenv("VIEW_MAXSTEP")?atoi(getenv("VIEW_MAXSTEP")):60;
   mjv_defaultCamera(&cam); mjv_defaultOption(&opt); mjv_defaultScene(&scn); mjr_defaultContext(&con);
   mjv_makeScene(m,&scn,8000); mjr_makeContext(m,&con,mjFONTSCALE_150);   // ★8000: terrain map 격자 오버레이 여유
   cam.distance=2.2; cam.elevation=-20; cam.azimuth=135; cam.lookat[2]=0.35;
   opt.flags[mjVIS_CONTACTFORCE]=1;
+  // ★VIEW_LITE=1: 그림자·바닥반사 끔 — WSL d3d12 에서 렌더 38.6→12.4ms(오프스크린 실측, 2026-10-06)
+  if(getenv("VIEW_LITE")&&atoi(getenv("VIEW_LITE"))){ scn.flags[mjRND_SHADOW]=0; scn.flags[mjRND_REFLECTION]=0; }
   glfwSetMouseButtonCallback(win,mouse_btn);   // 마우스 카메라만(키보드 제어 삭제, GUI로 조작)
   glfwSetCursorPosCallback(win,mouse_move); glfwSetScrollCallback(win,scroll);
 
@@ -201,14 +213,17 @@ int main(int argc,char**argv){
         long rseq=(long)json_get(c,"reset_seq",reset_seen);     // ★RESET 버튼(상승엣지): mj_resetData+crouch_home+상태초기화
         if(reset_seen<0) reset_seen=rseq;                       //   첫폴링=동기화(시작리셋 방지)
         else if(rseq>reset_seen){ reset_seen=rseq; mj_resetData(m,d); q.crouch_home(); ctrl.reset(); ctrl.mode="stand_up"; falls=0; fallen=false;
-          est.reset(Eigen::Vector3d(d->qpos[0],d->qpos[1],d->qpos[2])); est_perr=est_verr=0;   // ★추정기도 리셋(참 base로)
+          est.reset(Eigen::Vector3d(d->qpos[0],d->qpos[1],d->qpos[2])); est_perr=est_verr=0;
+          if(PLANT){ plant.reset(d); pring.clear(); }   // ★플랜트(로터 상태·FF 필터)·목표 지연링도 리셋   // ★추정기도 리셋(참 base로)
           wall0=std::chrono::steady_clock::now(); sim0=d->time; }   // ★reset=Ready 복귀(mode 미초기화 시 점프 중 reset하면 그대로 재점프하던 버그)
         long jseq=(long)json_get(c,"jump_seq",jump_seen);       // ★Jump 버튼(상승엣지): 스크립트 점프 발동(mode=jump)
         if(jump_seen<0) jump_seen=jseq; else if(jseq>jump_seen){ jump_seen=jseq; ctrl.mode="jump"; } } }
     // ★벽시계 기준 실시간 페이싱: sim_time이 wall_time×RATE 따라가도록(모니터 refresh 무관)
     double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-wall0).count();
     double target=sim0+wall*RATE; int guard=0;
-    while(d->time < target && guard++ < 60){    // 따라잡기(최대 60스텝/프레임=버스트 상한↓, 점프 히치 후 몰아치기 완화)
+    static const bool VPROF=getenv("VIEW_PROF")&&atoi(getenv("VIEW_PROF")); static double pt[4]={0,0,0,0}; static int pn=0, pst=0;
+    auto _t0=std::chrono::steady_clock::now();
+    while(d->time < target && guard++ < VIEW_MAXSTEP){    // 따라잡기(최대 60스텝/프레임=버스트 상한↓, 점프 히치 후 몰아치기 완화)
       if(est_on){
         // ★실기 센서(+노이즈+지연)→leg-odometry 추정. 개루프(뷰어 비교)=추정만 갱신·제어는 GT / 폐루프(env)=추정상태로 제어
         int NJ=m->nq-7;
@@ -216,8 +231,11 @@ int main(int argc,char**argv){
         std::vector<bool> cts0(4,false);
         for(int i=0;i<4;i++) for(int ci=0;ci<d->ncon;ci++){ const auto&cc=d->contact[ci]; if((cc.geom1==q.fgid[i]||cc.geom2==q.fgid[i])&&cc.dist<0.002){ cts0[i]=true; break; } }
         { auto& fr=sring[estep%(int)sring.size()]; int o=0;
-          for(int j=0;j<NJ;j++) fr[o++]=d->qpos[7+j]+ENCQN*_nd(_rng);
-          for(int j=0;j<NJ;j++) fr[o++]=d->qvel[6+j]+ENCDQN*_nd(_rng);
+          static std::vector<double> _qs,_dqs; _qs.resize(NJ); _dqs.resize(NJ);
+          if(PLANT) plant.sensor_joint(d,_qs.data(),_dqs.data());       // 탄성 시 모터측 엔코더
+          else for(int j=0;j<NJ;j++){ _qs[j]=d->qpos[7+j]; _dqs[j]=d->qvel[6+j]; }
+          for(int j=0;j<NJ;j++) fr[o++]=_qs[j]+ENCQN*_nd(_rng);
+          for(int j=0;j<NJ;j++) fr[o++]=_dqs[j]+ENCDQN*_nd(_rng);
           double dqp[4]={1,0.5*QUATN*_nd(_rng),0.5*QUATN*_nd(_rng),0.5*QUATN*_nd(_rng)}; mju_normalize4(dqp);
           double qq[4]; mju_mulQuat(qq,&d->qpos[3],dqp); for(int a=0;a<4;a++) fr[o++]=qq[a];
           for(int a=0;a<3;a++) fr[o++]=d->qvel[3+a]+GYRON*_nd(_rng);
@@ -251,7 +269,19 @@ int main(int argc,char**argv){
         } else { ctrl.control(); }   // 개루프: 제어는 GT(보행 안정), 추정기는 고스트용으로만 병행
         estep++;
       } else { ctrl.control(); }
-      mj_step(m,d);
+      if(PLANT){   // trot_sim 과 같은 규약: KinWBC 목표는 토크와 같은 구동지연, 드라이버 PD·물리 진행은 플랜트
+        std::vector<double> cur(1+2*q.nu,0.0);
+        if(q.mit_valid && q.mit_qdes.size()==q.nu){ cur[0]=1; for(int i=0;i<q.nu;i++){ cur[1+i]=q.mit_qdes[i]; cur[1+q.nu+i]=q.mit_dqdes[i]; } }
+        pring.push_back(cur); const int Ld=(est_on&&est_ctrl)?Lact:0; while((int)pring.size()>Ld+1) pring.pop_front();
+        const std::vector<double>& f=pring.front();
+        const int NJp=m->nq-7; std::vector<double> qj(NJp), dqj(NJp), tff(d->ctrl, d->ctrl+m->nu);
+        for(int j=0;j<NJp;j++){ qj[j]=d->qpos[7+j]; dqj[j]=0.0; }
+        const bool pv=f[0]>0.5;
+        if(pv) for(int i=0;i<q.nu;i++) if(m->actuator_trntype[i]==mjTRN_JOINT){
+          int ja=m->jnt_qposadr[m->actuator_trnid[2*i]]-7; if(ja>=0&&ja<NJp){ qj[ja]=f[1+i]; dqj[ja]=f[1+q.nu+i]; } }
+        plant.step(d, tff.data(), pv?qj.data():nullptr, pv?dqj.data():nullptr, m->opt.timestep);
+        q.mit_valid=false;
+      } else mj_step(m,d);
       double td=ctrl.tiltdeg(); max_tilt=std::max(max_tilt,td);
       // ★낙상 시 자동재시작 안 함(그대로 쓰러진 채 유지 → RESET 버튼으로 복구). 낙상은 엣지로만 카운트
       bool low=(td>50||d->qpos[2]<0.2); if(low && !fallen) falls++; fallen=low;
@@ -262,7 +292,9 @@ int main(int argc,char**argv){
 
     mjrRect vp={0,0,0,0}; glfwGetFramebufferSize(win,&vp.width,&vp.height);
     cam.lookat[0]=d->qpos[0]; cam.lookat[1]=d->qpos[1];   // 로봇 추적
+    auto _t1=std::chrono::steady_clock::now(); pst+=guard;
     mjv_updateScene(m,d,&opt,NULL,&cam,mjCAT_ALL,&scn);
+    auto _t2=std::chrono::steady_clock::now();
     if(tmap_on){   // ★TAMOLS P0: 로컬 elevation map 갱신(맵 rate, ~20프레임마다=1kHz 밖) + footScore 격자 오버레이
       { static long _tk=0; if(_tk++ % 20 == 0) tmap.update(m,d,d->qpos[0],d->qpos[1],(uint64_t)(d->time*1e9)); }
       const Submap* sm=tmap.map();
@@ -298,6 +330,7 @@ int main(int argc,char**argv){
       }
     }
     mjr_render(vp,&scn,&con);
+    auto _t3=std::chrono::steady_clock::now();
     char hud[384];
     // ★HUD는 MuJoCo 오버레이(ASCII 전용 비트맵 폰트)라 한글 불가 → 영문 표기
     if(est_on)
@@ -310,6 +343,10 @@ int main(int argc,char**argv){
                     ctrl.V,ctrl.WZ,d->qpos[2],ctrl.tiltdeg(),d->qpos[0],falls);
     mjr_overlay(mjFONT_NORMAL,mjGRID_TOPLEFT,vp,est_on?"17-DOF C++ trot (GT vs EST compare)":"17-DOF C++ trot (GUI controlled)",hud,&con);
     glfwSwapBuffers(win); glfwPollEvents();
+    if(VPROF){ auto _t4=std::chrono::steady_clock::now(); auto ms=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};
+      pt[0]+=ms(_t0,_t1); pt[1]+=ms(_t1,_t2); pt[2]+=ms(_t2,_t3); pt[3]+=ms(_t3,_t4);
+      if(++pn==20){ std::fprintf(stderr,"[VIEW_PROF] 프레임당 ms: 스텝 %.1f(%d개) 장면 %.1f 렌더 %.1f 오버레이+스왑(GPU대기 포함) %.1f · ngeom %d · %dx%d\n",
+        pt[0]/pn,pst/pn,pt[1]/pn,pt[2]/pn,pt[3]/pn,scn.ngeom,vp.width,vp.height); pt[0]=pt[1]=pt[2]=pt[3]=0; pn=0; pst=0; } }
   }
   mjv_freeScene(&scn); mjr_freeContext(&con); glfwTerminate();
   if(d_est) mj_deleteData(d_est);

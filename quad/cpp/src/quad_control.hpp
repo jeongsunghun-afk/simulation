@@ -105,7 +105,8 @@ struct QuadControl {
       for(int t=0;t<leg_dof[i];t++){ int a=legqv[i][t]-6; if(a>=0&&a<nu) is_front[a]=fr; } }
     { int wj=mj_name2id(m,mjOBJ_JOINT,"FB_waist_joint");   // ★허리 조인트(있으면 능동 17-DOF)
       waist_idx = (wj>=0 && m->jnt_type[wj]!=mjJNT_FREE) ? m->jnt_dofadr[wj]-6 : -1; }
-    if(waist_idx>=0){   // ★17-DOF(허리모델) 자동감지 → Python 17dof 튜닝값을 기본으로(canonical 실행코드와 동일). env로 여전히 override
+    const bool legs4x4 = leg_dof[0]==4&&leg_dof[1]==4&&leg_dof[2]==4&&leg_dof[3]==4;   // ★2026-10-06 실물 허리 제거(16-DOF) — 다리는 17-DOF 와 같으니 같은 튜닝
+    if(waist_idx>=0 || legs4x4){   // ★17-DOF(허리모델)·16-DOF(4자유도 다리×4) 자동감지 → Python 17dof 튜닝값을 기본으로(canonical 실행코드와 동일). env로 여전히 override
       w_ori=20.0; W_AM=0.0; KD_AM=24.0; FRONT_ANKLE=-0.5;   // ★W_AM=0(각운동량 보상 제거): 외란복구 이득 측정상 무의미(측방 push서 오히려↑). 14dof 기본(5/0/8/-0.7) 대신 17dof 튜닝
       base_z0=0.50; }   // ★base height 최적(축별 worst-util 스윕): walk 95.8%·trot 67.7%·run 82.5%로 0.50이 3gait Pareto-최적(0.5234보다 발목 ω 여유↑)
     // ★감속비(실값)+기어박스 물리(sim2real). Python line 244-263 일치.
