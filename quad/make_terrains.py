@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# 지형 테스트 씬 생성기 — 로봇 MJCF(quad_real_17dof_waist_sphere.mjcf)를 <include>로 재사용하고
+# 지형 테스트 씬 생성기 — 로봇 MJCF(quad_real_16dof_sphere.mjcf)를 <include>로 재사용하고
 #   지형(계단/험지/마찰)만 얹는다. trot_view/trot_sim 에 이 씬 경로를 argv1로 주면 로드.
 #   로봇은 원점(0,0)서 +x로 전진 → 지형은 +x 앞쪽에 배치.
 #   개별 씬(stairs/rough/friction) + 종합코스(course: 마찰→험지→계단 순차).
 import math, os
-ROBOT = "quad_real_17dof_waist_sphere.mjcf"
+ROBOT = "quad_real_16dof_sphere.mjcf"   # ★2026-10-06 실물 허리 제거 → 16-DOF
 HDR = f'<mujoco model="{{name}}">\n  <include file="{ROBOT}"/>\n  <worldbody>\n'
 FTR = "  </worldbody>\n</mujoco>\n"
 

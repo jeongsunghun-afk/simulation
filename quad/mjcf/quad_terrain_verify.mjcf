@@ -1,5 +1,5 @@
 <mujoco model="terrain_verify">
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <geom name="r0_0" type="box" group="2" size="0.120 0.120 0.033" pos="1.200 -1.000 0.033" rgba="0.57 0.51 0.45 1"/>
     <geom name="r0_1" type="box" group="2" size="0.120 0.120 0.015" pos="1.200 -0.740 0.015" rgba="0.48 0.43 0.38 1"/>

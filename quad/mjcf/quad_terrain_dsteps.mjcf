@@ -1,6 +1,6 @@
 <mujoco model="terrain_dsteps">
   <!-- 떨어진 디딤돌(사이 갭 ~0.18m) + 높이차(0.06~0.16). 갭회피+base협조 동시 요구. -->
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <geom name="ds_start" type="box" group="2" size="0.55 0.7 0.10" pos="-0.05 0 -0.10" rgba="0.48 0.54 0.64 1"/>
     <!-- 디딤돌 hw=0.11, 간격 0.40(갭 ~0.18), 높이 top 0.06/0.12/0.16/0.10/0.06 -->

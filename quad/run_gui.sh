@@ -35,7 +35,7 @@ fi
 case "${1:-course}" in
   course)   MJCF=mjcf/quad_terrain_course.mjcf ;;
   flat)     MJCF=mjcf/quad_real_16dof_sphere.mjcf ;;         # ★2026-10-06 실물 허리 제거 → 16-DOF 기본
-  flat17)   MJCF=mjcf/quad_real_17dof_waist_sphere.mjcf ;;   # 구 허리 모델(지형 맵들은 아직 이 모델 include)
+  flat17)   MJCF=mjcf/quad_real_17dof_waist_sphere.mjcf ;;   # 구 허리 모델(지형 맵은 16-DOF include)
   stairs)   MJCF=mjcf/quad_terrain_stairs.mjcf ;;
   rough)    MJCF=mjcf/quad_terrain_rough.mjcf ;;
   friction) MJCF=mjcf/quad_terrain_friction.mjcf ;;

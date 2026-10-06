@@ -30,7 +30,7 @@
 #include <algorithm>
 
 #include "hal/real_hal.hpp"
-#include "config/joint_map_17dof.hpp"
+#include "config/joint_map_16dof.hpp"
 #include "common/rt.hpp"
 
 #if !(defined(QC_HAVE_ROBOT_SHM) || __has_include("/usr/include/RobotSharedMem.h"))
@@ -65,7 +65,7 @@ int main(int argc, char** argv){
   }
 
   // 검증 대상 축의 실제 config 를 관절맵에서 가져온다(부호·한계 규약 동일 적용).
-  const auto full = joint_map_17dof();
+  const auto full = joint_map_16dof();
   GaitJointCfg jc{ chan, +1, 0.0, -180, 180, 300 };
   for (const auto& j : full) if (j.chan == chan) { jc = j; break; }
   if (jc.chan < 0){ std::printf("[hal_smoke] ch%d 는 미배선(chan=-1) — 중단\n", chan); return 1; }

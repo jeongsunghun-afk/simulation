@@ -1,5 +1,5 @@
 <mujoco model="terrain_stairs">
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <geom name="sup1" type="box" group="2" size="0.175 0.700 0.075" pos="1.375 0.000 0.075" rgba="0.55 0.45 0.38 1"/>
     <geom name="sup2" type="box" group="2" size="0.175 0.700 0.150" pos="1.725 0.000 0.150" rgba="0.62 0.52 0.44 1"/>

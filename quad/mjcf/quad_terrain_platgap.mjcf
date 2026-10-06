@@ -1,7 +1,7 @@
 <mujoco model="quad_terrain_platgap">
   <!-- TOWR platgap 검증: 높은 플랫폼(top 0.20) 두 장 + 갭 슬롯 x∈[1.0,1.3](floor 0.20 아래 노출).
        로봇이 플랫폼1서 출발→발을 갭 밖에 배치하며 플랫폼2로 크로싱. TOWR terrain 'platgap' 정합. -->
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <!-- 플랫폼1: x∈[-0.6, 1.0], top 0.20 -->
     <geom name="plat1" type="box" group="2" size="0.80 0.8 0.10" pos="0.20 0 0.10"

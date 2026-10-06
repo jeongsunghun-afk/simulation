@@ -1,7 +1,7 @@
 # 파라미터 = config(★현 env-var 난립 대체: 재현성·튜닝·sim2real 정합).
 #   컨트롤러가 로드. 값은 현 배포 기본값(메모리 haunch-sit-posture / 실행코드 기준).
 model:
-  mjcf: quad_real_17dof_waist_sphere.mjcf
+  mjcf: quad_real_16dof_sphere.mjcf   # ★2026-10-06 허리 제거
   nu: 17
   gear: { hip: 7.0, thigh: 7.0, calf: 10.5, foot: 8.0 }   # 재기어(peak/속도한계)
   gearbox: true                                            # 반사관성(발 flail 억제)
@@ -24,4 +24,4 @@ getup:  # sit→서기(gather 궤적 추종)
   kp: 120
   kd: 4
 
-steer: { waist_gain: 0.4, cap_rad: 0.20, wz_cap: 0.9 }     # 자동차식 조향(understeer)
+steer: { waist_gain: 0.4, cap_rad: 0.20, wz_cap: 0.9 }     # 자동차식 조향(understeer). waist_gain 은 허리 없는 16-DOF 에선 무효

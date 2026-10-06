@@ -7,7 +7,7 @@
 set -uo pipefail
 QC="$(cd "$(dirname "$0")" && pwd)"          # simulation/quad_ctrl
 TS="$QC/../quad/cpp"
-MJ="$QC/../quad/mjcf/quad_real_17dof_waist_sphere.mjcf"
+MJ="$QC/../quad/mjcf/quad_real_16dof_sphere.mjcf"
 
 echo "▶ 빌드(sim_bridge + trot_sim)…"
 cmake --build "$QC/build" --target sim_bridge -j >/dev/null 2>&1 || { echo "❌ sim_bridge BUILD FAIL"; exit 1; }
@@ -19,7 +19,7 @@ _key(){ sed 's/°//g' | grep -oE 'x=[+-][0-9.]+ z=[0-9.]+ max_tilt=[0-9.]+ falls
 # sim_bridge(배포) == trot_sim(레퍼런스, +NO_JUMP_WARMUP). 공유 env를 양쪽에 동일 적용.
 cmp_case(){ local name=$1; shift
   local sb=$( cd "$QC" && env "$@" ./build/sim_bridge          2>/dev/null | _key )
-  local ts=$( cd "$TS" && env NO_JUMP_WARMUP=1 "$@" ./trot_sim "$MJ" 3000 2>/dev/null | _key )
+  local ts=$( cd "$TS" && env NO_JUMP_WARMUP=1 "$@" ./build/trot_sim "$MJ" 3000 2>/dev/null | _key )   # ★방금 빌드한 것(추적된 ./trot_sim 은 09-02 구 바이너리)
   if [ -n "$sb" ] && [ "$sb" = "$ts" ]; then printf "  ✅ %-24s %s\n" "$name" "$sb"; pass=$((pass+1))
   else printf "  ❌ %-24s\n     sim_bridge: %s\n     trot_sim  : %s\n" "$name" "${sb:-<empty>}" "${ts:-<empty>}"; fail=$((fail+1)); fi
 }
@@ -38,7 +38,7 @@ cmp_case "EST sit"       EST_CTRL=1 MODE=sit
 cmp_case "EST stand_up"  EST_CTRL=1 MODE=stand_up
 
 echo "▶ config (원칙③ + PACE 실측 물리)"
-CFG="$QC/config/deploy_17dof.yaml"
+CFG="$QC/config/deploy_16dof.yaml"
 # deploy config(실측 ROTOR_I/JFRIC/JDAMP 활성) 로드 → 보행 falls=0 (placeholder와 다름=의도된 현실 주입)
 dc=$( cd "$QC" && env EST_CTRL=1 GAIT=walk TROT_V=0.5 QC_CONFIG="$CFG" ./build/sim_bridge 2>/dev/null | _key )
 if [ -n "$dc" ] && [ "$(echo "$dc" | grep -oE 'falls=[0-9]+')" = "falls=0" ]; then printf "  ✅ %-24s %s\n" "deploy config 보행" "$dc"; pass=$((pass+1))

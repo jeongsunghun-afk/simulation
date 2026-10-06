@@ -2,7 +2,7 @@
   <!-- ★4라인 종합코스(2026-07-15): gap·stepping을 별도 라인 분리 + 험지·계단 복원.
        y=+1.2 갭 / y=-1.2 스테핑(안쪽=도달 쉬움) · y=+3.6 험지 / y=-3.6 계단(바깥). 중앙(y=0)=통로.
        ③ selectFoot walk 0.5로 각 라인 완주. 조향해 라인 진입. -->
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <!-- 라인 A (y=+1.2): 갭 GAP -->
     <geom name="gp0" type="box" group="2" size="0.350 0.700 0.080" pos="1.550 1.200 0.080" rgba="0.48 0.54 0.64 1"/>

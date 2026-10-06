@@ -1,7 +1,7 @@
 <mujoco model="quad_terrain_step">
   <!-- TOWR step 검증: x0=0.5에서 h=0.10 올라가는 계단 플랫폼(TOWR terrain 'step' 정합).
        로봇이 평지서 출발→0.10m 단 위로 올라섬. -->
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <!-- 0.10m 높이 플랫폼: x∈[0.5, 3.0], top z=0.10 -->
     <geom name="step_plat" type="box" group="2" size="1.25 0.8 0.05"

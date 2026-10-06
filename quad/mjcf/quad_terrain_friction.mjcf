@@ -1,5 +1,5 @@
 <mujoco model="terrain_friction">
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <geom name="f2" type="box" group="2" size="0.600 0.800 0.012" pos="1.700 0.000 0.012" rgba="0.60 0.62 0.66 1" friction="0.50 0.02 0.001" priority="1"/>
     <geom name="f1" type="box" group="2" size="0.600 0.800 0.012" pos="2.900 0.000 0.012" rgba="0.62 0.72 0.85 1" friction="0.30 0.01 0.0005" priority="1"/>

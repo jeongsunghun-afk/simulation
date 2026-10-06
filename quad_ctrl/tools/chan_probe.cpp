@@ -1,6 +1,6 @@
 /* chan_probe.cpp — Gait SHM 채널 배치 실측(읽기 전용, 모터 무동작).
  *
- *   ★목적: quad 17-DOF 관절맵의 `chan` 을 추측이 아니라 실측으로 확정한다.
+ *   ★목적: quad 16-DOF 관절맵(구 17-DOF)의 `chan` 을 추측이 아니라 실측으로 확정한다.
  *     두 배치가 충돌하고 있다 —
  *       (a) /usr/include/RobotSharedMem.h : 29채널
  *           ForeL 0-6(7) · ForeR 7-13(7) · HindL 14-19(6) · HindR 20-25(6) · Waist 26-28(3)

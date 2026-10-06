@@ -38,7 +38,7 @@ namespace qc {
 //   ENUM_RESULT_SUCCESS=0x00000000 · RESUMED=0x10000000 · FAILURE=0x20000000.
 static constexpr unsigned int QC_SHM_OK = 0x00000000u;
 
-// 관절맵/한계 — config(config/joint_map_17dof.yaml). chan=Gait SHM 채널, sign/zero=MJCF관절↔실모터 부호·오프셋(★축별 JOG 실측 TODO).
+// 관절맵/한계 — config(config/joint_map_16dof.hpp). chan=Gait SHM 채널, sign/zero=MJCF관절↔실모터 부호·오프셋(★축별 JOG 실측 TODO).
 struct GaitJointCfg { int chan; int sign; double zero_deg, min_deg, max_deg, vel_max_dps; };
 
 class RealHal : public RobotInterface {

@@ -7,7 +7,7 @@
 #   ★임계값은 정상 동작 여유값(회귀=falls 발생/tilt 급증만 잡음). 물리 캡 아님.
 set -uo pipefail
 cd "$(dirname "$0")"                       # simulation/quad/cpp
-MJ=../mjcf/quad_real_17dof_waist_sphere.mjcf
+MJ=../mjcf/quad_real_16dof_sphere.mjcf   # ★2026-10-06 실물 허리 제거 → 16-DOF
 COURSE=../mjcf/quad_terrain_verify.mjcf     # ★회귀검증=순차 직진코스(마찰→험지→계단). 병렬 course는 GUI용(갭/스테핑=실패허용)
 # foot 감속비=8.4:1 실값(MJCF actuatorfrcrange=100.8, gear[3]=8.4). 재기어 불요
 PY=${PY:-/home/jsh/miniforge3/envs/proxddp/bin/python}
@@ -30,7 +30,7 @@ run(){ # name model gait v steps tilt_max min_x
   else            printf "  ❌ %-22s falls=%s tilt=%s° x=%s  (한계 tilt≤%s x≥%s)\n" "$name" "$f" "$t" "$x" "$tmax" "$minx"; fail=$((fail+1)); fi
 }
 
-echo "▶ 평지 (quad_real_17dof_waist_sphere)"
+echo "▶ 평지 (quad_real_16dof_sphere)"
 run "walk v0.6" $MJ walk 0.6 6000 8  2.0
 run "trot v1.2" $MJ trot 1.2 6000 8  3.5
 run "run  v2.0" $MJ run  2.0 6000 12 5.0

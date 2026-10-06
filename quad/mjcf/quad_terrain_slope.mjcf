@@ -1,7 +1,7 @@
 <mujoco model="quad_terrain_slope">
   <!-- 경사 테스트: 평지서 출발→전방 상승 램프(pitch). 마찰콘 회전 검증용.
        램프 윗면 법선이 world-z서 기울어져, world-z 콘은 마찰을 오판→미끄럼 가능. -->
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <!-- 전방 상승 램프 15도(0.262rad, y축 회전). 근단 x=0.8 지면접점, +x로 상승 -->
     <geom name="ramp15" type="box" group="2" size="1.6 0.8 0.05"

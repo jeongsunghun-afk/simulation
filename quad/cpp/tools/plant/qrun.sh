@@ -2,7 +2,7 @@
 # 사용: qrun.sh <이름> [env...] — 사족 실기 유사 조건(추정기·지연 4+6ms·잡음·로터관성 GEARBOX) 공통
 #   결과 → ${RUNS:-/home/jsh/sim_runs/quad}/<이름>.log
 Q="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"            # simulation/quad
-B=$Q/cpp/build/trot_sim; M=${MJCF:-$Q/mjcf/quad_real_17dof_waist_sphere.mjcf}
+B=$Q/cpp/build/trot_sim; M=${MJCF:-$Q/mjcf/quad_real_16dof_sphere.mjcf}
 R=${RUNS:-/home/jsh/sim_runs/quad}; mkdir -p "$R"
 name=$1; shift
 cd "$Q/cpp"

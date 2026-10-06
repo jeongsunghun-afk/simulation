@@ -1,5 +1,5 @@
 <mujoco model="terrain_gap">
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <geom name="gp0" type="box" group="2" size="0.350 0.700 0.080" pos="1.550 0.000 0.080" rgba="0.48 0.54 0.64 1"/>
     <geom name="gp1" type="box" group="2" size="0.350 0.700 0.080" pos="2.570 0.000 0.080" rgba="0.42 0.48 0.58 1"/>

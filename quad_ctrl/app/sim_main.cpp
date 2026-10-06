@@ -12,7 +12,7 @@ int main() {
   const int NU = 17;
   const double DT = 0.001;
 
-  MockHal hal(NU, DT);                     // TODO: MujocoHal("quad_real_17dof_waist_sphere.mjcf")
+  MockHal hal(NU, DT);                     // TODO: MujocoHal("quad_real_16dof_sphere.mjcf")
   SimEstimator est(NU);
   QuadController ctrl(NU);
 

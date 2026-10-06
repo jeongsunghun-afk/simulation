@@ -318,17 +318,19 @@ class IMUPanel(Panel):
 class ActuatorPanel(Panel):
     title = 'Actuators'
     def build(self):
-        with dpg.collapsing_header(label='Actuators  (17 DOF)', default_open=True):
+        with dpg.collapsing_header(label='Actuators', default_open=True, tag='act_hdr'):   # ★관절 수는 상태(names)로 표시(16/17-DOF 공용)
             with dpg.table(header_row=True, row_background=True, borders_innerH=True,
                            borders_outerV=True, scrollY=True, height=270):
                 for c in ('Joint', 'q [rad]', 'dq [rad/s]', 'tau [Nm]'):
                     dpg.add_table_column(label=c)
-                for i in range(17):
-                    with dpg.table_row():
+                for i in range(17):   # 최대 17칸(구 허리 모델) — 16-DOF 면 마지막 칸 숨김
+                    with dpg.table_row(tag='act_row%d' % i):
                         for col in ('n', 'q', 'd', 't'):
                             dpg.add_text('-', tag='act_%s%d' % (col, i))
     def update(self, st):
         n = st.get('names', []); q = st.get('q', []); d = st.get('dq', []); t = st.get('tau', [])
+        dpg.configure_item('act_hdr', label='Actuators  (%d DOF)' % len(n))
+        for i in range(17): dpg.configure_item('act_row%d' % i, show=i < len(n))
         for i in range(min(17, len(n))):
             dpg.set_value('act_n%d' % i, n[i]); dpg.set_value('act_q%d' % i, '%+.2f' % q[i])
             dpg.set_value('act_d%d' % i, '%+.2f' % d[i]); dpg.set_value('act_t%d' % i, '%+.1f' % t[i])

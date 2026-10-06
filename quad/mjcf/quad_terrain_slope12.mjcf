@@ -1,5 +1,5 @@
 <mujoco model="quad_terrain_slope12">
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <geom name="ramp12" type="box" group="2" size="1.6 0.8 0.05"
           pos="2.3754 0 0.2838" euler="0 -0.2094 0"

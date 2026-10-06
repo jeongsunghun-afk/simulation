@@ -1,8 +1,8 @@
-# quad_ctrl 배포 config — 17-DOF (quad_real_17dof_waist_sphere), MPC+WBIC.
-#   사용: QC_CONFIG=config/deploy_17dof.yaml ./build/sim_bridge   (또는 실기 robot_main)
+# quad_ctrl 배포 config — 16-DOF (quad_real_16dof_sphere, 2026-10-06 허리 제거), MPC+WBIC.
+#   사용: QC_CONFIG=config/deploy_16dof.yaml ./build/sim_bridge   (또는 실기 robot_main)
 #   원칙③(파라미터=config). flat `key: value` → 시작 시 env로 주입(common/config.hpp).
 #   ★precedence: 실제 env-var가 이미 있으면 그게 우선(실험 override), 없을 때만 이 값 적용.
-#   ★게인/물리는 대부분 코드가 17dof 자동감지 → 여기선 "튜닝하려면 주석 해제"로 문서화(활성=코드기본과 동일값만).
+#   ★게인/물리는 대부분 코드가 16·17dof(다리 4×4) 자동감지 → 여기선 "튜닝하려면 주석 해제"로 문서화(활성=코드기본과 동일값만).
 #   ※배포 무관 연구 knob(COM_LEAD·DCM_K·SETTLE_*·RSL_* 등 TAMOLS-crawl)은 여기 없음 — 배포 파라미터만.
 
 # ── 운용(operation) ──
@@ -10,7 +10,7 @@ GAIT:   trot        # trot | walk | run (프리셋)
 TROT_V: 0.3         # 전진속도 명령 [m/s] (walk~0.3-0.6·trot~1.4·run~2.0)
 BODY_H: 0.0         # 서기 높이 [m], 0=모델 기본(base_z0=0.5234). 범위 0.42~0.52
 
-# ── WBIC/MPC 게인 (코드 17dof 자동감지 — 실기 재튜닝 시 주석 해제) ──
+# ── WBIC/MPC 게인 (코드 16·17dof 자동감지 — 실기 재튜닝 시 주석 해제) ──
 #   sim2real 재튜닝 1순위 = 지연/노이즈/접촉 바뀌면 SW_KP·W_ORI·W_AM·RAIBERT_K. [[sim2real-checklist-17dof]] B절.
 # W_ORI:   200       # 자세 홀드 가중(축소지지 레벨링). 낮으면 첫 swing tilt 발산
 # KD_AM:   24        # 각운동량 감쇠

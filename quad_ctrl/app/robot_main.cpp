@@ -16,7 +16,7 @@
 #include "control/trot_bridge.hpp"
 #include "command/sport_client.hpp"
 #include "common/config.hpp"
-#include "config/joint_map_17dof.hpp"
+#include "config/joint_map_16dof.hpp"
 
 using namespace qc;
 static volatile sig_atomic_t g_run = 1;
@@ -26,7 +26,7 @@ int main(int argc, char** argv) {
   load_config_env();                          // QC_CONFIG(게인·물리·관절범위)
   // 기본 경로는 이 저장소 기준 상대(Pi 체크아웃 위치 무관). argv[1]로 덮어쓸 수 있다.
   const char* mjcf = argc > 1 ? argv[1]
-      : "../quad/mjcf/quad_real_17dof_waist_sphere.mjcf";
+      : "../quad/mjcf/quad_real_16dof_sphere.mjcf";
 
   // ★모델(동역학 계산기) — sim과 동일 셋업. 실기서도 MuJoCo를 M/h/Jac 계산에 씀(물리엔진 아님, mj_step 안함).
   ::QuadControl q;
@@ -34,7 +34,14 @@ int main(int argc, char** argv) {
 
   EkfEstimator ekf(q);                        // KF 추정 → d_est
   TrotBridge   ctrl(q);                        // 검증된 MPC+WBIC(순수토크)
-  RealHal      hal(q.nu, q.m->opt.timestep, joint_map_17dof());   // ★관절맵=축별 JOG 실측 확정 필요
+  // ★2026-10-06 관절맵 길이 = 모델 nu 검사. RealHal 은 i<nu 로 맵을 인덱싱하므로 어긋나면(예: 17-DOF 모델+16 맵)
+  //   축이 밀려 다른 채널로 명령이 나간다 → 구동 전에 중단.
+  const auto jmap = joint_map_16dof();
+  if ((int)jmap.size() != q.nu) {
+    std::fprintf(stderr, "[robot_main] 관절맵 %zu축 ≠ 모델 nu=%d (%s) — 모델/맵 불일치, 구동 중단.\n", jmap.size(), q.nu, mjcf);
+    return 1;
+  }
+  RealHal      hal(q.nu, q.m->opt.timestep, jmap);   // ★관절맵=축별 JOG 실측 확정 필요
 
   // ★SHM 연결 + RobotEmbedded 기동 핸드셰이크. 이게 없으면 SHM이 아예 붙지 않는다(스캐폴드 누락분).
   if (!hal.init()) {
@@ -47,7 +54,7 @@ int main(int argc, char** argv) {
   // ★★배포 게이트 — 모델기반 제어(stand/walk)의 전제조건. 하나라도 못 지키면 구동하지 않는다.
   //   여기서 막지 않으면 컨트롤러는 "평평한 자세·정지·17축 전부 정상"이라는 거짓 상태를 믿고
   //   토크를 뿜는다. sim 에서 falls=0 이었던 건 그 전제가 참일 때의 이야기다.
-  //   (2026-08-05 Pi 실측 기준 셋 다 미충족 — config/joint_map_17dof.hpp 주석 참조)
+  //   (2026-08-05 Pi 실측 기준 셋 다 미충족 — config/joint_map_16dof.hpp 주석 참조)
   bool ok = true;
   if (!hal.fully_mapped()) {
     std::fprintf(stderr, "[robot_main] ✗ 미배선 축 존재(%d/%d 매핑) — 모델기반 제어 불가.\n"

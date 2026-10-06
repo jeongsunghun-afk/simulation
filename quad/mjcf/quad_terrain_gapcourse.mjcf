@@ -1,5 +1,5 @@
 <mujoco model="gap_course">
-  <include file="quad_real_17dof_waist_sphere.mjcf"/>
+  <include file="quad_real_16dof_sphere.mjcf"/>
   <worldbody>
     <geom name="gc_start" type="box" group="2" size="0.550 0.7 0.10" pos="-0.050 0 -0.10" rgba="0.48 0.54 0.64 1"/>
     <geom name="gc0" type="box" group="2" size="0.350 0.7 0.10" pos="1.170 0 -0.10" rgba="0.48 0.54 0.64 1"/>

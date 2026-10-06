@@ -280,7 +280,7 @@ struct TrotCtrl {
   double JUMP_VX=0.6;   // ★점프 전방 이륙속도(0=수직 제자리). live-solve·gen_jump 공통 의미
 #ifdef HAVE_JUMP_SOLVER
   std::string JUMP_URDF="/home/jsh/문서/jsh/simulation/02_Leg_UFDF_260703_2/urdf/02_Leg_UFDF_260703_3.urdf";
-  std::string JUMP_MJCF="/home/jsh/문서/jsh/simulation/quad/mjcf/quad_real_17dof_waist_sphere.mjcf";
+  std::string JUMP_MJCF="/home/jsh/문서/jsh/simulation/quad/mjcf/quad_real_16dof_sphere.mjcf";   // ★16-DOF(허리 제거). URDF 는 허리 있는 판을 쓰되 jump_solver 가 허리를 0°로 잠금
   int JUMP_MAXIT=8;     // ★crouch중 live-solve FDDP 반복(S2: iter~8. crouch 예산 450ms 내)
   JumpSolver jsolver; bool jsolver_ready=false;   // ★셋업(모델·MJCF·IK) 캐시 → 점프마다 solve만
   std::future<JumpTraj> jfut; bool jsolving=false, jlaunched=false;   // ★실기대비: solve를 별도 스레드로(1kHz 루프 안 멈춤). crouch 유지하며 백그라운드 계산→완료 시 인계

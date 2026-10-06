@@ -1,5 +1,6 @@
 #pragma once
-// 17-DOF 관절맵 — MJCF(quad_real_17dof_waist_sphere) 관절순 ↔ 실모터 Gait SHM 채널.
+// 16-DOF 관절맵 — MJCF(quad_real_16dof_sphere) 관절순 ↔ 실모터 Gait SHM 채널.
+// ★2026-10-06 실물 허리 관절 제거 → 17-DOF 맵에서 FB_waist 줄(구 index 8)만 삭제. 다른 축의 채널·부호·한계는 그대로.
 //   구조: GaitJointCfg{ chan, sign, zero_deg, min_deg, max_deg, vel_max_dps }.
 //     chan     = Gait SHM 채널. ★-1 = 미배선(구동 금지). real_hal 이 거부한다.
 //     sign     = MJCF 관절 +방향 ↔ 실모터 +방향 (±1).
@@ -27,9 +28,9 @@
 #if defined(QC_HAVE_ROBOT_SHM) || __has_include("/usr/include/RobotSharedMem.h")
 namespace qc {
 
-// MJCF nu=17 순서: HL(hip,thigh,calf,foot)·HR(4)·FB_waist·FL(4)·FR(4).
+// MJCF nu=16 순서: HL(hip,thigh,calf,foot)·HR(4)·FL(4)·FR(4).
 //                        chan sign zero  min   max   vel      // 관절
-inline std::vector<GaitJointCfg> joint_map_17dof() { return {
+inline std::vector<GaitJointCfg> joint_map_16dof() { return {
   // ── 뒷다리 좌(HL) — 채널 서비스됨 ─────────────────────────────────────────
   {  0, +1,  0.0,  -35,  35, 300 },   // 0  HL_hip    ★sign +1 실측확정(2026-08-05) · 모터 장착됨
   {  1, +1,  0.0, -135,  65, 210 },   // 1  HL_thigh  sign 미검증(모터 미장착)
@@ -42,15 +43,14 @@ inline std::vector<GaitJointCfg> joint_map_17dof() { return {
   {  7, +1,  0.0,  -80,  40, 300 },   // 7  HR_foot   sign 미검증(모터 미장착)
   // ── 아래는 전부 미배선(채널 자체가 서비스되지 않음) ──────────────────────
   //    chan=-1 → real_hal 이 read 에서 제외하고 write 에서 명령하지 않는다.
-  { -1, +1,  0.0,  -30,  30, 210 },   // 8  FB_waist  ★미배선(조향 스파인)
-  { -1, +1,  0.0,  -35,  35, 300 },   // 9  FL_hip    ★미배선
-  { -1, +1,  0.0, -135,  65, 210 },   // 10 FL_thigh  ★미배선
-  { -1, +1,  0.0,  -55,  65, 300 },   // 11 FL_calf   ★미배선
-  { -1, +1,  0.0,  -80,  40, 300 },   // 12 FL_foot   ★미배선
-  { -1, +1,  0.0,  -35,  35, 300 },   // 13 FR_hip    ★미배선
-  { -1, +1,  0.0, -135,  65, 210 },   // 14 FR_thigh  ★미배선
-  { -1, +1,  0.0,  -55,  65, 300 },   // 15 FR_calf   ★미배선
-  { -1, +1,  0.0,  -80,  40, 300 },   // 16 FR_foot   ★미배선
+  { -1, +1,  0.0,  -35,  35, 300 },   // 8  FL_hip    ★미배선
+  { -1, +1,  0.0, -135,  65, 210 },   // 9  FL_thigh  ★미배선
+  { -1, +1,  0.0,  -55,  65, 300 },   // 10 FL_calf   ★미배선
+  { -1, +1,  0.0,  -80,  40, 300 },   // 11 FL_foot   ★미배선
+  { -1, +1,  0.0,  -35,  35, 300 },   // 12 FR_hip    ★미배선
+  { -1, +1,  0.0, -135,  65, 210 },   // 13 FR_thigh  ★미배선
+  { -1, +1,  0.0,  -55,  65, 300 },   // 14 FR_calf   ★미배선
+  { -1, +1,  0.0,  -80,  40, 300 },   // 15 FR_foot   ★미배선
 }; }
 
 }  // namespace qc
