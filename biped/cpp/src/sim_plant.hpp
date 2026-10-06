@@ -1,5 +1,7 @@
 #pragma once
 // ★2026-10-06 실기 유사 플랜트 — 드라이버 PD 추종 · FF 처리 · 드라이브 한계 · **모터–링크 탄성(벨트·백래시)**.
+//   (이족 biped/cpp/src/sim_plant.hpp 와 같은 모듈. 사족용으로 관절 그룹 5개(hip·thigh·calf·foot·기타=허리)와
+//    호출자 기본 게인을 받도록 일반화 — 이족 브랜치와 합칠 때 이 판을 기준으로 한다.)
 //
 // 왜: 강체 sim 은 실기 떨림(12–22 Hz)을 재현하지 못한다. 10-02 실기 분석 결과 떨림은
 //   ① 전달부 탄성(calf·foot 벨트, hip roll 백래시 — 출력축이 모터의 1.5~2배 흔들림)이 공진을 만들고
@@ -19,13 +21,13 @@
 // env (전부 미지정 = 종전과 같은 동작):
 //   WALK_TRACK=1          드라이버 추종 PD 사용(제어기 KinWBC q_des·q̇_des). 미지정이면 순수 토크(종전).
 //   TRK_KP / TRK_KD       드라이버 kp/kd 배율(실기 run_deploy_hw.sh 와 같은 이름). 기본 1.0 / 1.0
-//   DRV_KP / DRV_KD       구동좌표 기본 게인 4개(hip,thigh,calf,foot) — 기본 100,50,180,43.2 / 6,4,7.9,2.9 (실기 raw)
-//   WALK_FF_SCALE         FF 비율(기본 1). WALK_FF_SCALE_CH 로 4개(hip,thigh,calf,foot) 따로.
+//   DRV_KP / DRV_KD       구동좌표 기본 게인 5개(hip,thigh,calf,foot,기타) — 기본 100,50,180,43.2,100 / 6,4,7.9,2.9,6 (실기 raw)
+//   WALK_FF_SCALE         FF 비율(기본 1). WALK_FF_SCALE_CH 로 5개(hip,thigh,calf,foot,기타) 따로.
 //   WALK_FF_LPF_HZ        FF 1차 저역통과(기본 0=끔).   WALK_FF_NOTCH_HZ / _Q  FF 노치(기본 0=끔, Q 2)
-//   PLANT_DRV_CH          드라이브 채널 토크한계 Nm(기본 0 = MJCF ctrlrange). 구동좌표 한계 = CH × gear_k(1,1,1.5,1.2)
-//   EL_K                  탄성 강성 4개 [Nm/rad, 구동좌표] (hip,thigh,calf,foot). 지정 시 탄성 켬.
+//   PLANT_DRV_CH          드라이브 채널 토크한계 Nm(기본 0 = MJCF ctrlrange). 구동좌표 한계 = CH × gear_k(1,1,1.5,1.2,1)
+//   EL_K                  탄성 강성 5개 [Nm/rad, 구동좌표] (hip,thigh,calf,foot,기타). 지정 시 탄성 켬.
 //   EL_ZETA               전달부 감쇠비(기본 0.05, c = 2ζ√(k·J_m))
-//   EL_BL_DEG             백래시 반폭 4개 [deg] (기본 0)
+//   EL_BL_DEG             백래시 반폭 5개 [deg] (기본 0)
 //   PLANT_SUB             물리 서브스텝 수(기본: 탄성 4 · 아니면 1). 제어 2 ms 는 그대로.
 //   EL_FRIC_ROTOR         탄성 시 감속기 마찰(점성 damping·쿨롱 frictionloss)을 링크에서 로터로 옮김(기본 1).
 //                         실제 감속기 마찰은 모터 쪽에 있어 로터 공진을 누른다 — 링크에 두면 그 감쇠가 빠진다.
@@ -37,6 +39,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <string>
 
 struct SimPlant {
   int nu=0, nv=0, NJ=0;
@@ -44,7 +47,7 @@ struct SimPlant {
   int sub=1;
   double trk_kp=1.0, trk_kd=1.0;
   std::vector<double> kp, kd, ffs, lim, k, cdmp, bl, Jm, bm, fc;
-  std::vector<int> grp;                 // 0 hip · 1 thigh · 2 calf · 3 foot (액추에이터 이름으로)
+  std::vector<int> grp;                 // 0 hip · 1 thigh · 2 calf · 3 foot · 4 기타(허리 등) — 액추에이터 이름으로
   Eigen::MatrixXd A, Ainv;              // s = A q_leg (nu × NJ), 다리 관절만
   std::vector<double> th, om;           // 로터 상태(구동 좌표)
   // FF 필터
@@ -65,16 +68,17 @@ struct SimPlant {
   static double envd(const char* e, double def){ const char* v=getenv(e); return v?atof(v):def; }
 
   // 제어기 모델 m(setup_gearbox 끝난 상태)로부터 플랜트 모델을 만든다.
-  void init(mjModel* m, mjData* d){
+  void init(mjModel* m, mjData* d, std::vector<double> defKP={100,50,180,43.2,100}, std::vector<double> defKD={6,4,7.9,2.9,6}){
     nu=m->nu; nv=m->nv; NJ=m->nq-7;
     track = getenv("WALK_TRACK") && atoi(getenv("WALK_TRACK"));
     trk_kp=envd("TRK_KP",1.0); trk_kd=envd("TRK_KD",1.0);
-    std::vector<double> KP4=envv("DRV_KP",{100,50,180,43.2}), KD4=envv("DRV_KD",{6,4,7.9,2.9});
-    std::vector<double> FF4=envv("WALK_FF_SCALE_CH", std::vector<double>(4, envd("WALK_FF_SCALE",1.0)));
-    std::vector<double> K4=envv("EL_K",{0,0,0,0}), BL4=envv("EL_BL_DEG",{0,0,0,0});
+    defKP.resize(5, defKP.empty()?100.0:defKP.back()); defKD.resize(5, defKD.empty()?6.0:defKD.back());
+    std::vector<double> KP4=envv("DRV_KP",defKP), KD4=envv("DRV_KD",defKD);
+    std::vector<double> FF4=envv("WALK_FF_SCALE_CH", std::vector<double>(5, envd("WALK_FF_SCALE",1.0)));
+    std::vector<double> K4=envv("EL_K",{0,0,0,0,0}), BL4=envv("EL_BL_DEG",{0,0,0,0,0});
     elastic = getenv("EL_K")!=nullptr;
     const double zeta=envd("EL_ZETA",0.05), CH=envd("PLANT_DRV_CH",0.0);
-    const double GK[4]={1.0,1.0,1.5,1.2};
+    const double GK[5]={1.0,1.0,1.5,1.2,1.0};
     lpf_hz=envd("WALK_FF_LPF_HZ",0.0); notch_hz=envd("WALK_FF_NOTCH_HZ",0.0); notch_q=envd("WALK_FF_NOTCH_Q",2.0);
     sub = (int)envd("PLANT_SUB", elastic?4.0:1.0); if(sub<1) sub=1;
     // 구동좌표 전달행렬 A (다리 관절 NJ 열)
@@ -97,7 +101,8 @@ struct SimPlant {
     mp = mj_copyModel(nullptr, m);
     for(int i=0;i<nu;i++){
       const char* nm=mj_id2name(m,mjOBJ_ACTUATOR,i); std::string s=nm?nm:"";
-      int gI = s.find("hip")!=std::string::npos?0 : s.find("thigh")!=std::string::npos?1 : s.find("calf")!=std::string::npos?2 : 3;
+      int gI = s.find("hip")!=std::string::npos?0 : s.find("thigh")!=std::string::npos?1 : s.find("calf")!=std::string::npos?2
+             : s.find("foot")!=std::string::npos?3 : 4;
       grp[i]=gI;
       kp[i]=KP4[gI]*trk_kp; kd[i]=KD4[gI]*trk_kd; ffs[i]=FF4[gI];
       lim[i] = CH>0 ? CH*GK[gI] : std::max(std::fabs(m->actuator_ctrlrange[2*i]), std::fabs(m->actuator_ctrlrange[2*i+1]));
@@ -110,7 +115,7 @@ struct SimPlant {
         if(frot){ bm[i]=m->tendon_damping[t]; fc[i]=m->tendon_frictionloss[t]; mp->tendon_damping[t]=0.0; mp->tendon_frictionloss[t]=0.0; } }
       if(elastic){
         k[i]=K4[gI]; bl[i]=BL4[gI]*M_PI/180.0;
-        if(Jm[i]<=0) Jm[i]=1e-3;
+        if(Jm[i]<=0){ Jm[i]=1e-3; std::printf("[plant] ⚠%s 로터 관성 0 — 탄성엔 반사관성이 필요하다(사족은 GEARBOX=1)\n", s.c_str()); }
         cdmp[i]=2.0*zeta*std::sqrt(std::max(0.0,k[i])*Jm[i]);
       }
     }
@@ -119,13 +124,14 @@ struct SimPlant {
     th.assign(nu,0); om.assign(nu,0); ff_out.assign(nu,0); drv_out.assign(nu,0);
     lpf_y.assign(nu,0); nz.assign(4*nu,0); finit=false;
     reset(d);
-    std::printf("[plant] 드라이버추종 %s (kp×%.2f kd×%.2f) · FF비율 %.2f/%.2f/%.2f/%.2f · FF LPF %.1fHz · 노치 %.1fHz(Q%.1f) · 서브스텝 %d\n",
-      track?"ON":"OFF", trk_kp, trk_kd, FF4[0],FF4[1],FF4[2],FF4[3], lpf_hz, notch_hz, notch_q, sub);
+    std::printf("[plant] 드라이버추종 %s (kp %.0f/%.0f/%.0f/%.1f/%.0f ×%.2f · kd %.1f/%.1f/%.1f/%.1f/%.1f ×%.2f) · FF비율 %.2f/%.2f/%.2f/%.2f/%.2f · FF LPF %.1fHz · 노치 %.1fHz(Q%.1f) · 서브스텝 %d\n",
+      track?"ON":"OFF", KP4[0],KP4[1],KP4[2],KP4[3],KP4[4], trk_kp, KD4[0],KD4[1],KD4[2],KD4[3],KD4[4], trk_kd,
+      FF4[0],FF4[1],FF4[2],FF4[3],FF4[4], lpf_hz, notch_hz, notch_q, sub);
     if(elastic){
       std::printf("[plant] ★탄성 ON — 축(hip,thigh,calf,foot): k=");
-      for(int g=0;g<4;g++) std::printf("%s%.0f", g?",":"", K4[g]);
+      for(int g=0;g<5;g++) std::printf("%s%.0f", g?",":"", K4[g]);
       std::printf(" Nm/rad · 백래시 ±");
-      for(int g=0;g<4;g++) std::printf("%s%.2f", g?",":"", BL4[g]);
+      for(int g=0;g<5;g++) std::printf("%s%.2f", g?",":"", BL4[g]);
       std::printf("° · ζ %.2f · 감속기 마찰 %s\n[plant]   로터 J_m(구동좌표):", zeta, frot?"로터 쪽":"링크 쪽");
       for(int i=0;i<nu;i++) std::printf(" %.4f", Jm[i]);
       std::printf(" · 공진(링크 고정 근사) Hz:");
