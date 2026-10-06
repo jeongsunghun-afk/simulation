@@ -75,7 +75,8 @@ override: `GAIT`(S)·`TROT_T`/`TROT_SWF`/`TROT_STEPH`/`RAIBERT_K`(S, 프리셋 �
 | w_yaw | 0.0 | W_YAW (A) | yaw 홀드(0=MPC 담당, 최적) |
 | W_AM / KD_AM | 0.0 / 8.0 | W_AM / KD_AM (A) | 각운동량 보상 가중 / 감쇠 |
 | STANCE_KD | 20.0 | STANCE_KD (S) | stance 접촉속도 감쇠(slip↓). ★하이브리드(기본) 추적 경로는 STANCE_KD_TRACK 사용 |
-| WBIC 구성 | 2 | WBIC_MIT | ★2026-09-30 0=종전 가중QP · 1=MIT 전체(연구용, 구동지연 8ms서 붕괴) · **2=하이브리드(기본)**: 가중QP + 접촉·스윙 J̇q̇ + KinWBC 계획(q_des·q̇_des) |
+| WBIC 구성 | 2 | WBIC_MIT | ★2026-09-30 0=종전 가중QP · 1=MIT 전체(선택, 기본 MIT 게인 자세·몸통 100/10·스윙 500/10 — 드라이버 PD(PLANT) 있으면 실기조건 0낙상, 토크만이면 걷기 낙상. ※09-30 "8ms 붕괴"는 A 게인 조건, 10-06 정정) · **2=하이브리드(기본)**: 가중QP + 접촉·스윙 J̇q̇ + KinWBC 계획(q_des·q̇_des) |
+| MIT 과제 게인 | 모드별 | MIT_ORI_KP/KD · MIT_COM_KD · MIT_Z_KP/KD · MIT_SW_KP/KD | ★2026-10-06 KinWBC/MIT 과제 게인. 기본 WBIC_MIT=1 → 100/10·10·100/10·500/10(MIT) · =2 → 150/20·25·200/25·2400/110(A). 종전엔 하드코딩(SW_KP/KD 는 HQP 전용) |
 | STANCE_KD_TRACK | 0.0 | STANCE_KD_TRACK | 하이브리드 추적(wbic_track) 접촉 K_D. 0=폐기(J q̈ = −J̇q̇) |
 | 드라이버 추종 | off | DRV_TRACK / TRK_KP_Q / TRK_KD_Q | τ_ff + kp(q_des−q) + kd(q̇_des−q̇). sim 권장 20 Nm/rad · 1 Nm·s/rad. ⚠실기 kp 단위(real_hal) 확인 전 off |
 | MU | 0.6 | MU (A) | 마찰콘 μ(MPC 동시) |

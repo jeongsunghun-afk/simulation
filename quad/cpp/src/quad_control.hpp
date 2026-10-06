@@ -514,11 +514,14 @@ struct QuadControl {
     return true;
   }
 
-  // ── ★2026-09-30 하이브리드 WBC / MIT 구성 (WBIC_MIT: 0=종전 · 1=MIT 전체(연구용) · 2=하이브리드=기본) ──
+  // ── ★2026-09-30 하이브리드 WBC / MIT 구성 (WBIC_MIT: 0=종전 · 1=MIT 전체(선택) · 2=하이브리드=기본) ──
   //   하이브리드 = 기존 가중 QP(wbic_track) + 접촉·스윙 J̇q̇ + 추적 중 K_D 0(STANCE_KD_TRACK) + KinWBC 계획(mit_qdes/dqdes).
-  //   계획 목표는 드라이버 PD 추종(DRV_TRACK=1, trot_sim·sim_bridge·robot_main 공통)에 쓴다. 근거: scratch 4족 sim
-  //   실기수준(EST+SENSE2+ACT6ms+노이즈) trot0.3/0.6·walk·선회·제자리 전부 0낙상(MIT 전체는 같은 조건서 붕괴).
+  //   계획 목표는 드라이버 PD 추종(DRV_TRACK=1 / PLANT=1, trot_sim·sim_bridge·robot_main 공통)에 쓴다.
+  //   ★2026-10-06 재검증(16-DOF, 6시나리오): 하이브리드 = 토크만·추종 kp20/kp3·플랜트 × 이상적·실기조건(EST+4+6ms+잡음) 8조합 전부 0낙상.
+  //   MIT 전체(MIT 게인) = 플랜트(드라이버 PD)면 0낙상·기울기 더 작음, 플랜트 없으면 걷기만 낙상(스윙 게인 낮으면 걷기·높으면 지연에 붕괴).
+  //   ⇒ 기본 하이브리드 유지(유저 결정 10-06). 결과 /home/jsh/sim_runs/quad16_mit/.
   VectorXd mit_qdes, mit_dqdes; bool mit_valid=false; long mit_n=0, mit_fail=0;
+  static int wbic_mode(){ static const int w=getenv("WBIC_MIT")?atoi(getenv("WBIC_MIT")):2; return w; }   // ★WBIC_MIT 단일 출처
   Vector3d jacdot_foot(int i){ std::vector<double> jb(3*nv); Vector3d p=foot_point(i);
     mj_jacDot(m,d,jb.data(),nullptr,p.data(),fbid[i]);
     Vector3d r=Vector3d::Zero(); for(int rr=0;rr<3;rr++){ double s2=0; for(int c=0;c<nv;c++) s2+=jb[rr*nv+c]*d->qvel[c]; r[rr]=s2; } return r; }
@@ -532,21 +535,27 @@ struct QuadControl {
     for(int k=0;k<Kc;k++){ int c=contacts[k]; in.Jc.block(3*k,0,3,nv)=foot_jac(c); in.JcDotQdot.segment(3*k,3)=jacdot_foot(c); in.Fr_des.segment(3*k,3)=lam[c]; }
     in.mu=MU*MU_MARGIN; in.fz_min=LAMZ_MIN; in.fz_max=1e4; in.drv_peak=tau_peak;
     static const double WB=getenv("MIT_WB")?atof(getenv("MIT_WB")):0.1, WF=getenv("MIT_WF")?atof(getenv("MIT_WF")):1.0; in.W_b=WB; in.W_f=WF;
+    // ★2026-10-06 과제 게인 노브. 기본: WBIC_MIT=1(MIT 전체)=MIT 공개 게인(자세·몸통 100/10·스윙 500/10) ·
+    //   =2(하이브리드 KinWBC 계획)=종전 A 값(자세 150/20·xy 25·z 200/25·스윙 2400/110). MIT+A 게인은 구동지연서 붕괴(16-DOF 실기조건 6/6).
+    auto ge=[](const char* k,double v){ const char* e=getenv(k); return e?atof(e):v; };
+    static const bool MG=(wbic_mode()==1);
+    static const double OKP=ge("MIT_ORI_KP",MG?100:150), OKD=ge("MIT_ORI_KD",MG?10:20), VKD=ge("MIT_COM_KD",MG?10:25),
+                        ZKP=ge("MIT_Z_KP",MG?100:200), ZKD=ge("MIT_Z_KD",MG?10:25), SKP=ge("MIT_SW_KP",MG?500:2400), SKD=ge("MIT_SW_KD",MG?10:110);
     { Task t; t.J=MatrixXd::Zero(3,nv); t.J.block(0,3,3,3).setIdentity();            // T1 몸통 자세 (roll·pitch 수평, yaw 헤딩)
       double* qc=&d->qpos[3]; double yaw_m=std::atan2(2*(qc[0]*qc[3]+qc[1]*qc[2]),1-2*(qc[2]*qc[2]+qc[3]*qc[3]));
       double qlev[4]={std::cos(yaw_m/2),0,0,std::sin(yaw_m/2)}, oe[3]; mju_subQuat(oe,&d->qpos[3],qlev);
       double ye=std::atan2(std::sin(yaw_des-yaw_m),std::cos(yaw_des-yaw_m));
       t.e=Vector3d(-oe[0],-oe[1],ye); t.xd_des=Vector3d::Zero();
-      t.xdd_cmd=Vector3d(150*(-oe[0])-20*qv[3],150*(-oe[1])-20*qv[4],150*ye-20*qv[5]); t.JdotQdot=Vector3d::Zero(); in.tasks.push_back(t); }
+      t.xdd_cmd=Vector3d(OKP*(-oe[0])-OKD*qv[3],OKP*(-oe[1])-OKD*qv[4],OKP*ye-OKD*qv[5]); t.JdotQdot=Vector3d::Zero(); in.tasks.push_back(t); }
     { Task t; std::vector<double> jcb(3*nv); mj_jacSubtreeCom(m,d,jcb.data(),0);        // T2 몸통 위치(CoM): xy=계획속도 · z=높이
       MatrixXd Jc(3,nv); for(int r=0;r<3;r++)for(int c=0;c<nv;c++) Jc(r,c)=jcb[r*nv+c];
       Vector3d v=Jc*qv; double zref=com_ref[2]+_body_terr;
       t.J=Jc; t.e=Vector3d(0,0,zref-d->subtree_com[2]); t.xd_des=com_vel_ref;
-      t.xdd_cmd=Vector3d(25*(com_vel_ref[0]-v[0])+com_acc_ref[0], 25*(com_vel_ref[1]-v[1])+com_acc_ref[1],
-                         200*(zref-d->subtree_com[2])+25*(com_vel_ref[2]-v[2])+com_acc_ref[2]);
+      t.xdd_cmd=Vector3d(VKD*(com_vel_ref[0]-v[0])+com_acc_ref[0], VKD*(com_vel_ref[1]-v[1])+com_acc_ref[1],
+                         ZKP*(zref-d->subtree_com[2])+ZKD*(com_vel_ref[2]-v[2])+com_acc_ref[2]);
       t.JdotQdot=Vector3d::Zero(); in.tasks.push_back(t); }
     for(auto&kv:swing){ int leg=kv.first; Task t; t.J=foot_jac(leg); Vector3d p=foot_point(leg), vs=t.J*qv;   // T3 스윙 발
-      t.e=kv.second.first-p; t.xd_des=kv.second.second; t.xdd_cmd=2400.0*(kv.second.first-p)+110.0*(kv.second.second-vs);
+      t.e=kv.second.first-p; t.xd_des=kv.second.second; t.xdd_cmd=SKP*(kv.second.first-p)+SKD*(kv.second.second-vs);
       t.JdotQdot=jacdot_foot(leg); in.tasks.push_back(t); }
     { Task t; t.J=MatrixXd::Zero(nu,nv); t.J.rightCols(nu).setIdentity(); t.e.resize(nu); t.xd_des=VectorXd::Zero(nu);   // T4 관절 자세
       t.xdd_cmd.resize(nu); t.JdotQdot=VectorXd::Zero(nu);
@@ -562,7 +571,7 @@ struct QuadControl {
 
   bool wbic_track(const std::vector<int>& contacts, const std::map<int,std::pair<Vector3d,Vector3d>>& swing,
                   const Vector3d lam[4], double w_lam=10.0){
-    static const int WMIT=getenv("WBIC_MIT")?atoi(getenv("WBIC_MIT")):2;   // ★0=종전 · 1=MIT 전체(연구용) · 2=하이브리드(기본)
+    static const int WMIT=wbic_mode();   // ★0=종전 · 1=MIT 전체 · 2=하이브리드
     static const double KD_TRK=getenv("STANCE_KD_TRACK")?atof(getenv("STANCE_KD_TRACK")):0.0;   // ★하이브리드 추적 중 접촉 K_D(기본 0=폐기)
     if(WMIT==1 && !contacts.empty()) return wbic_track_mit(contacts, swing, lam);
     if(getenv("HQP")) return wbic_track_hqp(contacts, swing, lam, w_lam);   // ★strict null-space HQP(논문충실)

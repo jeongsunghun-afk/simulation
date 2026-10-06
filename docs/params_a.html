@@ -186,7 +186,7 @@
       <tr><td class="p">w_yaw</td><td class="val">0.0</td><td><span class="tag a">A</span> W_YAW</td><td class="mean">yaw 홀드(0=MPC 담당, 최적)</td></tr>
       <tr><td class="p">W_AM / KD_AM</td><td class="val">0 / 24</td><td><span class="tag a">A</span> W_AM / KD_AM</td><td class="mean">★W_AM 제거(0): 외란복구 이득 측정상 무의미(측방 push서 오히려↑)</td></tr>
       <tr><td class="p">STANCE_KD</td><td class="val">20.0</td><td><span class="tag s">S</span> STANCE_KD</td><td class="mean">stance 접촉속도 감쇠(slip↓). ★하이브리드 추적 경로는 STANCE_KD_TRACK</td></tr>
-      <tr><td class="p">WBIC 구성</td><td class="val">2</td><td><span class="tag a">A</span> WBIC_MIT</td><td class="mean">★0=종전 가중QP · 1=MIT 전체(연구용, 지연 8ms 붕괴) · 2=하이브리드(기본): 가중QP+J̇q̇+KinWBC 계획</td></tr>
+      <tr><td class="p">WBIC 구성</td><td class="val">2</td><td><span class="tag a">A</span> WBIC_MIT</td><td class="mean">★0=종전 가중QP · 1=MIT 전체(선택, MIT 게인 기본 — 드라이버 PD 있으면 실기조건 0낙상·토크만이면 걷기 낙상; 09-30 "8ms 붕괴"는 A 게인 조건, 10-06 정정) · 2=하이브리드(기본): 가중QP+J̇q̇+KinWBC 계획</td></tr>
       <tr><td class="p">STANCE_KD_TRACK</td><td class="val">0.0</td><td><span class="tag a">A</span> STANCE_KD_TRACK</td><td class="mean">하이브리드 추적 접촉 K_D (0=폐기: J q̈ = −J̇q̇)</td></tr>
       <tr><td class="p">드라이버 추종</td><td class="val">off · 20 · 1</td><td><span class="tag a">A</span> DRV_TRACK · TRK_KP_Q · TRK_KD_Q</td><td class="mean">τ_ff + kp(q_des−q) + kd(q̇_des−q̇). ⚠실기 kp 단위 확인 전 off</td></tr>
       <tr><td class="p">MU</td><td class="val">0.6</td><td><span class="tag a">A</span> MU</td><td class="mean">마찰콘 μ(MPC 동시 갱신)</td></tr>

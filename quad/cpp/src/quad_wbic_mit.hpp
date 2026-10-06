@@ -1,6 +1,7 @@
 // 4족 WBC 보조 — MIT Mini Cheetah 구성 요소 (Kim et al. 2019 · Cheetah-Software KinWBC.cpp / WBIC.cpp) 이식.
 //   ★2026-09-30: 4족 기본 = 하이브리드(WBIC_MIT=2): 토크는 기존 가중 QP(wbic_track) + J̇q̇, 드라이버 목표는 kinwbc().
-//     solve()(MIT 식 WBIC 전체, WBIC_MIT=1)는 sim 이상 조건에선 동작하나 구동지연 2+6ms 에서 붕괴 → 연구용으로만 남김.
+//     solve()(MIT 식 WBIC 전체, WBIC_MIT=1, 기본 MIT 게인)는 드라이버 PD(플랜트)가 있으면 실기조건 전 시나리오 통과,
+//     토크만이면 걷기 낙상 → 선택 모드. (09-30 "2+6ms 붕괴"는 A 게인 조건이었음 — 2026-10-06 정정)
 //   ① KinWBC: 접촉 영공간 안에서 과제 우선순위 순으로 Δq·q̇ 를 쌓아 **계획 관절 위치/속도(q_des, q̇_des)** 를 만든다.
 //   ② WBIC  : 동역학적으로 일관된 역행렬로 q̈_cmd 를 쌓는다. 접촉 = J_c q̈ + J̇_c q̇ = 0 (a_c=0, **K_D 없음**),
 //             과제 = J_t q̈ = ẍ_cmd − J̇_t q̇.

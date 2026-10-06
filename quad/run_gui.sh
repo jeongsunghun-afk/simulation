@@ -24,7 +24,7 @@ fi
 CMD=/tmp/quad_cmd.json; STATE=/tmp/quad_state.json
 # ★HWSIM=1 — 실기 유사 조건 묶음(2026-10-06, tools/plant/qrun.sh 와 동일 + 플랜트): 추정기 폐루프·지연 센서4+구동6ms·
 #   엔코더/자이로 잡음·로터 반사관성(GEARBOX) + 플랜트(드라이버 PD 추종 kp 100/50/180/43.2·kd×1.5 · FF 0.75·LPF10·노치15).
-#   각 값은 앞에 env 로 덮어쓰기. MIT 게인 시험: HWSIM=1 WBIC_MIT=1 SW_KP=500 SW_KD=10 bash run_gui.sh flat
+#   각 값은 앞에 env 로 덮어쓰기. MIT 시험: HWSIM=1 WBIC_MIT=1 bash run_gui.sh flat (MIT 게인 기본, 개별은 MIT_ORI_KP 등)
 if [ "${HWSIM:-0}" = 1 ]; then
   export EST_CTRL="${EST_CTRL:-1}" SENSE_LAT_MS="${SENSE_LAT_MS:-4}" ACT_LAT_MS="${ACT_LAT_MS:-6}"
   export ENCQ_N="${ENCQ_N:-7.6e-5}" ENCDQ_N="${ENCDQ_N:-0.037}" GYRO_N="${GYRO_N:-0.002}" GEARBOX="${GEARBOX:-1}"
