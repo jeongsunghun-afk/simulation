@@ -12,6 +12,9 @@
 #include <cmath>
 #include <chrono>
 #include <thread>
+#include <mutex>
+#include <atomic>
+#include <deque>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -161,7 +164,8 @@ int main(int argc,char**argv){
   long estep=0;
 
   if(!glfwInit()){ std::fprintf(stderr,"glfw init 실패\n"); return 1; }
-  GLFWwindow* win=glfwCreateWindow(getenv("VIEW_W")?atoi(getenv("VIEW_W")):1280, getenv("VIEW_H")?atoi(getenv("VIEW_H")):900,"17-DOF C++ trot (quad_mpc_wbic_17dof)",NULL,NULL);
+  char wtitle[64]; std::snprintf(wtitle,64,"%d-DOF C++ trot (%s)",m->nu,(getenv("PLANT")&&atoi(getenv("PLANT")))?"plant":"ideal actuation");
+  GLFWwindow* win=glfwCreateWindow(getenv("VIEW_W")?atoi(getenv("VIEW_W")):1280, getenv("VIEW_H")?atoi(getenv("VIEW_H")):900,wtitle,NULL,NULL);
   if(!win){ std::fprintf(stderr,"창 생성 실패(DISPLAY?)\n"); glfwTerminate(); return 1; }
   glfwMakeContextCurrent(win);
   // ★VIEW_SWAP(기본 1=vsync)·VIEW_MAXSTEP(기본 60=프레임당 따라잡기 상한). WSL 노트북은 화면전송 ~6fps 라
@@ -182,9 +186,8 @@ int main(int argc,char**argv){
   std::string STATE_PUB = getenv("STATE_PUB")?getenv("STATE_PUB"):"/tmp/quad_state.json";  // ★상태 발행(GUI 모니터)
   int falls=0; double max_tilt=0; long frame=0; bool fallen=false; long reset_seen=-1, jump_seen=-1;
   auto wall0=std::chrono::steady_clock::now(); double sim0=d->time;
-  while(!glfwWindowShouldClose(win)){
-    // ★GUI 명령 폴링(~20Hz): teleop_gui가 쓴 v/vy/w 반영
-    if(CMDFILE && (frame++ %3==0)){
+  // ── GUI 명령 폴링 본문(~20Hz) ──
+  auto poll_cmd=[&](){
       std::ifstream f(CMDFILE);
       if(f){ std::stringstream ss; ss<<f.rdbuf(); std::string c=ss.str();
         ctrl.V=json_get(c,"v",ctrl.V); ctrl.VY=json_get(c,"vy",ctrl.VY); ctrl.WZ=json_get(c,"w",ctrl.WZ);
@@ -217,13 +220,10 @@ int main(int argc,char**argv){
           if(PLANT){ plant.reset(d); pring.clear(); }   // ★플랜트(로터 상태·FF 필터)·목표 지연링도 리셋   // ★추정기도 리셋(참 base로)
           wall0=std::chrono::steady_clock::now(); sim0=d->time; }   // ★reset=Ready 복귀(mode 미초기화 시 점프 중 reset하면 그대로 재점프하던 버그)
         long jseq=(long)json_get(c,"jump_seq",jump_seen);       // ★Jump 버튼(상승엣지): 스크립트 점프 발동(mode=jump)
-        if(jump_seen<0) jump_seen=jseq; else if(jseq>jump_seen){ jump_seen=jseq; ctrl.mode="jump"; } } }
-    // ★벽시계 기준 실시간 페이싱: sim_time이 wall_time×RATE 따라가도록(모니터 refresh 무관)
-    double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-wall0).count();
-    double target=sim0+wall*RATE; int guard=0;
-    static const bool VPROF=getenv("VIEW_PROF")&&atoi(getenv("VIEW_PROF")); static double pt[4]={0,0,0,0}; static int pn=0, pst=0;
-    auto _t0=std::chrono::steady_clock::now();
-    while(d->time < target && guard++ < VIEW_MAXSTEP){    // 따라잡기(최대 60스텝/프레임=버스트 상한↓, 점프 히치 후 몰아치기 완화)
+        if(jump_seen<0) jump_seen=jseq; else if(jseq>jump_seen){ jump_seen=jseq; ctrl.mode="jump"; } }
+  };
+  // ── 1 스텝: 센서(+잡음·지연)→추정→제어→(플랜트)물리 ──
+  auto step_once=[&](){
       if(est_on){
         // ★실기 센서(+노이즈+지연)→leg-odometry 추정. 개루프(뷰어 비교)=추정만 갱신·제어는 GT / 폐루프(env)=추정상태로 제어
         int NJ=m->nq-7;
@@ -285,16 +285,47 @@ int main(int argc,char**argv){
       double td=ctrl.tiltdeg(); max_tilt=std::max(max_tilt,td);
       // ★낙상 시 자동재시작 안 함(그대로 쓰러진 채 유지 → RESET 버튼으로 복구). 낙상은 엣지로만 카운트
       bool low=(td>50||d->qpos[2]<0.2); if(low && !fallen) falls++; fallen=low;
+  };
+  // ★VIEW_THREAD(기본 1, 2026-10-06): 물리·제어를 별도 스레드로. 직렬이면 렌더/화면전송(WSL ~30ms)과 번갈아 돌아
+  //   실기조건(0.8ms/스텝)에서 ~5fps 였다. 스레드면 물리는 벽시계 페이싱으로 따로 돌고, 렌더는 잠금 안에서 장면만 복사.
+  //   VIEW_THREAD=0 = 종전 직렬 루프(VIEW_MAXSTEP 상한).
+  const bool VTHREAD = !(getenv("VIEW_THREAD") && !atoi(getenv("VIEW_THREAD")));
+  static const bool VPROF=getenv("VIEW_PROF")&&atoi(getenv("VIEW_PROF"));
+  std::mutex mtx; std::atomic<bool> quit{false}; std::atomic<long> nstep{0};
+  auto pace_resync=[&](double target, double wall){   // 뒤처짐/앞섬 0.2s 초과면 시계 리셋(백로그 버림)
+    if(target-d->time > 0.2 || d->time-sim0 > wall*RATE+0.5){ wall0=std::chrono::steady_clock::now(); sim0=d->time; } };
+  std::thread phys;
+  if(VTHREAD) phys=std::thread([&](){
+    using clk=std::chrono::steady_clock;
+    auto lastcmd=clk::now()-std::chrono::seconds(1), lastpub=lastcmd;
+    while(!quit){
+      auto now=clk::now();
+      if(CMDFILE && now-lastcmd>=std::chrono::milliseconds(50)){ std::lock_guard<std::mutex> lk(mtx); poll_cmd(); lastcmd=now; }
+      double wall=std::chrono::duration<double>(now-wall0).count(), target=sim0+wall*RATE; int n=0;
+      while(!quit && d->time<target && n<50){ { std::lock_guard<std::mutex> lk(mtx); step_once(); } n++; nstep++; }   // 스텝마다 잠금 → 렌더 대기 ≤1스텝
+      { std::lock_guard<std::mutex> lk(mtx);
+        double w2=std::chrono::duration<double>(clk::now()-wall0).count(); pace_resync(sim0+w2*RATE, w2);
+        if(!STATE_PUB.empty() && now-lastpub>=std::chrono::milliseconds(50)){ publish_state(m,d,ctrl,STATE_PUB); lastpub=now; } }   // ★GUI 모니터 발행(~20Hz)
+      if(n==0) std::this_thread::sleep_for(std::chrono::microseconds(300));
+    } });
+  double pt[4]={0,0,0,0}; int pn=0, pst=0; long nstep0=0; auto tprof=std::chrono::steady_clock::now();
+  while(!glfwWindowShouldClose(win)){
+    auto _t0=std::chrono::steady_clock::now(); int guard=0;
+    if(!VTHREAD){   // 종전 직렬 루프
+      if(CMDFILE && (frame++ %3==0)) poll_cmd();
+      // ★벽시계 기준 실시간 페이싱: sim_time이 wall_time×RATE 따라가도록(모니터 refresh 무관)
+      double wall=std::chrono::duration<double>(std::chrono::steady_clock::now()-wall0).count();
+      double target=sim0+wall*RATE;
+      while(d->time < target && guard++ < VIEW_MAXSTEP) step_once();   // 따라잡기 상한(VIEW_MAXSTEP)
+      pace_resync(target, wall);
+      if(!STATE_PUB.empty() && (frame%3==0)) publish_state(m,d,ctrl,STATE_PUB);   // ★GUI 모니터(IMU/Actuator) 발행
     }
-    // ★페이싱 재동기: 뒤처짐(히치 후 백로그)·앞섬 양쪽 모두 0.2s 초과면 시계 리셋 → 백로그 버림(점프 후 fast-forward 렉 방지)
-    if(target-d->time > 0.2 || d->time-sim0 > wall*RATE+0.5){ wall0=std::chrono::steady_clock::now(); sim0=d->time; }
-    if(!STATE_PUB.empty() && (frame%3==0)) publish_state(m,d,ctrl,STATE_PUB);   // ★GUI 모니터(IMU/Actuator 17-DOF) 발행
-
+    auto _t1=std::chrono::steady_clock::now(); pst+=guard;
+    char hud[384]; bool show_est;
+    std::unique_lock<std::mutex> lk(mtx, std::defer_lock); if(VTHREAD) lk.lock();   // ★장면 복사·HUD 만 잠금 안(≈1ms)
     mjrRect vp={0,0,0,0}; glfwGetFramebufferSize(win,&vp.width,&vp.height);
     cam.lookat[0]=d->qpos[0]; cam.lookat[1]=d->qpos[1];   // 로봇 추적
-    auto _t1=std::chrono::steady_clock::now(); pst+=guard;
     mjv_updateScene(m,d,&opt,NULL,&cam,mjCAT_ALL,&scn);
-    auto _t2=std::chrono::steady_clock::now();
     if(tmap_on){   // ★TAMOLS P0: 로컬 elevation map 갱신(맵 rate, ~20프레임마다=1kHz 밖) + footScore 격자 오버레이
       { static long _tk=0; if(_tk++ % 20 == 0) tmap.update(m,d,d->qpos[0],d->qpos[1],(uint64_t)(d->time*1e9)); }
       const Submap* sm=tmap.map();
@@ -329,9 +360,6 @@ int main(int argc,char**argv){
         mjvGeom* g5=&scn.geoms[scn.ngeom]; mjv_initGeom(g5,mjGEOM_LINE,NULL,NULL,NULL,org); mjv_connector(g5,mjGEOM_LINE,4,esM,esA); g5->category=mjCAT_DECOR; scn.ngeom++;
       }
     }
-    mjr_render(vp,&scn,&con);
-    auto _t3=std::chrono::steady_clock::now();
-    char hud[384];
     // ★HUD는 MuJoCo 오버레이(ASCII 전용 비트맵 폰트)라 한글 불가 → 영문 표기
     if(est_on)
       std::snprintf(hud,384,"cmd V=%.2f  WZ=%.2f m/s\nactual z=%.3f  tilt=%.1f deg\nx=%+.2f  falls=%d\n%s  [green=GT  orange=EST]\nest err  pos=%.3f m  vel=%.3f m/s  noise=%s\nlatency sense=%.0fms act=%.0fms",
@@ -341,13 +369,21 @@ int main(int argc,char**argv){
     else
       std::snprintf(hud,320,"cmd V=%.2f  WZ=%.2f m/s\nactual z=%.3f  tilt=%.1f deg\nx=%+.2f  falls=%d\nstate: GT (ground truth) control\nmouse: rotate/zoom  |  control via GUI",
                     ctrl.V,ctrl.WZ,d->qpos[2],ctrl.tiltdeg(),d->qpos[0],falls);
-    mjr_overlay(mjFONT_NORMAL,mjGRID_TOPLEFT,vp,est_on?"17-DOF C++ trot (GT vs EST compare)":"17-DOF C++ trot (GUI controlled)",hud,&con);
+    show_est=est_on;
+    if(lk.owns_lock()) lk.unlock();
+    auto _t2=std::chrono::steady_clock::now();
+    mjr_render(vp,&scn,&con);
+    auto _t3=std::chrono::steady_clock::now();
+    mjr_overlay(mjFONT_NORMAL,mjGRID_TOPLEFT,vp,show_est?"C++ trot (GT vs EST compare)":"C++ trot (GUI controlled)",hud,&con);
     glfwSwapBuffers(win); glfwPollEvents();
     if(VPROF){ auto _t4=std::chrono::steady_clock::now(); auto ms=[](auto a,auto b){return std::chrono::duration<double,std::milli>(b-a).count();};
       pt[0]+=ms(_t0,_t1); pt[1]+=ms(_t1,_t2); pt[2]+=ms(_t2,_t3); pt[3]+=ms(_t3,_t4);
-      if(++pn==20){ std::fprintf(stderr,"[VIEW_PROF] 프레임당 ms: 스텝 %.1f(%d개) 장면 %.1f 렌더 %.1f 오버레이+스왑(GPU대기 포함) %.1f · ngeom %d · %dx%d\n",
-        pt[0]/pn,pst/pn,pt[1]/pn,pt[2]/pn,pt[3]/pn,scn.ngeom,vp.width,vp.height); pt[0]=pt[1]=pt[2]=pt[3]=0; pn=0; pst=0; } }
+      if(++pn==20){ double el=std::chrono::duration<double>(_t4-tprof).count(); long ns=nstep.load();
+        std::fprintf(stderr,"[VIEW_PROF] %s · 화면 %.1f fps · 프레임당 ms: 직렬스텝 %.1f(%d개) 장면복사(잠금) %.1f 렌더 %.1f 오버레이+스왑 %.1f · 물리스레드 %.0f 스텝/s\n",
+          VTHREAD?"스레드":"직렬", pn/el, pt[0]/pn,pst/pn,pt[1]/pn,pt[2]/pn,pt[3]/pn, VTHREAD?(ns-nstep0)/el:0.0);
+        pt[0]=pt[1]=pt[2]=pt[3]=0; pn=0; pst=0; nstep0=ns; tprof=_t4; } }
   }
+  quit=true; if(phys.joinable()) phys.join();
   mjv_freeScene(&scn); mjr_freeContext(&con); glfwTerminate();
   if(d_est) mj_deleteData(d_est);
   mj_deleteData(d); mj_deleteModel(m); return 0;
