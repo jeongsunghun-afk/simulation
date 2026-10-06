@@ -4,6 +4,7 @@
 #include <mujoco/mujoco.h>
 #include "biped_control.hpp"
 #include "deploy_loop.hpp"
+#include "sim_plant.hpp"
 #include <Eigen/Dense>
 #include <cstdio>
 #include <cmath>
@@ -86,8 +87,21 @@ int main(int argc,char**argv){
   double dt=m->opt.timestep; int steps=(int)(T/dt); double fell=-1;
 
   bool est_ctrl = getenv("EST_CTRL")!=nullptr;
+  // ★2026-10-06 실기 유사 플랜트(sim_plant.hpp) — 드라이버 추종·FF 처리·탄성. env 미지정이면 종전과 같다.
+  SimPlant plant; plant.init(m,d);
+  if(plant.elastic && !est_ctrl){ std::printf("[plant] 탄성은 EST_CTRL 경로에서만 센서를 모터측으로 바꾼다 → EST_CTRL 켬\n"); est_ctrl=true; }
   DeployLoop dl; int falls=0;
-  if(est_ctrl){ dl.init(m,c); dl.reset(m,d); }
+  if(est_ctrl){ dl.init(m,c); dl.plant=&plant; dl.reset(m,d); }
+  // 밀기(제어기 모름): PUSH_FX/FY [N] · PUSH_T0 [s] · PUSH_DUR [s]
+  const double PFX=getenv("PUSH_FX")?atof(getenv("PUSH_FX")):0.0, PFY=getenv("PUSH_FY")?atof(getenv("PUSH_FY")):0.0;
+  const double PT0=getenv("PUSH_T0")?atof(getenv("PUSH_T0")):6.0, PDU=getenv("PUSH_DUR")?atof(getenv("PUSH_DUR")):0.2;
+  // SIMLOG=<csv>: 500Hz — t,z,roll,pitch,gx,gy,gz(몸통 각속도·몸통좌표),st, 액추에이터별 qm(모터측 관절각°)·ql(링크 관절각°)·
+  //   dqm(모터측 관절속도°/s)·dql(링크)·u(드라이브 토크)·ff(FF) — 실기 트레이스(q=모터측, aux=출력축)와 같은 의미.
+  std::FILE* slog=nullptr;
+  if(const char* p=getenv("SIMLOG")){ slog=std::fopen(p,"w");
+    if(slog){ std::fprintf(slog,"t,z,roll,pitch,gx,gy,gz,st");
+      for(const char* nm : {"qm","ql","dqm","dql","u","ff"}) for(int j=0;j<m->nu;j++) std::fprintf(slog,",%s%d",nm,j);
+      std::fprintf(slog,",fall\n"); } }
 
   bool do_switch=getenv("SWITCH")!=nullptr;    // ★중간 접촉모드 전환 검증(T/2에 토글)
   for(int i=0;i<steps;i++){
@@ -108,8 +122,27 @@ int main(int argc,char**argv){
     //   ⚠TORSO_ADD_KG 로는 이걸 재현할 수 없다 — 그건 **컨트롤러가 쓰는 모델도 같이**
     //     무거워져서 불일치가 안 생긴다(biped_sim 은 제어와 물리가 같은 m/d 를 쓴다).
     //     그래서 ctrl 을 직접 깎는다. 이게 모델↔플랜트 불일치를 만드는 유일한 지점이다.
-    if(TAU_SCALE != 1.0) for(int i=0;i<m->nu;i++) d->ctrl[i] *= TAU_SCALE;
-    mj_step(m,d);
+    { const int tb=m->jnt_bodyid[0]; const bool on=(i*dt>=PT0 && i*dt<PT0+PDU);
+      d->xfrc_applied[tb*6+0]=on?PFX:0.0; d->xfrc_applied[tb*6+1]=on?PFY:0.0; }
+    { std::vector<double> tff(d->ctrl, d->ctrl+m->nu);
+      const bool pv = est_ctrl ? dl.pd_valid : c.mit_valid;
+      std::vector<double> qd(8,0.0), dqd(8,0.0);
+      if(est_ctrl && pv){ qd=dl.pd_q; dqd=dl.pd_dq; }
+      else if(pv){ for(int j=0;j<8;j++){ qd[j]=c.mit_qdes[j]; dqd[j]=c.mit_dqdes[j]; } }
+      plant.step(d, tff.data(), pv?qd.data():nullptr, pv?dqd.data():nullptr, dt, TAU_SCALE); }   // TAU_SCALE·mj_step 포함
+    if(slog){ double* q=&d->qpos[3];
+      double pitch=std::asin(std::max(-1.0,std::min(1.0,2*(q[0]*q[2]-q[3]*q[1]))));
+      double roll=std::atan2(2*(q[0]*q[1]+q[2]*q[3]),1-2*(q[1]*q[1]+q[2]*q[2]));
+      std::fprintf(slog,"%.4f,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f,%d",i*dt,d->qpos[2],roll*57.29578,pitch*57.29578,
+                   d->qvel[3]*57.29578,d->qvel[4]*57.29578,d->qvel[5]*57.29578,c.stance);
+      std::vector<double> qm(8),dqm(8); plant.sensor_joint(d,qm.data(),dqm.data());
+      for(int j=0;j<m->nu;j++) std::fprintf(slog,",%.3f",qm[j]*57.29578);
+      for(int j=0;j<m->nu;j++) std::fprintf(slog,",%.3f",d->qpos[7+j]*57.29578);
+      for(int j=0;j<m->nu;j++) std::fprintf(slog,",%.2f",dqm[j]*57.29578);
+      for(int j=0;j<m->nu;j++) std::fprintf(slog,",%.2f",d->qvel[6+j]*57.29578);
+      for(int j=0;j<m->nu;j++) std::fprintf(slog,",%.3f",plant.drv_out[j]);
+      for(int j=0;j<m->nu;j++) std::fprintf(slog,",%.3f",plant.ff_out[j]);
+      std::fprintf(slog,",%d\n",falls); }
     if(qlog && i%qdec==0){                  // 재생용 궤적(데시메이션)
       std::fprintf(qlog, "%.4f", i*dt);
       for(int j=0;j<m->nq;j++) std::fprintf(qlog, " %.6f", d->qpos[j]);
@@ -144,7 +177,7 @@ int main(int argc,char**argv){
     }
     if(est_ctrl){                                           // 낙상 자동리셋 + 카운트(장시간 통계)
       if(d->qpos[2]<0.2 || tilt_deg(&d->qpos[3])>45){
-        c.reset(); c.vx_cmd=vx; dl.reset(m,d); falls++;
+        c.reset(); c.vx_cmd=vx; dl.reset(m,d); plant.reset(d); falls++;
       }
     } else if(d->qpos[2]<0.15 || tilt_deg(&d->qpos[3])>45){ fell=i*dt; break; }
     // ★tilt 판정 추가(2026-08-05). 기존엔 base 높이만 봐서 **기울어진 채 버티는 것을
@@ -190,6 +223,7 @@ int main(int argc,char**argv){
     else
       std::printf("  ⚠지면반력 0 — 접촉이 없다(공중이거나 낙상). 토크값도 의미 없다.\n");
   }
+  if(slog) std::fclose(slog);
   if(qlog){ std::fclose(qlog); std::printf("[sim] 궤적 기록 완료 → %s\n", getenv("QPOS_LOG")); }
   mj_deleteData(d); mj_deleteModel(m); return 0;
 }

@@ -6,6 +6,7 @@
 #include <mujoco/mujoco.h>
 #include "biped_control.hpp"
 #include "state_estimator.hpp"
+#include "sim_plant.hpp"
 #include <Eigen/Dense>
 #include <deque>
 #include <vector>
@@ -25,6 +26,12 @@ struct DeployLoop {
   //   노이즈 강건성은 여러 실현에서 봐야 하므로 SEED 로 바꿀 수 있게 한다.
   std::mt19937 rng{0}; std::normal_distribution<double> nd{0.0,1.0};
   std::deque<std::vector<double>> sbuf, abuf;   // 센서 스냅샷 / 구동 토크 링버퍼
+  // ★2026-10-06 실기 유사 플랜트(sim_plant.hpp) 연동.
+  //   plant 가 있으면 관절 센서를 **모터측**(탄성 앞)에서 읽고, 제어기 KinWBC 목표(q_des·q̇_des)를
+  //   토크와 **같은 구동 지연**으로 늦춰 pd_* 로 내보낸다(드라이버 추종 PD 입력). 없으면 종전과 같다.
+  const SimPlant* plant=nullptr;
+  std::deque<std::vector<double>> pbuf;
+  std::vector<double> pd_q, pd_dq; bool pd_valid=false;
 
   ~DeployLoop(){ if(dpred) mj_deleteData(dpred); }
   void init(mjModel* m, BipedControl& c){
@@ -53,14 +60,15 @@ struct DeployLoop {
     if(LCOMP>0 && !kin) dpred=mj_makeData(m);   // kin 이면 dpred 없이 외삽 분기로 간다
   }
   void reset(mjModel* m, mjData* d){
-    est.reset(Eigen::Vector3d(d->qpos[0],d->qpos[1],d->qpos[2])); sbuf.clear(); abuf.clear();
+    est.reset(Eigen::Vector3d(d->qpos[0],d->qpos[1],d->qpos[2])); sbuf.clear(); abuf.clear(); pbuf.clear(); pd_valid=false;
   }
 
   // d->ctrl 를 (지연·추정·보상 반영) 세팅. 호출자가 이어서 mj_step. 물리 d는 불변(주입 후 복원).
   void step(mjModel* m, mjData* d, BipedControl& c, double dt){
     // ① 센서 스냅샷(현재)  [q(NJ)|dq(NJ)|quat(4)|gyro(3)]
     std::vector<double> snap(2*NJ+7);
-    for(int j=0;j<NJ;j++){ snap[j]=d->qpos[7+j]; snap[NJ+j]=d->qvel[6+j]; }
+    if(plant) plant->sensor_joint(d, &snap[0], &snap[NJ]);          // 모터측 엔코더(탄성 앞)
+    else for(int j=0;j<NJ;j++){ snap[j]=d->qpos[7+j]; snap[NJ+j]=d->qvel[6+j]; }
     double* qs = sq>=0? &d->sensordata[m->sensor_adr[sq]] : &d->qpos[3];
     double* gs = sg>=0? &d->sensordata[m->sensor_adr[sg]] : &d->qvel[3];
     for(int a=0;a<4;a++) snap[2*NJ+a]=qs[a];
@@ -125,6 +133,11 @@ struct DeployLoop {
     abuf.push_back(tau);
     while((int)abuf.size()>ALAT+1) abuf.pop_front();
     std::vector<double> ta=abuf.front();
+    { std::vector<double> pv(2*NJ+1,0.0);           // 계획 목표도 같은 구동 지연
+      for(int j=0;j<NJ && j<8;j++){ pv[j]=c.mit_qdes[j]; pv[NJ+j]=c.mit_dqdes[j]; } pv[2*NJ]=c.mit_valid?1.0:0.0;
+      pbuf.push_back(pv); while((int)pbuf.size()>ALAT+1) pbuf.pop_front();
+      const std::vector<double>& pf=pbuf.front();
+      pd_q.assign(pf.begin(),pf.begin()+NJ); pd_dq.assign(pf.begin()+NJ,pf.begin()+2*NJ); pd_valid=pf[2*NJ]>0.5; }
     for(int i=0;i<m->nq;i++) d->qpos[i]=gp[i];
     for(int i=0;i<m->nv;i++) d->qvel[i]=gv[i];
     mj_forward(m,d);
