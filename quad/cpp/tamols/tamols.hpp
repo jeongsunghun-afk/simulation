@@ -47,6 +47,10 @@ struct GaitPhase {
   double duration;                 // phase 길이 [s]
   std::array<int, 4> contact;      // 1=stance, 0=swing (FL,FR,RL,RR)
   std::array<int, 4> at_des{0,0,0,0}; // 1=발이 목표위치 도달(kinematic reach 제약 적용 대상)
+  // ★다중 사이클(N>1): 이 phase 에서 다리 L 이 쓰는 발판이 **몇 번째 사이클** 것인가.
+  //   −1 = 아직 안 디딤 → p_meas(구 측정 발판) · n≥0 → 사이클 n 발판.
+  //   −2(기본) = "at_des 로부터 유도"(=단일 사이클 레거시: at_des?0:−1) → N=1 이면 완전 동일.
+  std::array<int, 4> foot_idx{-2,-2,-2,-2};
 };
 
 // ── TAMOLS 상태 (결정변수 + 초기조건 + 지형) ──
@@ -56,7 +60,11 @@ struct TamolsState {
 
   // 결정변수 (Drake: spline_coeffs, p, epsilon)
   std::vector<MatrixXd> a;   // a[phase] = (base_dims × spline_order) 스플라인 계수. col(i)=τ^i 계수(6벡터)
-  Eigen::Matrix<double, 4, 3> p;               // 발판 (world, 로봇중심 프레임)
+  Eigen::Matrix<double, 4, 3> p;               // 발판 (world, 로봇중심 프레임) — **사이클 0**
+  // ★다중스텝 호라이즌(2026-09): 사이클 1..N−1 의 발판. 비어 있으면 N=1 = 기존과 완전 동일.
+  //   같은 다리의 연속 두 발판(p / p_ext[0])이 **한 문제 안에** 들어와야 사이클 간 결합이 생긴다.
+  std::vector<Eigen::Matrix<double, 4, 3>> p_ext;
+  std::vector<int> cyc_end;                    // 각 사이클의 마지막 phase(비면 {P−1} = 단일 사이클)
   Eigen::VectorXd epsilon;                     // phase별 GIAC slack
 
   // 초기조건 (Drake: base_pose, base_vel, p_meas)
@@ -66,6 +74,22 @@ struct TamolsState {
   Vector3d ref_vel   = Vector3d(0.4, 0, 0);    // 명령 속도
 
   int num_phases() const { return (int)gait.size(); }
+  int ncyc() const { return 1 + (int)p_ext.size(); }                  // 호라이즌 사이클 수 N
+  int cyc_end_phase(int n) const { return cyc_end.empty() ? num_phases() - 1 : cyc_end[n]; }
+  // 사이클 n·다리 L 의 발판(결정변수)
+  Vector3d fpos(int n, int L) const {
+    return n <= 0 ? Vector3d(p.row(L).transpose()) : Vector3d(p_ext[n - 1].row(L).transpose());
+  }
+  // phase k 에서 다리 L 이 쓰는 발판의 출처: −1=p_meas, n≥0=사이클 n (−2=at_des 유도)
+  int fsrc(int k, int L) const {
+    int f = gait[k].foot_idx[L];
+    return f == -2 ? (gait[k].at_des[L] ? 0 : -1) : f;
+  }
+  // phase k·다리 L 의 실제 발 위치
+  Vector3d foot_at(int k, int L) const {
+    int n = fsrc(k, L);
+    return n < 0 ? Vector3d(p_meas.row(L).transpose()) : fpos(n, L);
+  }
 
   // ── 스플라인 평가 (Drake helpers.py 정합) ──
   //   pos(τ) = Σ_{i=0}^{order-1} a.col(i) · τ^i

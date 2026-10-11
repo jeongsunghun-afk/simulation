@@ -6,6 +6,10 @@
 #include <fstream>
 #include <cmath>
 #include <algorithm>
+#include <vector>
+#include <utility>
+#include <functional>
+#include <cstdlib>
 
 namespace tamols {
 
@@ -82,7 +86,21 @@ inline double friction_residual(const TamolsState& st) {
   return e;
 }
 
+// ── ★스탠스 발 reach 게이트 (2026-09, 사이클 간 결합) ──────────────────────────
+//   STANCE_REACH : **구 발판(p_meas) 위에 서 있는 다리**에도 reach 제약을 건다. 기본 OFF(=기존과 바이트 동일).
+//     기존 reach 는 at_des(=이번 사이클에 새로 놓는 발판) 다리에만 걸려 있어, 지면에 박혀 있는 구 발판이
+//     base 전진을 전혀 막지 못했다 → 직전 사이클 발판이 다음 사이클 도달범위에 영향 0(결합 부재).
+//     ON: 각 phase τ 샘플에서 l_min² ≤ |base(τ)+R_B(τ)·hip − p_meas|² ≤ l_max².
+//   ※ 샘플 s=1..S (τ∈(0,Tk]) — τ=0(phase0)은 초기조건 등식으로 **고정**이라 위반해도 원리적으로 못 고침.
+//      phase k>0 의 τ=0 은 phase k−1 의 τ=Tk 와 같은 점이므로 연속성으로 이미 덮인다.
+inline bool stance_reach_on() { const char* v = std::getenv("STANCE_REACH"); return v && v[0] != '0'; }
+//   "구 발판 위 스탠스" = 접촉 중이면서 아직 새 발판으로 안 옮긴 다리
+inline bool is_stance_meas(const GaitPhase& g, int L) { return g.contact[L] && !g.at_des[L]; }
+//   다중 사이클(N>1) 정합판: 아직 한 번도 안 디딘(=p_meas) 접촉 다리
+inline bool is_stance_meas(const TamolsState& st, int k, int L) { return st.gait[k].contact[L] && st.fsrc(k, L) < 0; }
+
 // ── kinematic reach (Drake): at_des_position 다리서 l_min²≤|base+R_B·hip−foot|²≤l_max² ──
+//   (+ STANCE_REACH 시 구 발판 스탠스 다리도)
 inline double kinematic_residual(const TamolsState& st) {
   double e = 0;
   const int S = 6;
@@ -90,20 +108,75 @@ inline double kinematic_residual(const TamolsState& st) {
   for (int k = 0; k < st.num_phases(); ++k) {
     double Tk = st.gait[k].duration;
     for (int L = 0; L < 4; ++L) {
-      if (!st.gait[k].at_des[L]) continue;                 // at_des_position 다리만
+      if (st.fsrc(k, L) < 0) continue;                     // at_des(=이미 디딘 발판) 다리만
       for (int s = 0; s < S; ++s) {
         double tau = Tk * (double)s / (double)S;
         Vector6d pose = st.pos_at(k, tau);
         Vector3d base = pose.head<3>();
         Eigen::Matrix3d R = R_B(pose.tail<3>());
-        Vector3d diff = base + R * st.prm.hip_offsets.row(L).transpose() - st.p.row(L).transpose();
+        Vector3d diff = base + R * st.prm.hip_offsets.row(L).transpose() - st.foot_at(k, L);
         double total = diff.dot(diff);
         e = std::max(e, std::max(0.0, lo - total));        // ≥ l_min² 위반
         e = std::max(e, std::max(0.0, total - hi));        // ≤ l_max² 위반
       }
     }
   }
+  // ★스탠스(구 발판 p_meas) reach — 게이트 OFF 면 이 블록 전체가 no-op
+  if (stance_reach_on()) {
+    for (int k = 0; k < st.num_phases(); ++k) {
+      double Tk = st.gait[k].duration;
+      for (int L = 0; L < 4; ++L) {
+        if (!is_stance_meas(st, k, L)) continue;
+        for (int s = 1; s <= S; ++s) {
+          double tau = Tk * (double)s / (double)S;
+          Vector6d pose = st.pos_at(k, tau);
+          Vector3d diff = pose.head<3>() + R_B(pose.tail<3>()) * st.prm.hip_offsets.row(L).transpose()
+                        - st.p_meas.row(L).transpose();
+          double total = diff.dot(diff);
+          e = std::max(e, std::max(0.0, lo - total));
+          e = std::max(e, std::max(0.0, total - hi));
+        }
+      }
+    }
+  }
   return e;
+}
+
+// ── ★GIAC 게이트 (2026-09, 능력검증) ────────────────────────────────────────────
+//   GIAC_FIX  : 중력항(aG = aB − g)을 GIAC 식에 포함. **기본 ON**. `GIAC_FIX=0`으로만 끔.
+//               off면 정지자세서 aB≈0 → 17a/17b가 항등적으로 만족 = GIAC 기전 자체가 없음.
+//   GIAC_ORDER: 접촉쌍을 **지지폴리곤 CW 인접쌍**으로 (기본 ON, GIAC_FIX 종속).
+//               레거시(Drake)는 인덱스순 모든 쌍 (i<j) 인데, 그 반평면 교집합은 지지다각형이 아님.
+//               예) stance{FR,RL,RR}(Go2 walk), 중력항 포함 시 레거시 조건의 해집합은
+//               {px ≤ −0.1934, py ≥ +0.142} = 뒷발보다 뒤·왼쪽 = 지지삼각형 바깥.
+//               det(p_ij, p_B−p_i, (0,0,g)) = g·cross_z(p_j−p_i, p_B−p_i) 이므로
+//               "≤ eps" 형태는 **CW 정렬 인접쌍**일 때 정확히 "p_B ∈ 지지다각형"이 된다.
+inline bool giac_fix_on()   { const char* v = std::getenv("GIAC_FIX");   return !(v && v[0] == '0'); }
+inline bool giac_order_on() { const char* v = std::getenv("GIAC_ORDER"); return giac_fix_on() && !(v && v[0] == '0'); }
+
+// stance 발 인덱스 → GIAC 제약 쌍 목록. ordered=false: 레거시 인덱스순 모든 쌍(Drake 정합).
+//   ordered=true: 발 xy를 centroid 기준 각도 내림차순(=CW) 정렬 후 인접쌍(wrap 포함) → n쌍.
+//   ※ N=3이면 쌍 개수는 3으로 동일(행수 불변), N=4면 6→4.
+inline std::vector<std::pair<int,int>> giac_pairs(const std::vector<int>& stance,
+                                                  const std::function<Vector3d(int)>& foot,
+                                                  bool ordered) {
+  std::vector<std::pair<int,int>> out;
+  const int n = (int)stance.size();
+  if (n < 3) return out;
+  if (!ordered) {
+    for (int x = 0; x < n; ++x) for (int y = x + 1; y < n; ++y) out.emplace_back(stance[x], stance[y]);
+    return out;
+  }
+  double cx = 0, cy = 0;
+  for (int i : stance) { Vector3d f = foot(i); cx += f(0); cy += f(1); }
+  cx /= n; cy /= n;
+  std::vector<std::pair<double,int>> ang;
+  ang.reserve(n);
+  for (int i : stance) { Vector3d f = foot(i); ang.emplace_back(std::atan2(f(1) - cy, f(0) - cx), i); }
+  std::sort(ang.begin(), ang.end(), [](const std::pair<double,int>& a, const std::pair<double,int>& b) {
+    return a.first != b.first ? a.first > b.first : a.second < b.second; });   // 내림차순 = CW
+  for (int k = 0; k < n; ++k) out.emplace_back(ang[k].second, ang[(k + 1) % n].second);
+  return out;
 }
 
 // ── 스칼라 삼중곱 det([a b c]) = a·(b×c) (Drake determinant) ──
@@ -126,30 +199,29 @@ inline double giac_residual(const TamolsState& st) {
     int N = (int)stance.size();
     double eps = (k < st.epsilon.size()) ? st.epsilon(k) : 0.0;
     e = std::max(e, std::max(0.0, -eps));                       // eps ≥ 0
-    auto foot = [&](int i) -> Vector3d {
-      return st.gait[k].at_des[i] ? Vector3d(st.p.row(i).transpose())
-                                  : Vector3d(st.p_meas.row(i).transpose());
-    };
+    auto foot = [&](int i) -> Vector3d { return st.foot_at(k, i); };
+    const bool _gfix = giac_fix_on();
+    auto prs = giac_pairs(stance, foot, giac_order_on());
     for (int s = 0; s < S; ++s) {
       double tau = Tk * (double)s / (double)S;
       Vector3d pB = st.pos_at(k, tau).head<3>();
       Vector3d aB = st.acc_at(k, tau).head<3>();
+      Vector3d aG = _gfix ? Vector3d(aB - gvec) : aB;            // ★중력 포함(GIAC 본래정의)
       Vector3d Ld = st.Ldot_at(k, tau);
       if (N > 0) {                                              // 17a: (μ a_z)²−a_x²−a_y² ≥ 0
-        double lhs = (mu * aB(2)) * (mu * aB(2)) - aB(0) * aB(0) - aB(1) * aB(1);
+        double lhs = (mu * aG(2)) * (mu * aG(2)) - aG(0) * aG(0) - aG(1) * aG(1);
         e = std::max(e, std::max(0.0, -lhs));
       }
       if (N >= 3) {                                             // 17b: 접촉쌍
-        for (size_t x = 0; x < stance.size(); ++x)
-          for (size_t y = x + 1; y < stance.size(); ++y) {
-            Vector3d pi = foot(stance[x]), pj = foot(stance[y]), pij = pj - pi;
-            double lhs = m * det3(pij, pB - pi, aB) - pij.dot(Ld);
-            e = std::max(e, std::max(0.0, lhs - eps));
-          }
+        for (const auto& pr : prs) {
+          Vector3d pi = foot(pr.first), pj = foot(pr.second), pij = pj - pi;
+          double lhs = m * det3(pij, pB - pi, aG) - pij.dot(Ld);
+          e = std::max(e, std::max(0.0, lhs - eps));
+        }
       }
       if (N == 2) {                                             // 17c,d: 이중지지
         Vector3d pi = foot(stance[0]), pj = foot(stance[1]), pij = pj - pi;
-        double val = m * det3(pij, pB - pi, aB) - pij.dot(Ld);
+        double val = m * det3(pij, pB - pi, aG) - pij.dot(Ld);
         e = std::max(e, std::max(0.0, val - eps));              // 17c: |val| ≤ eps
         e = std::max(e, std::max(0.0, -val - eps));
         Vector3d Mi = (pB - pi).cross(gvec - aB) - Ld / m;      // 17d

@@ -156,6 +156,10 @@ static const int SWING_ORDER[4] = {3, 1, 2, 0};          // walk 위상순: RR,F
 static const int SWING_PHASE[4] = {3, 1, 2, 0};          // leg → swing phase idx (FL=3,FR=1,RL=2,RR=0)
 
 int main(int argc, char** argv) {
+  // ★2026-09: GIAC_FIX(중력항)·GIAC_ORDER(CW 인접쌍)가 솔버 기본 ON으로 바뀜.
+  //   이 오프라인 캐시 생성기의 출력은 이미 배포된 아티팩트라 **레거시 동작으로 고정**한다.
+  //   (GIAC_FIX=1 로 실행하려면 이 두 줄을 지울 것)
+  if (!getenv("TAMOLS_ALLOW_GIAC")) { setenv("GIAC_FIX", "0", 1); setenv("GIAC_ORDER", "0", 1); }
   // 결정적 동작: 솔버 경로를 바꾸는 env 전부 클리어(해석 jacobian 정합 포함)
   for (const char* e : {"COM_W","COM_WX","COM_LEAD","GIAC_FIX","W_EPS","EPS_MAX","BASE_YBND",
                         "WALK_QLEG","TAM_WNOM","TAM_PRM_MODEL"}) unsetenv(e);

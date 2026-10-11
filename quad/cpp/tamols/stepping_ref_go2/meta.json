@@ -1,0 +1,19 @@
+{
+  "kind": "stepping_stone_tamols_ref", "model": "go2", "gait": "walk(RR,FR,RL,FL) at_des accumulated",
+  "axes": ["vx", "level", "phase_x", "phase_y"],
+  "axis_rationale": "stepping grid is PERIODIC with period pitch(level) in x and y; the local phase within one pitch is the exact analogue of the gap cache's gapd axis. level stays an independent axis because it sets the ABSOLUTE pitch and the size/pitch duty, which a fixed-length leg cannot normalise away.",
+  "n_vx": 3, "n_level": 10, "n_phase_x": 8, "n_phase_y": 8, "n_t": 9,
+  "vx_vals": [0.27, 0.35, 0.43],
+  "phase_def": "phase_x = frac((base_x - cx0)/pitch), cx0 = 0.75 + 0.5*pitch; phase_y = frac((base_y - lane_y - cy0)/pitch), cy0 = -0.5*(ny-1)*pitch. Bin i centre = (i + 0.5)/n.",
+  "footholds_shape": [3, 10, 8, 8, 4, 3],
+  "baseref_shape": [3, 10, 8, 8, 9, 6],
+  "foot_order": ["FL","FR","RL","RR"],
+  "frame": "yaw-aligned base anchor: xy relative to base, foothold z relative to local ground (mean stone top); baseref = (x, y, z_rel_ground, vx, vy, vz), world = base_xy + Rz(yaw)*xy.",
+  "horizon_s": 0.8, "phase_dur": 0.2, "base_h": 0.34, "cell": 0.02, "window_N": 101,
+  "solver_gates": {"GIAC_FIX": 1, "GIAC_ORDER": 1, "STANCE_REACH": 1, "TERRAIN_HARD": 1,
+     "GIAC_NORM": 0, "GIAC_NORM_note": "eps normalisation gate left OFF: measured eps share of the objective is 3.8% under the 3-foot WALK stance this cache uses (55.7% under a 2-foot trot stance, which is the degenerate-support case), eps=0.000 at every converged t1-t4 solution, and normalisation makes eps CHEAPER (residual/11.9 with W_EPS fixed => 141x weaker), not tighter.",
+     "TERRAIN_R": 0.25, "TERRAIN_DZ": 0.06, "TERRAIN_BAND": 0.01, "TERRAIN_MARGIN": 0.025},
+  "solver_gates_note": "generated with the FIXED solver -- unlike cache_gen*.cpp which pin GIAC_FIX=0/GIAC_ORDER=0 for artifact reproducibility.",
+  "limits": "lattice periodicity holds in the FIELD INTERIOR only; the spawn-strip boundary and the corridor end are not represented (same class of approximation as the gap cache ignoring multi-gap interaction).",
+  "levels_merged": 10, "cells_feasible": 1730, "cells_total": 1920
+}
